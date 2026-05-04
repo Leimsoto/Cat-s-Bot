@@ -46,7 +46,7 @@ intents.presences = True
 
 # ── Bot ───────────────────────────────────────────────────────────────────────
 
-class TortuguBot(commands.Bot):
+class BotES(commands.Bot):
     """
     Bot principal.
     - Usa commands.Bot para soporte nativo de cogs y app_commands.
@@ -125,6 +125,7 @@ class TortuguBot(commands.Bot):
             "cogs.reports",
             "cogs.scheduler",
             "cogs.levels",
+            "cogs.voice_gen",
         ]
         for cog in cogs:
             try:
@@ -141,7 +142,7 @@ class TortuguBot(commands.Bot):
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
-                name="el servidor 🐢",
+                name="el servidor 🇪🇸",
             )
         )
 
@@ -187,8 +188,8 @@ def main() -> None:
         logger.critical("TOKEN no encontrado en el archivo .env")
         raise SystemExit(1)
 
-    bot = TortuguBot()
-    iniciar_api(db=bot.db)
+    bot = BotES()
+    iniciar_api(db=bot.db, bot=bot)
 
     try:
         bot.run(token, log_handler=None)  # log_handler=None para usar nuestro logging

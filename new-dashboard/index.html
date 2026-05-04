@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Panel — Bot ES</title>
+    <meta name="description" content="Panel de control y administración del Bot ES para Discord" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,700;1,9..40,400&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  </head>
+  <body>
+    <!-- SVG Liquid Glass Filter (kube.io technique) — oculto, referenciado por CSS -->
+    <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute;pointer-events:none;overflow:hidden">
+      <defs>
+        <filter id="liquid-glass-filter" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
+          <!-- Desenfoque suave de la fuente para el mapa de desplazamiento -->
+          <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blurred" />
+          <!-- Canal de turbulencia para refracción orgánica -->
+          <feTurbulence type="fractalNoise" baseFrequency="0.018 0.022" numOctaves="3" seed="5" result="noise" />
+          <!-- Mapa de desplazamiento: la turbulencia distorsiona el fondo -->
+          <feDisplacementMap in="blurred" in2="noise" scale="6" xChannelSelector="R" yChannelSelector="G" result="displaced" />
+          <!-- Combina con el original para preservar nitidez del contenido -->
+          <feComposite in="displaced" in2="SourceGraphic" operator="atop" />
+        </filter>
+        <!-- Versión sutil para stat cards y elementos pequeños -->
+        <filter id="liquid-glass-sm" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
+          <feTurbulence type="fractalNoise" baseFrequency="0.025 0.030" numOctaves="2" seed="8" result="noise" />
+          <feDisplacementMap in="SourceGraphic" in2="noise" scale="3" xChannelSelector="R" yChannelSelector="G" />
+        </filter>
+      </defs>
+    </svg>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

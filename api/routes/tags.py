@@ -12,7 +12,7 @@ DELETE /api/guild/{guild_id}/tags/{name}    → eliminar tag
 from fastapi import APIRouter, Depends, HTTPException, status
 from api.deps import get_db, require_guild_admin
 
-router = APIRouter(prefix="/api/guild/{guild_id}/tags", tags=["tags"])
+router = APIRouter(prefix="/api/guilds/{guild_id}/tags", tags=["tags"])
 
 
 @router.get("")

@@ -51,7 +51,7 @@ VALID_SERVER_CONFIG_COLUMNS = frozenset({
 VALID_AI_CONFIG_COLUMNS = frozenset({
     "guild_id", "ai_channel_id", "ai_role_id", "ai_model",
     "ai_system_prompt", "ai_limit_requests", "ai_limit_hours",
-    "ai_imagine_enabled",
+    "ai_imagine_enabled", "ai_webhook_name", "ai_webhook_icon",
 })
 
 VALID_TICKET_COLUMNS = frozenset({
@@ -138,7 +138,9 @@ CREATE TABLE IF NOT EXISTS ai_config (
     ai_system_prompt    TEXT,
     ai_limit_requests   INTEGER DEFAULT 50,
     ai_limit_hours      INTEGER DEFAULT 12,
-    ai_imagine_enabled  INTEGER DEFAULT 1
+    ai_imagine_enabled  INTEGER DEFAULT 1,
+    ai_webhook_name     TEXT,
+    ai_webhook_icon     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS appeals (
@@ -453,7 +455,9 @@ CREATE TABLE IF NOT EXISTS ai_config (
     ai_system_prompt    TEXT,
     ai_limit_requests   INTEGER DEFAULT 50,
     ai_limit_hours      INTEGER DEFAULT 12,
-    ai_imagine_enabled  SMALLINT DEFAULT 1
+    ai_imagine_enabled  SMALLINT DEFAULT 1,
+    ai_webhook_name     TEXT,
+    ai_webhook_icon     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS appeals (
@@ -770,7 +774,9 @@ CREATE TABLE IF NOT EXISTS ai_config (
     ai_system_prompt    TEXT,
     ai_limit_requests   INT         DEFAULT 50,
     ai_limit_hours      INT         DEFAULT 12,
-    ai_imagine_enabled  TINYINT     DEFAULT 1
+    ai_imagine_enabled  TINYINT     DEFAULT 1,
+    ai_webhook_name     TEXT,
+    ai_webhook_icon     TEXT
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS appeals (
@@ -1256,10 +1262,15 @@ class DatabaseManager:
                     )
                     if exists and exists.get("c", 0):
                         continue
+                else:
+                    # SQLite: verificar con PRAGMA antes de alterar
+                    cols = self._fetchall("PRAGMA table_info(ai_config)", ())
+                    if any(r["name"] == col for r in cols):
+                        continue
                 self._execute(f"ALTER TABLE ai_config ADD COLUMN {col} {col_def}", ())
                 logger.info(f"Migración ai_config: columna '{col}' añadida.")
             except Exception:
-                pass  # Columna ya existe o error ignorable
+                pass  # Seguridad extra para otros motores
 
     # ── Sistema de Migraciones ──────────────────────────────────────────────
 
@@ -1649,6 +1660,8 @@ class DatabaseManager:
         "ai_limit_requests":  50,
         "ai_limit_hours":     12,
         "ai_imagine_enabled": 1,
+        "ai_webhook_name":    None,
+        "ai_webhook_icon":    None,
     }
 
     def get_ai_config(self, guild_id: int) -> Dict:
@@ -2296,3 +2309,90 @@ class DatabaseManager:
             new_val = str(amount)
         self.set_cc_variable(guild_id, key, new_val, scope)
         return new_val
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # VOICE GEN — Generador dinámico de canales de voz (Join To Create)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _ensure_voice_gen_tables(self) -> None:
+        """Crea las tablas de VoiceGen si no existen."""
+        self._execute("""
+            CREATE TABLE IF NOT EXISTS voice_gen_config (
+                guild_id            INTEGER PRIMARY KEY,
+                generator_channel_id INTEGER,
+                category_id         INTEGER,
+                panel_channel_id    INTEGER,
+                name_template       TEXT    DEFAULT '{username}''s VC',
+                default_limit       INTEGER DEFAULT 0,
+                enabled             INTEGER DEFAULT 0
+            )
+        """)
+        self._execute("""
+            CREATE TABLE IF NOT EXISTS voice_gen_channels (
+                channel_id   INTEGER PRIMARY KEY,
+                guild_id     INTEGER NOT NULL,
+                owner_id     INTEGER NOT NULL,
+                created_at   INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+        """)
+
+    def get_voice_gen_config(self, guild_id: int) -> Dict:
+        """Retorna la configuración del generador de voz de un servidor."""
+        self._ensure_voice_gen_tables()
+        row = self._fetchone(
+            "SELECT * FROM voice_gen_config WHERE guild_id = ?", (guild_id,)
+        )
+        return dict(row) if row else {
+            "guild_id": guild_id, "generator_channel_id": None, "category_id": None,
+            "panel_channel_id": None, "name_template": "{username}'s VC",
+            "default_limit": 0, "enabled": 0,
+        }
+
+    def set_voice_gen_config(self, guild_id: int, **kwargs) -> None:
+        """Crea o actualiza la configuración del generador de voz."""
+        self._ensure_voice_gen_tables()
+        self._upsert_config("voice_gen_config", guild_id, **kwargs)
+
+    def create_voice_gen_channel(self, channel_id: int, guild_id: int, owner_id: int) -> None:
+        """Registra un canal de voz generado."""
+        self._ensure_voice_gen_tables()
+        self._execute(
+            "INSERT OR REPLACE INTO voice_gen_channels (channel_id, guild_id, owner_id) VALUES (?, ?, ?)",
+            (channel_id, guild_id, owner_id),
+        )
+
+    def get_voice_gen_channel(self, channel_id: int) -> Optional[Dict]:
+        """Retorna un canal generado por su ID, o None si no existe."""
+        self._ensure_voice_gen_tables()
+        row = self._fetchone(
+            "SELECT * FROM voice_gen_channels WHERE channel_id = ?", (channel_id,)
+        )
+        return dict(row) if row else None
+
+    def get_all_voice_gen_channels(self) -> List[Dict]:
+        """Retorna todos los canales generados activos."""
+        self._ensure_voice_gen_tables()
+        return self._fetchall("SELECT * FROM voice_gen_channels")
+
+    def get_voice_gen_channels_by_guild(self, guild_id: int) -> List[Dict]:
+        """Retorna los canales generados de un servidor."""
+        self._ensure_voice_gen_tables()
+        return self._fetchall(
+            "SELECT * FROM voice_gen_channels WHERE guild_id = ? ORDER BY created_at DESC",
+            (guild_id,),
+        )
+
+    def update_voice_gen_channel_owner(self, channel_id: int, new_owner_id: int) -> None:
+        """Cambia el dueño de un canal generado."""
+        self._ensure_voice_gen_tables()
+        self._execute(
+            "UPDATE voice_gen_channels SET owner_id = ? WHERE channel_id = ?",
+            (new_owner_id, channel_id),
+        )
+
+    def delete_voice_gen_channel(self, channel_id: int) -> None:
+        """Elimina el registro de un canal generado."""
+        self._ensure_voice_gen_tables()
+        self._execute(
+            "DELETE FROM voice_gen_channels WHERE channel_id = ?", (channel_id,)
+        )

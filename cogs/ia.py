@@ -98,7 +98,7 @@ class SystemPromptModal(discord.ui.Modal, title="System Prompt de IA"):
     prompt = discord.ui.TextInput(
         label="Prompt del sistema",
         style=discord.TextStyle.long,
-        placeholder="Eres un asistente llamado TortuguBot...",
+        placeholder="Eres un asistente llamado Bot ES...",
         max_length=2000,
         required=False,
     )
@@ -328,7 +328,7 @@ class IA(commands.Cog):
         else:
             base = os.getenv(
                 "AI_SYSTEM_PROMPT",
-                "Eres un asistente amigable y útil llamado TortuguBot. "
+                "Eres un asistente amigable y útil llamado Bot ES. "
                 "Puedes analizar imágenes, documentos PDF, audio y vídeo que te compartan. "
                 "Si necesitas información actual usa Google Search.",
             )
@@ -556,15 +556,19 @@ class IA(commands.Cog):
 
     async def _send_via_webhook(self, channel: discord.TextChannel, text: str):
         try:
+            cfg = self.db.get_ai_config(channel.guild.id)
+            webhook_name = cfg.get("ai_webhook_name") or "Bot ES IA"
+            webhook_icon_url = cfg.get("ai_webhook_icon") or self.bot.user.display_avatar.url
+
             webhooks = await channel.webhooks()
-            wh = discord.utils.get(webhooks, name="TortuguBot_IA")
+            wh = discord.utils.get(webhooks, name="Bot_ES_IA")
             if not wh:
-                wh = await channel.create_webhook(name="TortuguBot_IA")
+                wh = await channel.create_webhook(name="Bot_ES_IA")
             for chunk in [text[i : i + 1900] for i in range(0, len(text), 1900)]:
                 await wh.send(
                     content=chunk,
-                    username="TortuguBot IA",
-                    avatar_url=self.bot.user.display_avatar.url,
+                    username=webhook_name,
+                    avatar_url=webhook_icon_url,
                 )
         except Exception as e:
             logger.error(f"Error enviando por webhook: {e}")
@@ -754,39 +758,8 @@ class IA(commands.Cog):
                 pass
 
     # ── Slash commands ─────────────────────────────────────────────────────────
-
-    @app_commands.command(name="iaconfig", description="Configura el módulo de Inteligencia Artificial")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def iaconfig(self, interaction: discord.Interaction):
-        if not self.client:
-            return await interaction.response.send_message(
-                "❌ API de Gemini no configurada (.env).", ephemeral=True
-            )
-        cfg   = self.db.get_ai_config(interaction.guild_id)
-        embed = self._build_ia_embed(interaction.guild, cfg)
-        view  = IAConfigView(self, interaction.guild_id)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-    @app_commands.command(
-        name="iasync",
-        description="Sincroniza y actualiza el contexto del servidor (canales, roles, emojis) para la IA",
-    )
-    @app_commands.checks.has_permissions(administrator=True)
-    async def iasync(self, interaction: discord.Interaction):
-        if not self.client:
-            return await interaction.response.send_message(
-                "❌ API de Gemini no configurada.", ephemeral=True
-            )
-        await interaction.response.defer(ephemeral=True)
-        g = interaction.guild
-        
-        # Forzamos la regeneración del contexto
-        ctx = self._generate_server_context(g)
-        self._server_contexts[g.id] = ctx
-        
-        await interaction.followup.send(
-            "✅ Contexto del servidor ampliado y sincronizado. La IA ahora conoce automáticamente los IDs de canales para mencionarlos, roles, emojis y más."
-        )
+    # Nota: /iaconfig e /iasync han sido eliminados.
+    # La configuración de IA se realiza desde el Dashboard Web → Módulo IA.
 
     @app_commands.command(name="ai_status", description="Métricas y estado del servicio IA")
     @app_commands.checks.has_permissions(administrator=True)

@@ -443,121 +443,48 @@ class Tickets(commands.Cog):
             if log_ch:
                 await log_ch.send(f"👥 **Usuario añadido:** {usuario.mention} fue añadido al ticket #{ticket['global_number']} por {interaction.user.mention}.")
 
-    # --- Setup Commands ---
-    ticket_group = app_commands.Group(
-        name="tickets",
-        description="Gestión de Tickets",
-        default_permissions=discord.Permissions(administrator=True),
-    )
+    # ── Comandos de configuración eliminados ──────────────────────────────────
+    # /tickets setup, /tickets panel_embed, /tickets category_add, /tickets panel
+    # → Usa el Dashboard Web → Módulo Tickets para toda la configuración.
+    #
+    # El comando /tickets panel (spawn) se gestiona desde el dashboard:
+    # selecciona el canal y pulsa "Enviar Panel" para enviarlo.
 
-    @ticket_group.command(name="setup", description="Configura los canales y roles del sistema de tickets")
-    @app_commands.describe(
-        categoria="Categoría de Discord donde se abrirán los canales",
-        logs="Canal de logs",
-        staff_role="Rol que puede ver y tomar tickets",
-        immune_role="Rol que puede gestionar tickets sin ser 'tomados' (admin/mod senior)",
-        template_nombre="Plantilla nombre canal (ej: ticket-{username}-{number})",
-        max_tickets="Máximo de tickets abiertos por usuario (0 = ilimitado)",
-        cooldown="Cooldown entre tickets, por ej: 30m, 1h, 2d (0 = sin espera)"
-    )
-    @app_commands.checks.has_permissions(administrator=True)
-    async def setup_tickets(self, interaction: discord.Interaction, categoria: discord.CategoryChannel,
-                            logs: discord.TextChannel, staff_role: discord.Role,
-                            immune_role: discord.Role = None,
-                            template_nombre: str = "⚒️{username}-{number}",
-                            max_tickets: int = 0, cooldown: str = "0"):
-        # Parsear cooldown
-        cooldown_secs = 0
-        if cooldown != "0":
-            units = {"m": 60, "h": 3600, "d": 86400}
-            unit = cooldown[-1].lower() if cooldown else "0"
-            try:
-                cooldown_secs = int(float(cooldown[:-1]) * units.get(unit, 1))
-            except (ValueError, IndexError):
-                cooldown_secs = 0
-
-        immune_roles = [immune_role.id] if immune_role else []
-        self.db.set_ticket_config(
-            interaction.guild_id,
-            category_id=categoria.id,
-            log_channel_id=logs.id,
-            allowed_roles=json.dumps([staff_role.id]),
-            immune_roles=json.dumps(immune_roles),
-            channel_name_template=template_nombre,
-            max_tickets_per_user=max_tickets,
-            ticket_cooldown_seconds=cooldown_secs,
-        )
-        parts = [
-            f"✅ Configuración guardada.",
-            f"- **Categoría:** {categoria.name}",
-            f"- **Logs:** {logs.mention}",
-            f"- **Staff:** {staff_role.name}",
-            f"- **Plantilla:** {template_nombre}",
-            f"- **Máx tickets/usuario:** {'Ilimitado' if not max_tickets else max_tickets}",
-            f"- **Cooldown:** {'Sin espera' if not cooldown_secs else cooldown}",
-        ]
-        await interaction.response.send_message("\n".join(parts), ephemeral=True)
-
-    @ticket_group.command(name="panel_embed", description="Configura el embed del panel de tickets (pasa el JSON del embed)")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def set_panel_embed(self, interaction: discord.Interaction, embed_json: str):
-        # Validar JSON
-        try:
-            from cogs.embeds import EmbedBuilder
-            json.loads(embed_json)
-            self.db.set_ticket_config(interaction.guild_id, panel_embed_data=embed_json)
-            await interaction.response.send_message("✅ Embed del panel actualizado correctamente.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ JSON inválido: {e}", ephemeral=True)
-
-    @ticket_group.command(name="category_add", description="Añade una nueva categoría de tickets")
-    @app_commands.describe(
-        preguntas="Separa las preguntas por comas",
-        welcome_embed_json="JSON del embed de bienvenida para esta categoría (opcional)"
-    )
-    @app_commands.checks.has_permissions(administrator=True)
-    async def add_cat(self, interaction: discord.Interaction, nombre: str, emoji: str, preguntas: str, welcome_embed_json: str = None):
-        questions_list = [q.strip() for q in preguntas.split(",")]
-        # Validar JSON si existe
-        if welcome_embed_json:
-            try:
-                json.loads(welcome_embed_json)
-            except Exception:
-                return await interaction.response.send_message("❌ JSON de bienvenida inválido.", ephemeral=True)
-                
-        self.db.add_ticket_category(
-            interaction.guild_id, 
-            nombre, emoji, 
-            json.dumps(questions_list), 
-            json.dumps(["Solucionado", "Cierre Administrativo", "Inactividad"]),
-            welcome_embed_json
-        )
-        await interaction.response.send_message(f"✅ Categoría **{nombre}** añadida.", ephemeral=True)
-
-    @ticket_group.command(name="panel", description="Envía el panel de tickets a este canal")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def spawn_panel(self, interaction: discord.Interaction):
-        categories = self.db.get_ticket_categories(interaction.guild_id)
+    # ── Enviar panel desde dashboard (endpoint en API) ────────────────────────
+    async def send_panel_to_channel(self, guild: discord.Guild, channel_id: int):
+        """Envía el panel de tickets a un canal. Llamado desde el endpoint API."""
+        categories = self.db.get_ticket_categories(guild.id)
         if not categories:
-            return await interaction.response.send_message("❌ No hay categorías creadas.", ephemeral=True)
-            
-        config = self.db.get_ticket_config(interaction.guild_id)
+            return False, "No hay categorías configuradas"
+
+        config = self.db.get_ticket_config(guild.id)
         panel_data = config.get("panel_embed_data")
-        
+
         if panel_data:
             try:
                 from cogs.embeds import EmbedBuilder
-                builder = EmbedBuilder.from_json(panel_data)
-                embed = builder.build()
+                embed = EmbedBuilder.from_json(panel_data).build()
             except Exception:
-                embed = discord.Embed(title="Soporte y Contacto", description="Selecciona una categoría para abrir un ticket.", color=discord.Color.green())
+                embed = discord.Embed(
+                    title="Soporte y Contacto",
+                    description="Selecciona una categoría para abrir un ticket.",
+                    color=discord.Color.green()
+                )
         else:
-            embed = discord.Embed(title="Soporte y Contacto", description="Selecciona una categoría para abrir un ticket.", color=discord.Color.green())
-            
+            embed = discord.Embed(
+                title="Soporte y Contacto",
+                description="Selecciona una categoría para abrir un ticket.",
+                color=discord.Color.green()
+            )
+
+        channel = guild.get_channel(channel_id)
+        if not channel or not isinstance(channel, discord.TextChannel):
+            return False, "Canal no encontrado"
+
         view = TicketPanelView(self, categories)
-        await interaction.channel.send(embed=embed, view=view)
-        await interaction.response.send_message("Panel enviado.", ephemeral=True)
-        self.db.set_ticket_config(interaction.guild_id, panel_channel_id=interaction.channel.id)
+        await channel.send(embed=embed, view=view)
+        self.db.set_ticket_config(guild.id, panel_channel_id=channel_id)
+        return True, "Panel enviado correctamente"
 
 async def setup(bot: commands.Bot):
     cog = Tickets(bot)

@@ -1,10 +1,11 @@
 """
 api/deps.py
 ───────────
-Dependencias compartidas para los endpoints:
-  • get_db()  — Inyecta la instancia de DatabaseManager
-  • get_current_user() — Extrae y valida el usuario del token JWT (placeholder)
-  • require_guild_admin() — Verifica que el usuario es admin/owner del guild
+Dependencias compartidas:
+  • get_db()                     — Inyecta DatabaseManager
+  • get_current_user()           — JWT desde Bearer header o cookie
+  • get_current_user_from_request() — Para uso directo con Request
+  • require_guild_admin()        — Verifica admin/owner del guild
 """
 
 import os
@@ -15,115 +16,94 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 logger = logging.getLogger("API.deps")
-
-# Esquema de seguridad Bearer para Swagger UI
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def get_db(request: Request):
-    """
-    Inyecta la instancia de DatabaseManager almacenada en app.state.
-    Todos los endpoints la reciben vía Depends(get_db).
-    """
     db = getattr(request.app.state, "db", None)
     if db is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Base de datos no disponible",
-        )
+        raise HTTPException(503, "Base de datos no disponible")
     return db
 
 
-async def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
-) -> dict:
-    """
-    Extrae el usuario autenticado del token JWT.
+def get_bot(request: Request):
+    """Inyecta la instancia del bot de Discord (puede ser None en tests)."""
+    return getattr(request.app.state, "bot", None)
 
-    Cuando el panel web esté conectado, este dependency:
-      1. Lee el token Bearer del header Authorization
-      2. Lo decodifica con PyJWT
-      3. Devuelve un dict con {user_id, username, guilds, ...}
 
-    Por ahora retorna un placeholder que permite probar los endpoints
-    sin autenticación configurada. Cuando configures OAuth2, descomentar
-    la validación real.
-    """
-    jwt_secret = os.getenv("JWT_SECRET")
-
-    # ── Sin JWT_SECRET configurado → modo desarrollo (sin auth) ───────────
+def _decode_jwt(token: str) -> dict:
+    """Decodifica un JWT y devuelve el payload."""
+    import jwt as pyjwt
+    jwt_secret = os.getenv("JWT_SECRET", "")
     if not jwt_secret:
-        logger.debug("JWT_SECRET no configurado — modo desarrollo (sin auth)")
-        return {"user_id": 0, "username": "dev", "is_dev_mode": True}
-
-    # ── Con JWT_SECRET → validar token ────────────────────────────────────
-    if not credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token de autenticación requerido",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
+        raise HTTPException(503, "JWT_SECRET no configurado")
     try:
-        import jwt
-        payload = jwt.decode(
-            credentials.credentials,
-            jwt_secret,
-            algorithms=["HS256"],
-        )
+        payload = pyjwt.decode(token, jwt_secret, algorithms=["HS256"])
         return {
-            "user_id": int(payload["sub"]),
+            "user_id":  int(payload["sub"]),
             "username": payload.get("username", ""),
-            "guilds": payload.get("guilds", []),
+            "avatar":   payload.get("avatar", ""),
+            "guilds":   payload.get("guilds", []),
             "is_dev_mode": False,
         }
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(401, "Token expirado", headers={"WWW-Authenticate": "Bearer"})
     except Exception as e:
-        logger.warning(f"Token JWT inválido: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token inválido o expirado",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        logger.warning(f"Token inválido: {e}")
+        raise HTTPException(401, "Token inválido", headers={"WWW-Authenticate": "Bearer"})
+
+
+async def get_current_user_from_request(request: Request) -> dict:
+    """Extrae y valida el usuario desde Authorization header o cookie."""
+    jwt_secret  = os.getenv("JWT_SECRET", "")
+    master_key  = os.getenv("MASTER_ADMIN_KEY", "")
+
+    # Sin seguridad configurada → modo dev
+    if not jwt_secret and not master_key:
+        logger.debug("Sin JWT_SECRET — modo desarrollo")
+        return {"user_id": 0, "username": "dev", "is_dev_mode": True, "guilds": []}
+
+    # Buscar token: 1) Authorization: Bearer, 2) Cookie botES_token
+    token: Optional[str] = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    elif "botES_token" in request.cookies:
+        token = request.cookies["botES_token"]
+
+    if not token:
+        raise HTTPException(401, "Token de autenticación requerido",
+                            headers={"WWW-Authenticate": "Bearer"})
+
+    # Master Key bypass
+    if master_key and token == master_key:
+        return {"user_id": 0, "username": "MasterAdmin", "guilds": [],
+                "is_dev_mode": False, "is_master_admin": True}
+
+    return _decode_jwt(token)
+
+
+async def get_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> dict:
+    return await get_current_user_from_request(request)
 
 
 async def require_guild_admin(
     guild_id: int,
     user: dict = Depends(get_current_user),
 ) -> dict:
-    """
-    Verifica que el usuario autenticado tiene permisos de admin/owner
-    en el guild solicitado.
-
-    En modo desarrollo (sin JWT_SECRET), deja pasar todo.
-    En producción, verifica que el guild_id está en la lista de guilds
-    del usuario con permisos de administrador.
-    """
-    if user.get("is_dev_mode"):
+    if user.get("is_dev_mode") or user.get("is_master_admin"):
         return user
 
     user_guilds = user.get("guilds", [])
-    # Buscar el guild en los guilds del usuario
-    # Cada guild en el token tiene: {id, permissions, owner}
-    guild_match = next(
-        (g for g in user_guilds if int(g.get("id", 0)) == guild_id),
-        None,
-    )
+    match = next((g for g in user_guilds if int(g.get("id", 0)) == guild_id), None)
+    if not match:
+        raise HTTPException(403, "No tienes acceso a este servidor")
 
-    if not guild_match:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes acceso a este servidor",
-        )
-
-    # Verificar admin: bit 0x8 (ADMINISTRATOR) en permissions, o es owner
-    permissions = int(guild_match.get("permissions", 0))
-    is_admin = bool(permissions & 0x8)
-    is_owner = guild_match.get("owner", False)
-
-    if not (is_admin or is_owner):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Necesitas ser administrador o dueño del servidor",
-        )
+    perms = int(match.get("permissions", 0))
+    if not (bool(perms & 0x8) or bool(perms & 0x20) or match.get("owner")):
+        raise HTTPException(403, "Necesitas ser administrador o dueño del servidor")
 
     return user
