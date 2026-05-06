@@ -8,12 +8,12 @@ Dependencias compartidas:
   • require_guild_admin()        — Verifica admin/owner del guild
 """
 
-import os
 import logging
+import os
 from typing import Optional
 
-from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 logger = logging.getLogger("API.deps")
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -34,29 +34,34 @@ def get_bot(request: Request):
 def _decode_jwt(token: str) -> dict:
     """Decodifica un JWT y devuelve el payload."""
     import jwt as pyjwt
+
     jwt_secret = os.getenv("JWT_SECRET", "")
     if not jwt_secret:
         raise HTTPException(503, "JWT_SECRET no configurado")
     try:
         payload = pyjwt.decode(token, jwt_secret, algorithms=["HS256"])
         return {
-            "user_id":  int(payload["sub"]),
+            "user_id": int(payload["sub"]),
             "username": payload.get("username", ""),
-            "avatar":   payload.get("avatar", ""),
-            "guilds":   payload.get("guilds", []),
+            "avatar": payload.get("avatar", ""),
+            "guilds": payload.get("guilds", []),
             "is_dev_mode": False,
         }
     except pyjwt.ExpiredSignatureError:
-        raise HTTPException(401, "Token expirado", headers={"WWW-Authenticate": "Bearer"})
+        raise HTTPException(
+            401, "Token expirado", headers={"WWW-Authenticate": "Bearer"}
+        )
     except Exception as e:
         logger.warning(f"Token inválido: {e}")
-        raise HTTPException(401, "Token inválido", headers={"WWW-Authenticate": "Bearer"})
+        raise HTTPException(
+            401, "Token inválido", headers={"WWW-Authenticate": "Bearer"}
+        )
 
 
 async def get_current_user_from_request(request: Request) -> dict:
     """Extrae y valida el usuario desde Authorization header o cookie."""
-    jwt_secret  = os.getenv("JWT_SECRET", "")
-    master_key  = os.getenv("MASTER_ADMIN_KEY", "")
+    jwt_secret = os.getenv("JWT_SECRET", "")
+    master_key = os.getenv("MASTER_ADMIN_KEY", "")
 
     # Sin seguridad configurada → modo dev
     if not jwt_secret and not master_key:
@@ -72,13 +77,21 @@ async def get_current_user_from_request(request: Request) -> dict:
         token = request.cookies["botES_token"]
 
     if not token:
-        raise HTTPException(401, "Token de autenticación requerido",
-                            headers={"WWW-Authenticate": "Bearer"})
+        raise HTTPException(
+            401,
+            "Token de autenticación requerido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     # Master Key bypass
     if master_key and token == master_key:
-        return {"user_id": 0, "username": "MasterAdmin", "guilds": [],
-                "is_dev_mode": False, "is_master_admin": True}
+        return {
+            "user_id": 0,
+            "username": "MasterAdmin",
+            "guilds": [],
+            "is_dev_mode": False,
+            "is_master_admin": True,
+        }
 
     return _decode_jwt(token)
 

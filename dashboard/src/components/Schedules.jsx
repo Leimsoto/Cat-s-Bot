@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiGet, apiPost, apiPatch, apiDelete } from '../lib/api';
+import Toast from './Toast';
 
 const INTERVAL_PRESETS = [
   { label: '1 hora',   seconds: 3600 },
@@ -30,10 +31,7 @@ export default function Schedules({ selectedGuild }) {
     interval_seconds: 3600, custom_interval: '',
   });
 
-  const showToast = (msg, type = 'success') => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3500);
-  };
+  const showToast = (msg, type = 'success') => setToast({ msg, type });
 
   const load = useCallback(async () => {
     if (!selectedGuild) return;
@@ -98,14 +96,7 @@ export default function Schedules({ selectedGuild }) {
 
   return (
     <div className="ov-container animate-fade-in">
-      {toast && (
-        <div style={{
-          position:'fixed',top:22,right:22,zIndex:9999,padding:'12px 20px',borderRadius:14,
-          background:toast.type==='error'?'rgba(244,63,94,0.18)':'rgba(99,102,241,0.22)',
-          border:`1px solid ${toast.type==='error'?'rgba(244,63,94,0.4)':'rgba(139,92,246,0.4)'}`,
-          backdropFilter:'blur(16px)',color:'var(--text)',fontWeight:700,
-        }}>{toast.msg}</div>
-      )}
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
 
       <div className="automod-header" style={{marginBottom:0}}>
         <div className="header-info">

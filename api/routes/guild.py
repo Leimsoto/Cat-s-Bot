@@ -29,14 +29,12 @@ GET  /api/guilds/{id}/music                 → estado reproducción
 """
 
 import json
-import os
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
-import httpx
-from fastapi import APIRouter, Depends, Request, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from api.deps import get_db, get_bot, get_current_user, require_guild_admin
+from api.deps import get_bot, get_current_user, get_db, require_guild_admin
 
 logger = logging.getLogger("API.guild")
 
@@ -51,8 +49,11 @@ router = APIRouter(prefix="/api/guilds", tags=["guilds"])
 # /api/guilds
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("")
-async def list_guilds(request: Request, db=Depends(get_db), user=Depends(get_current_user)):
+async def list_guilds(
+    request: Request, db=Depends(get_db), user=Depends(get_current_user)
+):
     """Lista los servidores donde el usuario es admin Y el bot está presente.
     Usa el cache en memoria del bot para evitar 404s de la API de Discord.
     """
@@ -66,10 +67,10 @@ async def list_guilds(request: Request, db=Depends(get_db), user=Depends(get_cur
         if bot is not None:
             bot_guilds = [
                 {
-                    "id":          str(g.id),
-                    "name":        g.name,
-                    "icon":        str(g.icon.url) if g.icon else None,
-                    "has_bot":     True,
+                    "id": str(g.id),
+                    "name": g.name,
+                    "icon": str(g.icon.url) if g.icon else None,
+                    "has_bot": True,
                     "memberCount": g.member_count,
                     "onlineCount": None,
                 }
@@ -93,22 +94,26 @@ async def list_guilds(request: Request, db=Depends(get_db), user=Depends(get_cur
         if bot is not None:
             discord_guild = bot.get_guild(guild_id)
             if discord_guild is not None:
-                result.append({
-                    "id":          str(guild_id),
-                    "name":        g["name"],
-                    "icon":        _icon_url(str(guild_id), g.get("icon")),
-                    "has_bot":     True,
-                    "memberCount": discord_guild.member_count,
-                    "onlineCount": None,
-                })
+                result.append(
+                    {
+                        "id": str(guild_id),
+                        "name": g["name"],
+                        "icon": _icon_url(str(guild_id), g.get("icon")),
+                        "has_bot": True,
+                        "memberCount": discord_guild.member_count,
+                        "onlineCount": None,
+                    }
+                )
         else:
             # Fallback: el bot no está disponible (startup), devolver info del usuario
-            result.append({
-                "id":      str(guild_id),
-                "name":   g["name"],
-                "icon":   _icon_url(str(guild_id), g.get("icon")),
-                "has_bot": False,
-            })
+            result.append(
+                {
+                    "id": str(guild_id),
+                    "name": g["name"],
+                    "icon": _icon_url(str(guild_id), g.get("icon")),
+                    "has_bot": False,
+                }
+            )
 
     return {"guilds": result, "user": _format_user(user)}
 
@@ -116,6 +121,7 @@ async def list_guilds(request: Request, db=Depends(get_db), user=Depends(get_cur
 # ─────────────────────────────────────────────────────────────────────────────
 # /api/guilds/{id}/channels  — lista desde bot en memoria
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/{guild_id}/channels")
 async def get_guild_channels(
@@ -131,21 +137,26 @@ async def get_guild_channels(
         raise HTTPException(404, "Servidor no encontrado en el bot")
 
     channels = []
-    for ch in sorted(guild.channels, key=lambda c: (c.position if hasattr(c, "position") else 0)):
-        ch_type = str(ch.type).split(".")[-1]   # "text", "voice", "category", etc.
-        channels.append({
-            "id":       str(ch.id),
-            "name":     ch.name,
-            "type":     ch_type,
-            "position": getattr(ch, "position", 0),
-            "category": ch.category.name if ch.category else None,
-        })
+    for ch in sorted(
+        guild.channels, key=lambda c: c.position if hasattr(c, "position") else 0
+    ):
+        ch_type = str(ch.type).split(".")[-1]  # "text", "voice", "category", etc.
+        channels.append(
+            {
+                "id": str(ch.id),
+                "name": ch.name,
+                "type": ch_type,
+                "position": getattr(ch, "position", 0),
+                "category": ch.category.name if ch.category else None,
+            }
+        )
     return {"guild_id": str(guild_id), "channels": channels}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # /api/guilds/{id}/roles — lista desde bot en memoria
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/{guild_id}/roles")
 async def get_guild_roles(
@@ -162,11 +173,11 @@ async def get_guild_roles(
 
     roles = [
         {
-            "id":       str(r.id),
-            "name":     r.name,
-            "color":    f"#{r.color.value:06x}" if r.color.value else None,
+            "id": str(r.id),
+            "name": r.name,
+            "color": f"#{r.color.value:06x}" if r.color.value else None,
             "position": r.position,
-            "managed":  r.managed,
+            "managed": r.managed,
         }
         for r in sorted(guild.roles, key=lambda r: -r.position)
         if r.name != "@everyone"
@@ -178,6 +189,7 @@ async def get_guild_roles(
 # /api/guilds/{id}/overview
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/{guild_id}/overview")
 async def get_guild_overview(
     guild_id: int,
@@ -186,53 +198,84 @@ async def get_guild_overview(
 ):
     try:
         # Nombre correcto del método en DatabaseManager
-        mod_cases = db.get_mod_actions(guild_id, limit=100) if hasattr(db, 'get_mod_actions') else []
-        tickets   = db.get_tickets_by_guild(guild_id) if hasattr(db, 'get_tickets_by_guild') else []
-        open_t    = [t for t in tickets if t.get("status") in ("OPEN", "abierto")]
-        members   = db.get_member_count(guild_id) if hasattr(db, "get_member_count") else 0
+        mod_cases = (
+            db.get_mod_actions(guild_id, limit=100)
+            if hasattr(db, "get_mod_actions")
+            else []
+        )
+        tickets = (
+            db.get_tickets_by_guild(guild_id)
+            if hasattr(db, "get_tickets_by_guild")
+            else []
+        )
+        open_t = [t for t in tickets if t.get("status") in ("OPEN", "abierto")]
+        members = (
+            db.get_member_count(guild_id) if hasattr(db, "get_member_count") else 0
+        )
 
         now = datetime.now(timezone.utc)
         charts = []
         for i in range(7):
             day_start = now - timedelta(days=6 - i)
-            day_end   = day_start + timedelta(days=1)
+            day_end = day_start + timedelta(days=1)
             day_cases = [
-                c for c in mod_cases
-                if c.get("created_at") and
-                   day_start.timestamp() <= _ts(c["created_at"]) < day_end.timestamp()
+                c
+                for c in mod_cases
+                if c.get("created_at")
+                and day_start.timestamp() <= _ts(c["created_at"]) < day_end.timestamp()
             ]
-            charts.append({
-                "label":      day_start.strftime("%a"),
-                "commands":   0,
-                "automod":    0,
-                "security":   0,
-                "moderation": len(day_cases),
-            })
+            charts.append(
+                {
+                    "label": day_start.strftime("%a"),
+                    "commands": 0,
+                    "automod": 0,
+                    "security": 0,
+                    "moderation": len(day_cases),
+                }
+            )
 
-        recent_cases = sorted(mod_cases, key=lambda c: _ts(c.get("created_at", 0)), reverse=True)[:12]
+        recent_cases_raw = sorted(
+            mod_cases, key=lambda c: _ts(c.get("created_at", 0)), reverse=True
+        )[:12]
+        recent_cases = [
+            {
+                "caseId": c.get("id"),
+                "action": c.get("action_type", ""),
+                "userId": str(c.get("target_id", "")),
+                "date": c.get("created_at", ""),
+            }
+            for c in recent_cases_raw
+        ]
 
         return {
-            "guild":   {"id": str(guild_id)},
+            "guild": {"id": str(guild_id)},
             "metrics": {
-                "totalCommands":     0,
-                "automodTriggers":   0,
-                "securityAlerts":    0,
+                "totalCommands": 0,
+                "automodTriggers": 0,
+                "securityAlerts": 0,
                 "moderationActions": len(mod_cases),
-                "openTickets":       len(open_t),
-                "memberCount":       members,
+                "openTickets": len(open_t),
+                "memberCount": members,
             },
-            "charts":       charts,
+            "charts": charts,
             "recentEvents": [],
-            "recentCases":  recent_cases,
+            "recentCases": recent_cases,
         }
     except Exception as e:
         logger.error(f"overview error: {e}")
-        return {"guild": {}, "metrics": {}, "charts": [], "recentEvents": [], "recentCases": []}
+        return {
+            "guild": {},
+            "metrics": {},
+            "charts": [],
+            "recentEvents": [],
+            "recentCases": [],
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # /api/guilds/{id}/config
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/{guild_id}/config")
 async def get_guild_config_new(
@@ -244,8 +287,10 @@ async def get_guild_config_new(
 
 @router.patch("/{guild_id}/config")
 async def patch_guild_config(
-    guild_id: int, body: dict,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     if "guild" in body:
         db.set_config(guild_id, **body["guild"])
@@ -256,6 +301,7 @@ async def patch_guild_config(
 # /api/guilds/{id}/ia
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/{guild_id}/ia")
 async def get_ia_config(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
@@ -265,8 +311,10 @@ async def get_ia_config(
 
 @router.patch("/{guild_id}/ia")
 async def patch_ia_config(
-    guild_id: int, body: dict,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     db.set_ai_config(guild_id, **body)
     return db.get_ai_config(guild_id) or body
@@ -276,42 +324,53 @@ async def patch_ia_config(
 # /api/guilds/{id}/moderation  — configuración de moderación
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/{guild_id}/moderation")
 async def get_moderation_config(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
 ):
     """Devuelve la configuración completa de moderación para el dashboard."""
-    cfg     = db.get_config(guild_id) or {}
+    cfg = db.get_config(guild_id) or {}
     srv_cfg = db.get_server_config(guild_id) if hasattr(db, "get_server_config") else {}
-    merged  = {**cfg, **srv_cfg}
+    merged = {**cfg, **srv_cfg}
     return {
-        "mute_role_id":         merged.get("mute_role_id"),
-        "mod_role_id":          merged.get("mod_role_id"),
-        "staff_role_id":        merged.get("staff_role_id"),
-        "modlog_channel":       merged.get("modlog_channel"),
-        "modlog_enabled":       merged.get("modlog_enabled", 1),
-        "warn_ban_threshold":   merged.get("warn_ban_threshold", 7),
-        "warn_kick_threshold":  merged.get("warn_kick_threshold", 5),
-        "warn_mute_threshold":  merged.get("warn_mute_threshold", 3),
-        "warn_ban_enabled":     merged.get("warn_ban_enabled", 0),
-        "warn_kick_enabled":    merged.get("warn_kick_enabled", 0),
-        "warn_mute_enabled":    merged.get("warn_mute_enabled", 1),
-        "warn_mute_duration":   merged.get("warn_mute_duration", 600),
-        "warn_embed_config":    merged.get("warn_embed_config"),
+        "mute_role_id": merged.get("mute_role_id"),
+        "mod_role_id": merged.get("mod_role_id"),
+        "staff_role_id": merged.get("staff_role_id"),
+        "modlog_channel": merged.get("modlog_channel"),
+        "modlog_enabled": merged.get("modlog_enabled", 1),
+        "warn_ban_threshold": merged.get("warn_ban_threshold", 7),
+        "warn_kick_threshold": merged.get("warn_kick_threshold", 5),
+        "warn_mute_threshold": merged.get("warn_mute_threshold", 3),
+        "warn_ban_enabled": merged.get("warn_ban_enabled", 0),
+        "warn_kick_enabled": merged.get("warn_kick_enabled", 0),
+        "warn_mute_enabled": merged.get("warn_mute_enabled", 1),
+        "warn_mute_duration": merged.get("warn_mute_duration", 600),
+        "warn_embed_config": merged.get("warn_embed_config"),
     }
 
 
 @router.patch("/{guild_id}/moderation")
 async def patch_moderation_config(
-    guild_id: int, body: dict,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     """Actualiza la configuración de moderación desde el dashboard."""
     config_keys = {
-        "mute_role_id", "mod_role_id", "modlog_channel",
-        "modlog_enabled", "warn_ban_threshold", "warn_kick_threshold",
-        "warn_mute_threshold", "warn_ban_enabled", "warn_kick_enabled",
-        "warn_mute_enabled", "warn_mute_duration", "warn_embed_config",
+        "mute_role_id",
+        "mod_role_id",
+        "modlog_channel",
+        "modlog_enabled",
+        "warn_ban_threshold",
+        "warn_kick_threshold",
+        "warn_mute_threshold",
+        "warn_ban_enabled",
+        "warn_kick_enabled",
+        "warn_mute_enabled",
+        "warn_mute_duration",
+        "warn_embed_config",
     }
     filtered = {k: v for k, v in body.items() if k in config_keys}
     if filtered:
@@ -323,24 +382,32 @@ async def patch_moderation_config(
 # /api/guilds/{id}/levels — config XP/niveles
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/{guild_id}/levels")
 async def get_levels_config(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
 ):
-    cfg     = db.get_xp_config(guild_id) or {}
+    cfg = db.get_xp_config(guild_id) or {}
     rewards = db.get_level_rewards(guild_id) or []
     return {"config": cfg, "rewards": rewards}
 
 
 @router.patch("/{guild_id}/levels")
 async def patch_levels_config(
-    guild_id: int, body: dict,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     allowed = {
-        "enabled", "xp_min", "xp_max", "cooldown_seconds",
-        "announcement_channel_id", "announcement_message",
-        "stack_rewards", "ignored_channels",
+        "enabled",
+        "xp_min",
+        "xp_max",
+        "cooldown_seconds",
+        "announcement_channel_id",
+        "announcement_message",
+        "stack_rewards",
+        "ignored_channels",
     }
     filtered = {k: v for k, v in body.items() if k in allowed}
     if filtered:
@@ -357,11 +424,13 @@ async def get_level_rewards(
 
 @router.post("/{guild_id}/levels/rewards")
 async def add_level_reward(
-    guild_id: int, body: dict,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
-    nivel    = int(body.get("level", 0))
-    role_id  = int(body.get("role_id", 0))
+    nivel = int(body.get("level", 0))
+    role_id = int(body.get("role_id", 0))
     if nivel < 1 or role_id < 1:
         raise HTTPException(400, "nivel y role_id son requeridos y deben ser > 0")
     db.set_level_reward(guild_id, nivel, role_id)
@@ -370,8 +439,10 @@ async def add_level_reward(
 
 @router.delete("/{guild_id}/levels/rewards/{level}")
 async def delete_level_reward(
-    guild_id: int, level: int,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    level: int,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     db.delete_level_reward(guild_id, level)
     return {"status": "ok"}
@@ -381,23 +452,31 @@ async def delete_level_reward(
 # /api/guilds/{id}/tickets — config tickets + categorías
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/{guild_id}/tickets")
 async def get_tickets_config(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
 ):
-    cfg        = db.get_ticket_config(guild_id) or {}
+    cfg = db.get_ticket_config(guild_id) or {}
     categories = db.get_ticket_categories(guild_id) or []
     return {"config": cfg, "categories": categories}
 
 
 @router.patch("/{guild_id}/tickets")
 async def patch_tickets_config(
-    guild_id: int, body: dict,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     allowed = {
-        "category_id", "log_channel_id", "allowed_roles", "immune_roles",
-        "channel_name_template", "max_tickets_per_user", "ticket_cooldown_seconds",
+        "category_id",
+        "log_channel_id",
+        "allowed_roles",
+        "immune_roles",
+        "channel_name_template",
+        "max_tickets_per_user",
+        "ticket_cooldown_seconds",
         "panel_embed_data",
     }
     filtered = {k: v for k, v in body.items() if k in allowed}
@@ -408,8 +487,11 @@ async def patch_tickets_config(
 
 @router.post("/{guild_id}/tickets/send-panel")
 async def send_ticket_panel(
-    guild_id: int, body: dict,
-    bot=Depends(get_bot), db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    bot=Depends(get_bot),
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     """Envía el panel de tickets a un canal usando el bot."""
     if bot is None:
@@ -429,15 +511,15 @@ async def send_ticket_panel(
     return {"status": "ok", "message": msg}
 
 
-
-
 @router.post("/{guild_id}/tickets/categories")
 async def add_ticket_category(
-    guild_id: int, body: dict,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
-    nombre   = body.get("name", "").strip()
-    emoji    = body.get("emoji", "🎫")
+    nombre = body.get("name", "").strip()
+    emoji = body.get("emoji", "🎫")
     preguntas = body.get("questions", ["¿En qué podemos ayudarte?"])
     if not nombre:
         raise HTTPException(400, "name es requerido")
@@ -446,7 +528,11 @@ async def add_ticket_category(
         nombre,
         emoji,
         json.dumps(preguntas),
-        json.dumps(body.get("close_reasons", ["Solucionado", "Cierre Administrativo", "Inactividad"])),
+        json.dumps(
+            body.get(
+                "close_reasons", ["Solucionado", "Cierre Administrativo", "Inactividad"]
+            )
+        ),
         body.get("welcome_embed_json"),
     )
     return {"status": "ok"}
@@ -454,8 +540,10 @@ async def add_ticket_category(
 
 @router.delete("/{guild_id}/tickets/categories/{cat_id}")
 async def delete_ticket_category(
-    guild_id: int, cat_id: int,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    cat_id: int,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     if hasattr(db, "delete_ticket_category"):
         db.delete_ticket_category(guild_id, cat_id)
@@ -465,6 +553,7 @@ async def delete_ticket_category(
 # ─────────────────────────────────────────────────────────────────────────────
 # /api/guilds/{id}/radio
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/{guild_id}/radio")
 async def get_radio_config(
@@ -476,8 +565,10 @@ async def get_radio_config(
 
 @router.patch("/{guild_id}/radio")
 async def patch_radio_config(
-    guild_id: int, body: dict,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     if hasattr(db, "set_radio_config"):
         db.set_radio_config(guild_id, **body)
@@ -487,6 +578,7 @@ async def patch_radio_config(
 # ─────────────────────────────────────────────────────────────────────────────
 # /api/guilds/{id}/music
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/{guild_id}/music")
 async def get_guild_music(
@@ -500,24 +592,29 @@ async def get_guild_music(
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _icon_url(guild_id: str, icon: str | None) -> str | None:
-    return f"https://cdn.discordapp.com/icons/{guild_id}/{icon}.png?size=256" if icon else None
+    return (
+        f"https://cdn.discordapp.com/icons/{guild_id}/{icon}.png?size=256"
+        if icon
+        else None
+    )
 
 
 def _format_guild(g: dict) -> dict:
     return {
-        "id":      g.get("id"),
-        "name":    g.get("name"),
-        "icon":    _icon_url(g.get("id", ""), g.get("icon")),
+        "id": g.get("id"),
+        "name": g.get("name"),
+        "icon": _icon_url(g.get("id", ""), g.get("icon")),
         "has_bot": True,
     }
 
 
 def _format_user(user: dict) -> dict:
     return {
-        "id":       str(user.get("user_id", "")),
+        "id": str(user.get("user_id", "")),
         "username": user.get("username", ""),
-        "avatar":   user.get("avatar", ""),
+        "avatar": user.get("avatar", ""),
     }
 
 
@@ -534,33 +631,36 @@ def _ts(value) -> float:
 # Router legacy
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router_legacy.get("/config")
 async def get_guild_config_legacy(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
 ):
     return {
-        "guild_id":           guild_id,
-        "guild_config":       db.get_config(guild_id),
-        "server_config":      db.get_server_config(guild_id),
-        "ai_config":          db.get_ai_config(guild_id),
-        "welcome_config":     db.get_welcome_config(guild_id),
-        "boost_config":       db.get_boost_config(guild_id),
+        "guild_id": guild_id,
+        "guild_config": db.get_config(guild_id),
+        "server_config": db.get_server_config(guild_id),
+        "ai_config": db.get_ai_config(guild_id),
+        "welcome_config": db.get_welcome_config(guild_id),
+        "boost_config": db.get_boost_config(guild_id),
         "suggestions_config": db.get_suggestions_config(guild_id),
     }
 
 
 @router_legacy.put("/config")
 async def update_guild_config_legacy(
-    guild_id: int, body: dict,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     updated = []
     for section, method in [
-        ("guild_config",       "set_config"),
-        ("server_config",      "set_server_config"),
-        ("ai_config",          "set_ai_config"),
-        ("welcome_config",     "set_welcome_config"),
-        ("boost_config",       "set_boost_config"),
+        ("guild_config", "set_config"),
+        ("server_config", "set_server_config"),
+        ("ai_config", "set_ai_config"),
+        ("welcome_config", "set_welcome_config"),
+        ("boost_config", "set_boost_config"),
         ("suggestions_config", "set_suggestions_config"),
     ]:
         if section in body and hasattr(db, method):
@@ -574,8 +674,8 @@ async def get_guild_stats_legacy(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
 ):
     return {
-        "guild_id":           guild_id,
-        "bot_stats":          db.get_bot_stats(),
+        "guild_id": guild_id,
+        "bot_stats": db.get_bot_stats(),
         "open_tickets_guild": db.count_open_tickets_by_guild(guild_id),
     }
 
@@ -583,6 +683,7 @@ async def get_guild_stats_legacy(
 # ─────────────────────────────────────────────────────────────────────────────
 # /api/guilds/{id}/schedules  — Mensajes Programados desde dashboard
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/{guild_id}/schedules")
 async def get_schedules(
@@ -594,21 +695,31 @@ async def get_schedules(
 
 @router.post("/{guild_id}/schedules")
 async def create_schedule(
-    guild_id: int, body: dict,
-    db=Depends(get_db), user=Depends(require_guild_admin),
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    user=Depends(require_guild_admin),
 ):
-    name     = body.get("name", "").strip()
-    channel  = int(body.get("channel_id", 0))
-    content  = body.get("content", "").strip()
+    name = body.get("name", "").strip()
+    channel = int(body.get("channel_id", 0))
+    content = body.get("content", "").strip()
     interval = int(body.get("interval_seconds", 3600))
-    creator  = int(user.get("user_id", 0))
+    creator = int(user.get("user_id", 0))
 
-    if not name:    raise HTTPException(400, "name requerido")
-    if not channel: raise HTTPException(400, "channel_id requerido")
-    if not content: raise HTTPException(400, "content requerido")
-    if interval < 60: raise HTTPException(400, "interval_seconds mínimo 60")
+    if not name:
+        raise HTTPException(400, "name requerido")
+    if not channel:
+        raise HTTPException(400, "channel_id requerido")
+    if not content:
+        raise HTTPException(400, "content requerido")
+    if interval < 60:
+        raise HTTPException(400, "interval_seconds mínimo 60")
 
-    existing = db.get_schedule_by_name(guild_id, name) if hasattr(db, "get_schedule_by_name") else None
+    existing = (
+        db.get_schedule_by_name(guild_id, name)
+        if hasattr(db, "get_schedule_by_name")
+        else None
+    )
     if existing:
         raise HTTPException(409, f"Ya existe un horario con el nombre '{name}'")
 
@@ -618,10 +729,17 @@ async def create_schedule(
 
 @router.patch("/{guild_id}/schedules/{name}")
 async def update_schedule(
-    guild_id: int, name: str, body: dict,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    name: str,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
-    sched = db.get_schedule_by_name(guild_id, name) if hasattr(db, "get_schedule_by_name") else None
+    sched = (
+        db.get_schedule_by_name(guild_id, name)
+        if hasattr(db, "get_schedule_by_name")
+        else None
+    )
     if not sched:
         raise HTTPException(404, "Horario no encontrado")
     allowed = {"enabled", "channel_id", "content", "interval_seconds"}
@@ -633,8 +751,10 @@ async def update_schedule(
 
 @router.delete("/{guild_id}/schedules/{name}")
 async def delete_schedule(
-    guild_id: int, name: str,
-    db=Depends(get_db), _user=Depends(require_guild_admin),
+    guild_id: int,
+    name: str,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
 ):
     db.delete_schedule(guild_id, name)
     return {"status": "ok"}

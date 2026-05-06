@@ -18,33 +18,31 @@ Variables de entorno (.env):
   API_BASE_URL        (URL pública de la API)
 """
 
-import hashlib
-import hmac
 import logging
 import os
 import secrets
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 logger = logging.getLogger("API.auth")
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 DISCORD_API = "https://discord.com/api/v10"
-_oauth_states: dict[str, float] = {}   # state → expiry timestamp
+_oauth_states: dict[str, float] = {}  # state → expiry timestamp
 
 
 def _cfg() -> dict:
     api_base = os.getenv("API_BASE_URL", "http://localhost:8080")
     return {
-        "client_id":     os.getenv("DISCORD_CLIENT_ID", ""),
+        "client_id": os.getenv("DISCORD_CLIENT_ID", ""),
         "client_secret": os.getenv("DISCORD_CLIENT_SECRET", ""),
-        "jwt_secret":    os.getenv("JWT_SECRET", ""),
+        "jwt_secret": os.getenv("JWT_SECRET", ""),
         "dashboard_url": os.getenv("DASHBOARD_URL", "http://localhost:8080"),
-        "redirect_uri":  api_base.rstrip("/") + "/api/auth/callback",
+        "redirect_uri": api_base.rstrip("/") + "/api/auth/callback",
     }
 
 
@@ -57,7 +55,7 @@ def _avatar_url(user_id: str, avatar: str | None) -> str:
 def _has_manage_guild(permissions: int | str) -> bool:
     try:
         p = int(permissions)
-        return bool(p & 0x8) or bool(p & 0x20)   # ADMINISTRATOR | MANAGE_GUILD
+        return bool(p & 0x8) or bool(p & 0x20)  # ADMINISTRATOR | MANAGE_GUILD
     except Exception:
         return False
 
@@ -69,22 +67,33 @@ async def login():
     if not cfg["client_id"]:
         raise HTTPException(503, "DISCORD_CLIENT_ID no configurado")
 
+    # Cleanup expired states
+    now = time.time()
+    expired = [k for k, v in _oauth_states.items() if v < now]
+    for k in expired:
+        del _oauth_states[k]
+
     state = secrets.token_urlsafe(24)
-    _oauth_states[state] = time.time() + 300   # válido 5 minutos
+    _oauth_states[state] = time.time() + 300  # válido 5 minutos
 
     from urllib.parse import urlencode
-    params = urlencode({
-        "client_id":     cfg["client_id"],
-        "redirect_uri":  cfg["redirect_uri"],
-        "response_type": "code",
-        "scope":         "identify guilds",
-        "state":         state,
-    })
+
+    params = urlencode(
+        {
+            "client_id": cfg["client_id"],
+            "redirect_uri": cfg["redirect_uri"],
+            "response_type": "code",
+            "scope": "identify guilds",
+            "state": state,
+        }
+    )
     return RedirectResponse(f"https://discord.com/oauth2/authorize?{params}")
 
 
 @router.get("/callback")
-async def callback(code: str | None = None, state: str | None = None, error: str | None = None):
+async def callback(
+    code: str | None = None, state: str | None = None, error: str | None = None
+):
     """Callback OAuth2 de Discord — intercambia code → JWT."""
     dashboard = _cfg()["dashboard_url"].rstrip("/")
 
@@ -104,13 +113,17 @@ async def callback(code: str | None = None, state: str | None = None, error: str
 
     async with httpx.AsyncClient(timeout=10) as client:
         # 1. Intercambiar code por token
-        token_r = await client.post(f"{DISCORD_API}/oauth2/token", data={
-            "grant_type":    "authorization_code",
-            "code":          code,
-            "redirect_uri":  cfg["redirect_uri"],
-            "client_id":     cfg["client_id"],
-            "client_secret": cfg["client_secret"],
-        }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        token_r = await client.post(
+            f"{DISCORD_API}/oauth2/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": cfg["redirect_uri"],
+                "client_id": cfg["client_id"],
+                "client_secret": cfg["client_secret"],
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
 
         if token_r.status_code != 200:
             logger.warning(f"Token exchange falló: {token_r.text}")
@@ -120,35 +133,36 @@ async def callback(code: str | None = None, state: str | None = None, error: str
         headers = {"Authorization": f"Bearer {access_token}"}
 
         # 2. Obtener usuario y guilds
-        user_r   = await client.get(f"{DISCORD_API}/users/@me", headers=headers)
+        user_r = await client.get(f"{DISCORD_API}/users/@me", headers=headers)
         guilds_r = await client.get(f"{DISCORD_API}/users/@me/guilds", headers=headers)
 
     if user_r.status_code != 200:
         return RedirectResponse(f"{dashboard}/panel/login?error=user_failed")
 
-    user_data  = user_r.json()
+    user_data = user_r.json()
     guilds_raw = guilds_r.json() if guilds_r.status_code == 200 else []
 
     admin_guilds = [
         {
-            "id":          g["id"],
-            "name":        g["name"],
-            "icon":        g.get("icon"),
+            "id": g["id"],
+            "name": g["name"],
+            "icon": g.get("icon"),
             "permissions": g.get("permissions", 0),
-            "owner":       g.get("owner", False),
+            "owner": g.get("owner", False),
         }
         for g in guilds_raw
         if g.get("owner") or _has_manage_guild(g.get("permissions", 0))
     ]
 
     import jwt as pyjwt
+
     payload = {
-        "sub":      str(user_data["id"]),
+        "sub": str(user_data["id"]),
         "username": user_data.get("username", ""),
-        "avatar":   _avatar_url(str(user_data["id"]), user_data.get("avatar")),
-        "guilds":   admin_guilds,
-        "iat":      datetime.now(timezone.utc),
-        "exp":      datetime.now(timezone.utc) + timedelta(hours=24),
+        "avatar": _avatar_url(str(user_data["id"]), user_data.get("avatar")),
+        "guilds": admin_guilds,
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=24),
     }
     token = pyjwt.encode(payload, cfg["jwt_secret"], algorithm="HS256")
 
@@ -160,13 +174,14 @@ async def callback(code: str | None = None, state: str | None = None, error: str
 async def get_me(request: Request):
     """Devuelve los datos del usuario autenticado (desde JWT)."""
     from api.deps import get_current_user_from_request
+
     user = await get_current_user_from_request(request)
     return {
-        "user_id":    user["user_id"],
-        "username":   user.get("username", ""),
-        "avatar":     user.get("avatar", ""),
-        "guilds":     user.get("guilds", []),
-        "is_master":  user.get("is_master_admin", False),
+        "user_id": user["user_id"],
+        "username": user.get("username", ""),
+        "avatar": user.get("avatar", ""),
+        "guilds": user.get("guilds", []),
+        "is_master": user.get("is_master_admin", False),
     }
 
 

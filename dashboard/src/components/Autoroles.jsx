@@ -3,6 +3,7 @@ import { apiGet, apiPost, apiDelete } from '../lib/api';
 
 export default function Autoroles({ selectedGuild }) {
   const [roles, setRoles] = useState([]);
+  const [availableRoles, setAvailableRoles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [newRole, setNewRole] = useState('');
   const [adding, setAdding] = useState(false);
@@ -10,20 +11,29 @@ export default function Autoroles({ selectedGuild }) {
   const load = () => {
     if (!selectedGuild) return;
     setLoading(true);
-    apiGet(`/api/guilds/${selectedGuild}/autoroles`)
-      .then(d => setRoles(d?.autoroles || []))
-      .catch(() => setRoles([]))
+    Promise.all([
+      apiGet(`/api/guilds/${selectedGuild}/autoroles`),
+      apiGet(`/api/guilds/${selectedGuild}/roles`).catch(() => ({ roles: [] })),
+    ])
+      .then(([arData, rolesData]) => {
+        setRoles(arData?.autoroles || []);
+        setAvailableRoles(rolesData.roles || []);
+      })
+      .catch(() => { setRoles([]); setAvailableRoles([]); })
       .finally(() => setLoading(false));
   };
 
   useEffect(() => { load(); }, [selectedGuild]);
 
   const addRole = async () => {
-    if (!newRole.trim()) return;
+    if (!newRole) return;
     setAdding(true);
     try {
-      await apiPost(`/api/guilds/${selectedGuild}/autoroles`, { role_id: newRole.trim() });
-      setNewRole(''); load();
+      await apiPost(`/api/guilds/${selectedGuild}/autoroles`, { role_id: newRole });
+      setNewRole('');
+      load();
+    } catch (e) {
+      console.error('Error adding autorole:', e);
     } finally { setAdding(false); }
   };
 
@@ -48,16 +58,17 @@ export default function Autoroles({ selectedGuild }) {
         <div className="glass-panel mod-section full-width">
           <div className="section-title"><i className="fa-solid fa-plus" /><h3>Agregar Autorole</h3></div>
           <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <input type="text" value={newRole} placeholder="ID del rol de Discord" onChange={e => setNewRole(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && addRole()} style={{ flex: 1 }} />
-            <button className="btn-save" onClick={addRole} disabled={adding || !newRole.trim()}>
+            <select value={newRole} onChange={e => setNewRole(e.target.value)} style={{ flex: 1 }}>
+              <option value="">— Seleccionar rol —</option>
+              {availableRoles
+                .filter(r => !roles.some(ar => String(ar.role_id || ar) === String(r.id)))
+                .map(r => <option key={r.id} value={r.id}>@{r.name}</option>)
+              }
+            </select>
+            <button className="btn-save" onClick={addRole} disabled={adding || !newRole}>
               {adding ? 'Agregando...' : <><i className="fa-solid fa-plus" /> Agregar</>}
             </button>
           </div>
-          <p className="ov-subtitle" style={{ marginTop: '8px', fontSize: '0.78rem' }}>
-            <i className="fa-solid fa-circle-info" style={{ marginRight: '6px', color: 'var(--accent)' }} />
-            Ingresa el ID numérico del rol. Clic derecho en el rol → "Copiar ID" (con modo desarrollador activo).
-          </p>
         </div>
 
         <div className="glass-panel mod-section full-width">
@@ -72,9 +83,14 @@ export default function Autoroles({ selectedGuild }) {
                     <i className="fa-solid fa-shield-halved" />
                   </div>
                   <div style={{ flex: 1 }}>
-                    <strong>Rol ID: {r.role_id || r}</strong>
-                    {r.created_at && <p className="ov-subtitle" style={{ margin: 0, fontSize: '0.78rem' }}>Agregado: {new Date(r.created_at).toLocaleDateString('es')}</p>}
-                  </div>
+                      {
+                        (() => {
+                          const roleName = availableRoles.find(r2 => String(r2.id) === String(r.role_id || r))?.name;
+                          return <strong>@{roleName || (r.role_id || r)}</strong>;
+                        })()
+                      }
+                      {r.created_at && <p className="ov-subtitle" style={{ margin: 0, fontSize: '0.78rem' }}>Agregado: {new Date(r.created_at).toLocaleDateString('es')}</p>}
+                    </div>
                   <button onClick={() => removeRole(r.role_id || r)}
                     style={{ background: 'rgba(239,68,68,0.12)', border: 'none', color: '#ef4444', borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem' }}>
                     <i className="fa-solid fa-trash" /> Eliminar
