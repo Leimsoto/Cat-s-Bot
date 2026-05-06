@@ -17,8 +17,8 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-from database import DatabaseManager
 from api import iniciar_api
+from database import DatabaseManager
 
 # ── Cargar .env antes de cualquier otra inicialización ───────────────────────
 load_dotenv()
@@ -46,6 +46,7 @@ intents.presences = True
 
 # ── Bot ───────────────────────────────────────────────────────────────────────
 
+
 class BotES(commands.Bot):
     """
     Bot principal.
@@ -56,7 +57,7 @@ class BotES(commands.Bot):
 
     def __init__(self):
         super().__init__(
-            command_prefix=[],   # Sin uso real; sólo slash commands
+            command_prefix=[],  # Sin uso real; sólo slash commands
             intents=intents,
             help_command=None,
         )
@@ -69,33 +70,40 @@ class BotES(commands.Bot):
         Llamado automáticamente antes de conectar al WebSocket.
         Carga los cogs y sincroniza los comandos slash.
         """
+
         # Ignorar errores de ClientConnectionResetError en tareas en background (ej. discord.py voice)
         def custom_exception_handler(loop, context):
-            exception = context.get('exception')
+            exception = context.get("exception")
             if exception and type(exception).__name__ == "ClientConnectionResetError":
                 return
             loop.default_exception_handler(context)
-        
+
         self.loop.set_exception_handler(custom_exception_handler)
 
         from discord.ext import tasks
-        
+
         @tasks.loop(seconds=30)
         async def bot_stats_updater():
             members_online = sum(
-                1 for g in self.guilds for m in g.members 
+                1
+                for g in self.guilds
+                for m in g.members
                 if m.status != discord.Status.offline
             )
             total_members = sum(g.member_count or 0 for g in self.guilds)
-            
-            uptime_seconds = int((discord.utils.utcnow() - self.start_time).total_seconds())
-            
+
+            uptime_seconds = int(
+                (discord.utils.utcnow() - self.start_time).total_seconds()
+            )
+
             # Count open tickets (método público)
             open_tickets = 0
-            if hasattr(self, 'db'):
+            if hasattr(self, "db"):
                 try:
                     open_tickets = self.db.count_all_open_tickets()
-                    self.db.update_bot_stats(members_online, total_members, open_tickets, uptime_seconds)
+                    self.db.update_bot_stats(
+                        members_online, total_members, open_tickets, uptime_seconds
+                    )
                 except Exception:
                     pass
 
@@ -126,6 +134,8 @@ class BotES(commands.Bot):
             "cogs.scheduler",
             "cogs.levels",
             "cogs.voice_gen",
+            # ── Rastreo de invitaciones ──
+            "cogs.invites",
         ]
         for cog in cogs:
             try:
@@ -173,7 +183,9 @@ class BotES(commands.Bot):
         else:
             await interaction.followup.send(msg, ephemeral=True)
 
-    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
+    async def on_command_error(
+        self, ctx: commands.Context, error: commands.CommandError
+    ) -> None:
         """Silencia errores de comandos prefix no encontrados (ej. !hug)."""
         if isinstance(error, commands.CommandNotFound):
             return
@@ -181,6 +193,7 @@ class BotES(commands.Bot):
 
 
 # ── Arranque ──────────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     token = os.getenv("TOKEN")

@@ -16,6 +16,9 @@ import Reports from "../components/Reports";
 import Schedules from "../components/Schedules";
 import Logs from "../components/Logs";
 import VoiceGen from "../components/VoiceGen";
+import Welcome from "../components/Welcome";
+import Suggestions from "../components/Suggestions";
+import InviteTracker from "../components/InviteTracker";
 import { apiGet, apiPreload } from "../lib/api";
 
 const PAGE_TITLES = {
@@ -33,6 +36,9 @@ const PAGE_TITLES = {
   schedules: "Mensajes Programados",
   logs: "Registros",
   "voice-gen": "Canales de Voz Auto",
+  welcome: "Bienvenidas & Boosters",
+  suggestions: "Sugerencias",
+  invites: "Invitaciones",
 };
 
 const GUILD_KEY = "botES_guild_id";
@@ -257,6 +263,15 @@ export default function Dashboard() {
                 <VoiceGen selectedGuild={selectedGuild} />
               )}
               {activePage === "logs" && <Logs selectedGuild={selectedGuild} />}
+              {activePage === "welcome" && (
+                <Welcome selectedGuild={selectedGuild} />
+              )}
+              {activePage === "suggestions" && (
+                <Suggestions selectedGuild={selectedGuild} />
+              )}
+              {activePage === "invites" && (
+                <InviteTracker selectedGuild={selectedGuild} />
+              )}
             </>
           )}
 

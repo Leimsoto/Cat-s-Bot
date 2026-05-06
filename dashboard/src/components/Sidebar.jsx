@@ -20,6 +20,7 @@ const NAV_SECTIONS = [
       { id: "autoroles", icon: "fa-user-plus", label: "Autoroles" },
       { id: "giveaways", icon: "fa-gift", label: "Sorteos" },
       { id: "tags", icon: "fa-tags", label: "Tags" },
+      { id: "invites", icon: "fa-paper-plane", label: "Invitaciones" },
     ],
   },
   {
@@ -28,6 +29,8 @@ const NAV_SECTIONS = [
       { id: "embeds", icon: "fa-palette", label: "Creador de Embeds" },
       { id: "reports", icon: "fa-flag", label: "Reportes" },
       { id: "schedules", icon: "fa-clock", label: "Horarios" },
+      { id: "welcome", icon: "fa-hand-wave", label: "Bienvenidas" },
+      { id: "suggestions", icon: "fa-lightbulb", label: "Sugerencias" },
     ],
   },
 ];

@@ -32,6 +32,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
+import discord
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from api.deps import get_bot, get_current_user, get_db, require_guild_admin
@@ -192,6 +193,7 @@ async def get_guild_roles(
 
 @router.get("/{guild_id}/overview")
 async def get_guild_overview(
+    request: Request,
     guild_id: int,
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
@@ -247,15 +249,42 @@ async def get_guild_overview(
             for c in recent_cases_raw
         ]
 
+        # Obtener datos reales del servidor desde el bot en memoria
+        bot = getattr(request.app.state, "bot", None)
+        discord_guild = bot.get_guild(guild_id) if bot else None
+
+        member_count = discord_guild.member_count if discord_guild else members
+        online_count = (
+            sum(1 for m in discord_guild.members if m.status != discord.Status.offline)
+            if discord_guild and discord_guild.members
+            else 0
+        )
+        boost_level = discord_guild.premium_tier if discord_guild else 0
+        boost_count = (
+            discord_guild.premium_subscription_count or 0 if discord_guild else 0
+        )
+        active_voice = (
+            sum(1 for vc in discord_guild.voice_channels if len(vc.members) > 0)
+            if discord_guild
+            else 0
+        )
+
         return {
             "guild": {"id": str(guild_id)},
+            "server": {
+                "memberCount": member_count,
+                "onlineCount": online_count,
+                "boostLevel": boost_level,
+                "boostCount": boost_count,
+                "activeVoice": active_voice,
+            },
             "metrics": {
                 "totalCommands": 0,
                 "automodTriggers": 0,
                 "securityAlerts": 0,
                 "moderationActions": len(mod_cases),
                 "openTickets": len(open_t),
-                "memberCount": members,
+                "memberCount": member_count,
             },
             "charts": charts,
             "recentEvents": [],

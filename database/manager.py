@@ -16,56 +16,112 @@ Variables de entorno (.env):
     DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 """
 
-import os
 import json
 import logging
-from pathlib import Path
+import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("Database")
 
-VALID_CONFIG_COLUMNS = frozenset({
-    "mute_role_id", "log_channel_id",
-    "warn_mute_threshold", "warn_kick_threshold", "warn_ban_threshold",
-    "warn_mute_enabled", "warn_kick_enabled", "warn_ban_enabled",
-    "warn_mute_duration", "warn_embed_config",
-    "staff_role_id",
-})
+VALID_CONFIG_COLUMNS = frozenset(
+    {
+        "mute_role_id",
+        "log_channel_id",
+        "warn_mute_threshold",
+        "warn_kick_threshold",
+        "warn_ban_threshold",
+        "warn_mute_enabled",
+        "warn_kick_enabled",
+        "warn_ban_enabled",
+        "warn_mute_duration",
+        "warn_embed_config",
+        "staff_role_id",
+    }
+)
 
-VALID_USER_COLUMNS = frozenset({
-    "warns", "mute_start", "mute_duration",
-})
+VALID_USER_COLUMNS = frozenset(
+    {
+        "warns",
+        "mute_start",
+        "mute_duration",
+    }
+)
 
-VALID_CHANNEL_CONFIG_COLUMNS = frozenset({
-    "guild_id", "locked", "media_only", "media_config", "auto_react", "slowmode",
-})
+VALID_CHANNEL_CONFIG_COLUMNS = frozenset(
+    {
+        "guild_id",
+        "locked",
+        "media_only",
+        "media_config",
+        "auto_react",
+        "slowmode",
+    }
+)
 
-VALID_SERVER_CONFIG_COLUMNS = frozenset({
-    "staff_role_id", "mod_role_id", "modlog_channel", "serverlog_channel", "log_events",
-    "embed_role_id", "channels_role_id", "users_role_id",
-    "modlog_enabled", "serverlog_enabled",
-})
+VALID_SERVER_CONFIG_COLUMNS = frozenset(
+    {
+        "staff_role_id",
+        "mod_role_id",
+        "modlog_channel",
+        "serverlog_channel",
+        "log_events",
+        "embed_role_id",
+        "channels_role_id",
+        "users_role_id",
+        "modlog_enabled",
+        "serverlog_enabled",
+    }
+)
 
-VALID_AI_CONFIG_COLUMNS = frozenset({
-    "guild_id", "ai_channel_id", "ai_role_id", "ai_model",
-    "ai_system_prompt", "ai_limit_requests", "ai_limit_hours",
-    "ai_imagine_enabled", "ai_webhook_name", "ai_webhook_icon",
-})
+VALID_AI_CONFIG_COLUMNS = frozenset(
+    {
+        "guild_id",
+        "ai_channel_id",
+        "ai_role_id",
+        "ai_model",
+        "ai_system_prompt",
+        "ai_limit_requests",
+        "ai_limit_hours",
+        "ai_imagine_enabled",
+        "ai_webhook_name",
+        "ai_webhook_icon",
+    }
+)
 
-VALID_TICKET_COLUMNS = frozenset({
-    "channel_id", "staff_id", "status", "ai_summary", "closed_at",
-})
+VALID_TICKET_COLUMNS = frozenset(
+    {
+        "channel_id",
+        "staff_id",
+        "status",
+        "ai_summary",
+        "closed_at",
+    }
+)
 
-VALID_GIVEAWAY_COLUMNS = frozenset({
-    "prize", "end_time", "winners_count", "req_roles", "deny_roles",
-    "participants", "ended",
-})
+VALID_GIVEAWAY_COLUMNS = frozenset(
+    {
+        "prize",
+        "end_time",
+        "winners_count",
+        "req_roles",
+        "deny_roles",
+        "participants",
+        "ended",
+    }
+)
 
-VALID_SUGGESTION_COLUMNS = frozenset({
-    "message_id", "content", "status", "upvotes", "downvotes",
-})
+VALID_SUGGESTION_COLUMNS = frozenset(
+    {
+        "message_id",
+        "content",
+        "status",
+        "upvotes",
+        "downvotes",
+    }
+)
 
 
 # ── Schema por tipo de base de datos ─────────────────────────────────────────
@@ -1061,10 +1117,12 @@ class DatabaseManager:
 
     def __init__(self):
         import threading
+
         self.db_type = os.getenv("DB_TYPE", "sqlite").lower()
 
         if self.db_type == "sqlite":
             import sqlite3
+
             data_dir = Path(__file__).parent.parent / "data"
             data_dir.mkdir(exist_ok=True)
             self.db_path = str(data_dir / "bot.db")
@@ -1095,7 +1153,7 @@ class DatabaseManager:
 
     def __del__(self):
         """Cierra la conexión persistente de SQLite al destruir el objeto."""
-        if self.db_type == "sqlite" and hasattr(self, '_sqlite_conn'):
+        if self.db_type == "sqlite" and hasattr(self, "_sqlite_conn"):
             try:
                 self._sqlite_conn.close()
             except Exception:
@@ -1141,12 +1199,14 @@ class DatabaseManager:
             if self.db_type == "postgresql":
                 import psycopg2
                 from psycopg2.extras import RealDictCursor
+
                 connection = psycopg2.connect(self.connection_url)
                 connection.cursor_factory = RealDictCursor
 
             elif self.db_type == "mariadb":
                 import pymysql
                 import pymysql.cursors
+
                 connection = pymysql.connect(
                     host=os.getenv("DB_HOST", "localhost"),
                     port=int(os.getenv("DB_PORT", "3306")),
@@ -1175,6 +1235,7 @@ class DatabaseManager:
         with self._conn() as conn:
             if self.db_type == "postgresql":
                 from psycopg2.extras import RealDictCursor
+
                 cur = conn.cursor(cursor_factory=RealDictCursor)
             else:
                 cur = conn.cursor()
@@ -1184,6 +1245,7 @@ class DatabaseManager:
         with self._conn() as conn:
             if self.db_type == "postgresql":
                 from psycopg2.extras import RealDictCursor
+
                 cur = conn.cursor(cursor_factory=RealDictCursor)
             else:
                 cur = conn.cursor()
@@ -1195,6 +1257,7 @@ class DatabaseManager:
         with self._conn() as conn:
             if self.db_type == "postgresql":
                 from psycopg2.extras import RealDictCursor
+
                 cur = conn.cursor(cursor_factory=RealDictCursor)
             else:
                 cur = conn.cursor()
@@ -1206,6 +1269,7 @@ class DatabaseManager:
         with self._conn() as conn:
             if self.db_type == "postgresql":
                 from psycopg2.extras import RealDictCursor
+
                 cur = conn.cursor(cursor_factory=RealDictCursor)
             else:
                 cur = conn.cursor()
@@ -1225,6 +1289,7 @@ class DatabaseManager:
         with self._conn() as conn:
             if self.db_type == "postgresql":
                 from psycopg2.extras import RealDictCursor
+
                 cur = conn.cursor(cursor_factory=RealDictCursor)
             else:
                 cur = conn.cursor()
@@ -1248,7 +1313,7 @@ class DatabaseManager:
         Seguro de ejecutar múltiples veces (ignora si la columna ya existe).
         """
         migrations = [
-            ("ai_imagine_enabled", "INTEGER DEFAULT 1"),   # SQLite / genérico
+            ("ai_imagine_enabled", "INTEGER DEFAULT 1"),  # SQLite / genérico
         ]
         for col, col_def in migrations:
             try:
@@ -1277,14 +1342,46 @@ class DatabaseManager:
     # Lista de migraciones: (version, descripcion, sql)
     # El SQL es el mismo para los 3 motores; se adaptan placeholders automáticamente.
     _MIGRATIONS: List[tuple] = [
-        (1, "lofi_config: añadir stream_url",
-         "ALTER TABLE lofi_config ADD COLUMN stream_url TEXT"),
-        (2, "lofi_config: añadir station_name",
-         "ALTER TABLE lofi_config ADD COLUMN station_name TEXT"),
-        (3, "ticket_config: máx tickets por usuario",
-         "ALTER TABLE ticket_config ADD COLUMN max_tickets_per_user INTEGER DEFAULT 0"),
-        (4, "ticket_config: cooldown entre tickets",
-         "ALTER TABLE ticket_config ADD COLUMN ticket_cooldown_seconds INTEGER DEFAULT 0"),
+        (
+            1,
+            "lofi_config: añadir stream_url",
+            "ALTER TABLE lofi_config ADD COLUMN stream_url TEXT",
+        ),
+        (
+            2,
+            "lofi_config: añadir station_name",
+            "ALTER TABLE lofi_config ADD COLUMN station_name TEXT",
+        ),
+        (
+            3,
+            "ticket_config: máx tickets por usuario",
+            "ALTER TABLE ticket_config ADD COLUMN max_tickets_per_user INTEGER DEFAULT 0",
+        ),
+        (
+            4,
+            "ticket_config: cooldown entre tickets",
+            "ALTER TABLE ticket_config ADD COLUMN ticket_cooldown_seconds INTEGER DEFAULT 0",
+        ),
+        (
+            5,
+            "invite_config: tabla de configuración de invitaciones",
+            "CREATE TABLE IF NOT EXISTS invite_config (guild_id INTEGER PRIMARY KEY, channel_id INTEGER, enabled INTEGER DEFAULT 1)",
+        ),
+        (
+            6,
+            "invite_stats: tabla de estadísticas de invitaciones",
+            "CREATE TABLE IF NOT EXISTS invite_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, inviter_id INTEGER NOT NULL, invited_id INTEGER NOT NULL, invite_code TEXT, created_at TEXT, UNIQUE(guild_id, invited_id))",
+        ),
+        (
+            7,
+            "server_config: server_log_channel para eventos del servidor",
+            "ALTER TABLE server_config ADD COLUMN server_log_channel INTEGER",
+        ),
+        (
+            8,
+            "server_config: server_log_enabled",
+            "ALTER TABLE server_config ADD COLUMN server_log_enabled INTEGER DEFAULT 0",
+        ),
     ]
 
     def _run_migrations(self) -> None:
@@ -1293,7 +1390,10 @@ class DatabaseManager:
         Cada migración se registra en la tabla schema_migrations para no repetirse.
         """
         try:
-            applied = {r["version"] for r in self._fetchall("SELECT version FROM schema_migrations", ())}
+            applied = {
+                r["version"]
+                for r in self._fetchall("SELECT version FROM schema_migrations", ())
+            }
         except Exception:
             applied = set()
 
@@ -1309,17 +1409,26 @@ class DatabaseManager:
                 logger.info(f"Migración v{version} aplicada: {description}")
             except Exception as exc:
                 # Ignorar si la columna ya existe (bases de datos antiguas con ensure_column aplicado)
-                if "duplicate column" in str(exc).lower() or "already exists" in str(exc).lower():
+                if (
+                    "duplicate column" in str(exc).lower()
+                    or "already exists" in str(exc).lower()
+                ):
                     # Registrar igualmente para no reintentar
                     try:
                         self._execute(
                             "INSERT INTO schema_migrations (version, description, applied_at) VALUES (?, ?, ?)",
-                            (version, description, datetime.now(timezone.utc).isoformat()),
+                            (
+                                version,
+                                description,
+                                datetime.now(timezone.utc).isoformat(),
+                            ),
                         )
                     except Exception:
                         pass
                 else:
-                    logger.warning(f"Error en migración v{version} ('{description}'): {exc}")
+                    logger.warning(
+                        f"Error en migración v{version} ('{description}'): {exc}"
+                    )
 
     def _has_column(self, table: str, column: str) -> bool:
         """Comprueba si una tabla tiene una columna (multi-DB)."""
@@ -1385,27 +1494,35 @@ class DatabaseManager:
         ops = []
         # Asegurar que el registro exista
         if self.db_type == "sqlite":
-            ops.append((
-                "INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)",
-                (guild_id,),
-            ))
+            ops.append(
+                (
+                    "INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)",
+                    (guild_id,),
+                )
+            )
         elif self.db_type == "postgresql":
-            ops.append((
-                "INSERT INTO guild_config (guild_id) VALUES (?) "
-                "ON CONFLICT (guild_id) DO NOTHING",
-                (guild_id,),
-            ))
+            ops.append(
+                (
+                    "INSERT INTO guild_config (guild_id) VALUES (?) "
+                    "ON CONFLICT (guild_id) DO NOTHING",
+                    (guild_id,),
+                )
+            )
         else:  # mariadb
-            ops.append((
-                "INSERT IGNORE INTO guild_config (guild_id) VALUES (?)",
-                (guild_id,),
-            ))
+            ops.append(
+                (
+                    "INSERT IGNORE INTO guild_config (guild_id) VALUES (?)",
+                    (guild_id,),
+                )
+            )
 
         for col, val in kwargs.items():
-            ops.append((
-                f"UPDATE guild_config SET {col} = ? WHERE guild_id = ?",
-                (val, guild_id),
-            ))
+            ops.append(
+                (
+                    f"UPDATE guild_config SET {col} = ? WHERE guild_id = ?",
+                    (val, guild_id),
+                )
+            )
 
         self._executemany(ops)
 
@@ -1419,8 +1536,11 @@ class DatabaseManager:
         if row:
             return row
         return {
-            "user_id": user_id, "guild_id": guild_id,
-            "warns": 0, "mute_start": None, "mute_duration": None,
+            "user_id": user_id,
+            "guild_id": guild_id,
+            "warns": 0,
+            "mute_start": None,
+            "mute_duration": None,
         }
 
     def _upsert_user(self, user_id: int, guild_id: int, **kwargs) -> None:
@@ -1430,27 +1550,35 @@ class DatabaseManager:
 
         ops = []
         if self.db_type == "sqlite":
-            ops.append((
-                "INSERT OR IGNORE INTO user_records (user_id, guild_id) VALUES (?, ?)",
-                (user_id, guild_id),
-            ))
+            ops.append(
+                (
+                    "INSERT OR IGNORE INTO user_records (user_id, guild_id) VALUES (?, ?)",
+                    (user_id, guild_id),
+                )
+            )
         elif self.db_type == "postgresql":
-            ops.append((
-                "INSERT INTO user_records (user_id, guild_id) VALUES (?, ?) "
-                "ON CONFLICT (user_id, guild_id) DO NOTHING",
-                (user_id, guild_id),
-            ))
+            ops.append(
+                (
+                    "INSERT INTO user_records (user_id, guild_id) VALUES (?, ?) "
+                    "ON CONFLICT (user_id, guild_id) DO NOTHING",
+                    (user_id, guild_id),
+                )
+            )
         else:
-            ops.append((
-                "INSERT IGNORE INTO user_records (user_id, guild_id) VALUES (?, ?)",
-                (user_id, guild_id),
-            ))
+            ops.append(
+                (
+                    "INSERT IGNORE INTO user_records (user_id, guild_id) VALUES (?, ?)",
+                    (user_id, guild_id),
+                )
+            )
 
         for col, val in kwargs.items():
-            ops.append((
-                f"UPDATE user_records SET {col} = ? WHERE user_id = ? AND guild_id = ?",
-                (val, user_id, guild_id),
-            ))
+            ops.append(
+                (
+                    f"UPDATE user_records SET {col} = ? WHERE user_id = ? AND guild_id = ?",
+                    (val, user_id, guild_id),
+                )
+            )
 
         self._executemany(ops)
 
@@ -1464,9 +1592,12 @@ class DatabaseManager:
     def clear_warns(self, user_id: int, guild_id: int) -> None:
         self._upsert_user(user_id, guild_id, warns=0)
 
-    def set_mute(self, user_id: int, guild_id: int, duration_secs: Optional[int]) -> None:
+    def set_mute(
+        self, user_id: int, guild_id: int, duration_secs: Optional[int]
+    ) -> None:
         self._upsert_user(
-            user_id, guild_id,
+            user_id,
+            guild_id,
             mute_start=datetime.now(timezone.utc).isoformat(),
             mute_duration=duration_secs,
         )
@@ -1497,8 +1628,11 @@ class DatabaseManager:
             "(guild_id, target_id, moderator_id, action_type, reason, extra_data, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                guild_id, target_id, moderator_id,
-                action_type, reason,
+                guild_id,
+                target_id,
+                moderator_id,
+                action_type,
+                reason,
                 json.dumps(extra, ensure_ascii=False) if extra else None,
                 datetime.now(timezone.utc).isoformat(),
             ),
@@ -1547,27 +1681,35 @@ class DatabaseManager:
 
         ops = []
         if self.db_type == "sqlite":
-            ops.append((
-                "INSERT OR IGNORE INTO channel_config (channel_id, guild_id) VALUES (?, ?)",
-                (channel_id, guild_id),
-            ))
+            ops.append(
+                (
+                    "INSERT OR IGNORE INTO channel_config (channel_id, guild_id) VALUES (?, ?)",
+                    (channel_id, guild_id),
+                )
+            )
         elif self.db_type == "postgresql":
-            ops.append((
-                "INSERT INTO channel_config (channel_id, guild_id) VALUES (?, ?) "
-                "ON CONFLICT (channel_id) DO NOTHING",
-                (channel_id, guild_id),
-            ))
+            ops.append(
+                (
+                    "INSERT INTO channel_config (channel_id, guild_id) VALUES (?, ?) "
+                    "ON CONFLICT (channel_id) DO NOTHING",
+                    (channel_id, guild_id),
+                )
+            )
         else:
-            ops.append((
-                "INSERT IGNORE INTO channel_config (channel_id, guild_id) VALUES (?, ?)",
-                (channel_id, guild_id),
-            ))
+            ops.append(
+                (
+                    "INSERT IGNORE INTO channel_config (channel_id, guild_id) VALUES (?, ?)",
+                    (channel_id, guild_id),
+                )
+            )
 
         for col, val in kwargs.items():
-            ops.append((
-                f"UPDATE channel_config SET {col} = ? WHERE channel_id = ?",
-                (val, channel_id),
-            ))
+            ops.append(
+                (
+                    f"UPDATE channel_config SET {col} = ? WHERE channel_id = ?",
+                    (val, channel_id),
+                )
+            )
 
         self._executemany(ops)
 
@@ -1598,27 +1740,35 @@ class DatabaseManager:
 
         ops = []
         if self.db_type == "sqlite":
-            ops.append((
-                "INSERT OR IGNORE INTO server_config (guild_id) VALUES (?)",
-                (guild_id,),
-            ))
+            ops.append(
+                (
+                    "INSERT OR IGNORE INTO server_config (guild_id) VALUES (?)",
+                    (guild_id,),
+                )
+            )
         elif self.db_type == "postgresql":
-            ops.append((
-                "INSERT INTO server_config (guild_id) VALUES (?) "
-                "ON CONFLICT (guild_id) DO NOTHING",
-                (guild_id,),
-            ))
+            ops.append(
+                (
+                    "INSERT INTO server_config (guild_id) VALUES (?) "
+                    "ON CONFLICT (guild_id) DO NOTHING",
+                    (guild_id,),
+                )
+            )
         else:
-            ops.append((
-                "INSERT IGNORE INTO server_config (guild_id) VALUES (?)",
-                (guild_id,),
-            ))
+            ops.append(
+                (
+                    "INSERT IGNORE INTO server_config (guild_id) VALUES (?)",
+                    (guild_id,),
+                )
+            )
 
         for col, val in kwargs.items():
-            ops.append((
-                f"UPDATE server_config SET {col} = ? WHERE guild_id = ?",
-                (val, guild_id),
-            ))
+            ops.append(
+                (
+                    f"UPDATE server_config SET {col} = ? WHERE guild_id = ?",
+                    (val, guild_id),
+                )
+            )
 
         self._executemany(ops)
 
@@ -1630,8 +1780,13 @@ class DatabaseManager:
         self._execute(
             "INSERT INTO saved_embeds (guild_id, creator_id, name, embed_data, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (guild_id, creator_id, name, embed_data,
-             datetime.now(timezone.utc).isoformat()),
+            (
+                guild_id,
+                creator_id,
+                name,
+                embed_data,
+                datetime.now(timezone.utc).isoformat(),
+            ),
         )
 
     def get_saved_embeds(self, guild_id: int) -> List[Dict]:
@@ -1652,16 +1807,16 @@ class DatabaseManager:
     # ── AI Config ─────────────────────────────────────────────────────────────
 
     DEFAULT_AI_CONFIG: Dict[str, Any] = {
-        "guild_id":           None,
-        "ai_channel_id":      None,
-        "ai_role_id":         None,
-        "ai_model":           "gemini-2.5-flash-lite",   # free-tier: 15 RPM / 1000 RPD
-        "ai_system_prompt":   None,
-        "ai_limit_requests":  50,
-        "ai_limit_hours":     12,
+        "guild_id": None,
+        "ai_channel_id": None,
+        "ai_role_id": None,
+        "ai_model": "gemini-2.5-flash-lite",  # free-tier: 15 RPM / 1000 RPD
+        "ai_system_prompt": None,
+        "ai_limit_requests": 50,
+        "ai_limit_hours": 12,
         "ai_imagine_enabled": 1,
-        "ai_webhook_name":    None,
-        "ai_webhook_icon":    None,
+        "ai_webhook_name": None,
+        "ai_webhook_icon": None,
     }
 
     def get_ai_config(self, guild_id: int) -> Dict:
@@ -1679,43 +1834,67 @@ class DatabaseManager:
 
         ops = []
         if self.db_type == "sqlite":
-            ops.append((
-                "INSERT OR IGNORE INTO ai_config (guild_id) VALUES (?)",
-                (guild_id,),
-            ))
+            ops.append(
+                (
+                    "INSERT OR IGNORE INTO ai_config (guild_id) VALUES (?)",
+                    (guild_id,),
+                )
+            )
         elif self.db_type == "postgresql":
-            ops.append((
-                "INSERT INTO ai_config (guild_id) VALUES (?) ON CONFLICT (guild_id) DO NOTHING",
-                (guild_id,),
-            ))
+            ops.append(
+                (
+                    "INSERT INTO ai_config (guild_id) VALUES (?) ON CONFLICT (guild_id) DO NOTHING",
+                    (guild_id,),
+                )
+            )
         else:
-            ops.append((
-                "INSERT IGNORE INTO ai_config (guild_id) VALUES (?)",
-                (guild_id,),
-            ))
+            ops.append(
+                (
+                    "INSERT IGNORE INTO ai_config (guild_id) VALUES (?)",
+                    (guild_id,),
+                )
+            )
 
         for col, val in kwargs.items():
-            ops.append((
-                f"UPDATE ai_config SET {col} = ? WHERE guild_id = ?",
-                (val, guild_id),
-            ))
+            ops.append(
+                (
+                    f"UPDATE ai_config SET {col} = ? WHERE guild_id = ?",
+                    (val, guild_id),
+                )
+            )
 
         self._executemany(ops)
 
     # ── Appeals ───────────────────────────────────────────────────────────────
 
-    def create_appeal(self, guild_id: int, user_id: int, action_type: str, reason: str, appeal_text: str) -> int:
+    def create_appeal(
+        self,
+        guild_id: int,
+        user_id: int,
+        action_type: str,
+        reason: str,
+        appeal_text: str,
+    ) -> int:
         """Crea una nueva apelación y retorna su ID (aproximado o ejecutado)."""
-        ops = [(
-            "INSERT INTO appeals (guild_id, user_id, action_type, reason, appeal_text, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (guild_id, user_id, action_type, reason, appeal_text, datetime.now(timezone.utc).isoformat())
-        )]
+        ops = [
+            (
+                "INSERT INTO appeals (guild_id, user_id, action_type, reason, appeal_text, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    guild_id,
+                    user_id,
+                    action_type,
+                    reason,
+                    appeal_text,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        ]
         self._executemany(ops)
         # Buscar el ID más reciente
         row = self._fetchone(
             "SELECT id FROM appeals WHERE guild_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
-            (guild_id, user_id)
+            (guild_id, user_id),
         )
         return row["id"] if row else 0
 
@@ -1729,94 +1908,183 @@ class DatabaseManager:
     def _upsert_config(self, table: str, guild_id: int, **kwargs):
         ops = []
         if self.db_type == "sqlite":
-            ops.append((f"INSERT OR IGNORE INTO {table} (guild_id) VALUES (?)", (guild_id,)))
+            ops.append(
+                (f"INSERT OR IGNORE INTO {table} (guild_id) VALUES (?)", (guild_id,))
+            )
         elif self.db_type == "postgresql":
-            ops.append((f"INSERT INTO {table} (guild_id) VALUES (?) ON CONFLICT (guild_id) DO NOTHING", (guild_id,)))
+            ops.append(
+                (
+                    f"INSERT INTO {table} (guild_id) VALUES (?) ON CONFLICT (guild_id) DO NOTHING",
+                    (guild_id,),
+                )
+            )
         else:
-            ops.append((f"INSERT IGNORE INTO {table} (guild_id) VALUES (?)", (guild_id,)))
-        
+            ops.append(
+                (f"INSERT IGNORE INTO {table} (guild_id) VALUES (?)", (guild_id,))
+            )
+
         for col, val in kwargs.items():
-            ops.append((f"UPDATE {table} SET {col} = ? WHERE guild_id = ?", (val, guild_id)))
+            ops.append(
+                (f"UPDATE {table} SET {col} = ? WHERE guild_id = ?", (val, guild_id))
+            )
         self._executemany(ops)
 
     # ── Welcomes ──────────────────────────────────────────────────────────────
     def get_welcome_config(self, guild_id: int) -> Dict:
-        row = self._fetchone("SELECT * FROM welcome_config WHERE guild_id = ?", (guild_id,))
-        return row or {"guild_id": guild_id, "channel_id": None, "embed_data": None, "enabled": 0}
+        row = self._fetchone(
+            "SELECT * FROM welcome_config WHERE guild_id = ?", (guild_id,)
+        )
+        return row or {
+            "guild_id": guild_id,
+            "channel_id": None,
+            "embed_data": None,
+            "enabled": 0,
+        }
 
     def set_welcome_config(self, guild_id: int, **kwargs) -> None:
         self._upsert_config("welcome_config", guild_id, **kwargs)
 
     # ── Boosts ────────────────────────────────────────────────────────────────
     def get_boost_config(self, guild_id: int) -> Dict:
-        row = self._fetchone("SELECT * FROM boost_config WHERE guild_id = ?", (guild_id,))
-        return row or {"guild_id": guild_id, "channel_id": None, "embed_data": None, "gif_url": None, "enabled": 0}
+        row = self._fetchone(
+            "SELECT * FROM boost_config WHERE guild_id = ?", (guild_id,)
+        )
+        return row or {
+            "guild_id": guild_id,
+            "channel_id": None,
+            "embed_data": None,
+            "gif_url": None,
+            "enabled": 0,
+        }
 
     def set_boost_config(self, guild_id: int, **kwargs) -> None:
         self._upsert_config("boost_config", guild_id, **kwargs)
 
     # ── Suggestions ───────────────────────────────────────────────────────────
     def get_suggestions_config(self, guild_id: int) -> Dict:
-        row = self._fetchone("SELECT * FROM suggestions_config WHERE guild_id = ?", (guild_id,))
-        return row or {"guild_id": guild_id, "submit_channel_id": None, "review_channel_id": None, "public_channel_id": None}
+        row = self._fetchone(
+            "SELECT * FROM suggestions_config WHERE guild_id = ?", (guild_id,)
+        )
+        return row or {
+            "guild_id": guild_id,
+            "submit_channel_id": None,
+            "review_channel_id": None,
+            "public_channel_id": None,
+        }
 
     def set_suggestions_config(self, guild_id: int, **kwargs) -> None:
         self._upsert_config("suggestions_config", guild_id, **kwargs)
 
     def create_suggestion(self, guild_id: int, user_id: int, content: str) -> int:
-        ops = [(
-            "INSERT INTO suggestions (guild_id, user_id, content, created_at) VALUES (?, ?, ?, ?)",
-            (guild_id, user_id, content, datetime.now(timezone.utc).isoformat())
-        )]
+        ops = [
+            (
+                "INSERT INTO suggestions (guild_id, user_id, content, created_at) VALUES (?, ?, ?, ?)",
+                (guild_id, user_id, content, datetime.now(timezone.utc).isoformat()),
+            )
+        ]
         self._executemany(ops)
-        row = self._fetchone("SELECT id FROM suggestions WHERE guild_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1", (guild_id, user_id))
+        row = self._fetchone(
+            "SELECT id FROM suggestions WHERE guild_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
+            (guild_id, user_id),
+        )
         return row["id"] if row else 0
 
     def get_suggestion(self, suggestion_id: int) -> Optional[Dict]:
-        return self._fetchone("SELECT * FROM suggestions WHERE id = ?", (suggestion_id,))
+        return self._fetchone(
+            "SELECT * FROM suggestions WHERE id = ?", (suggestion_id,)
+        )
 
     def update_suggestion(self, suggestion_id: int, **kwargs) -> None:
-        if not kwargs: return
+        if not kwargs:
+            return
         invalid = set(kwargs) - VALID_SUGGESTION_COLUMNS
         if invalid:
             raise ValueError(f"Columnas inválidas en suggestions: {invalid}")
-        ops = [(f"UPDATE suggestions SET {col} = ? WHERE id = ?", (val, suggestion_id)) for col, val in kwargs.items()]
+        ops = [
+            (f"UPDATE suggestions SET {col} = ? WHERE id = ?", (val, suggestion_id))
+            for col, val in kwargs.items()
+        ]
         self._executemany(ops)
 
     # ── Giveaways ─────────────────────────────────────────────────────────────
-    def create_giveaway(self, guild_id: int, channel_id: int, message_id: int, prize: str, end_time: int, winners_count: int, req_roles: str, deny_roles: str) -> None:
+    def create_giveaway(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        prize: str,
+        end_time: int,
+        winners_count: int,
+        req_roles: str,
+        deny_roles: str,
+    ) -> None:
         self._execute(
             "INSERT INTO giveaways (guild_id, channel_id, message_id, prize, end_time, winners_count, req_roles, deny_roles, participants) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (guild_id, channel_id, message_id, prize, end_time, winners_count, req_roles, deny_roles, "[]")
+            (
+                guild_id,
+                channel_id,
+                message_id,
+                prize,
+                end_time,
+                winners_count,
+                req_roles,
+                deny_roles,
+                "[]",
+            ),
         )
 
     def get_giveaway(self, message_id: int) -> Optional[Dict]:
-        return self._fetchone("SELECT * FROM giveaways WHERE message_id = ?", (message_id,))
+        return self._fetchone(
+            "SELECT * FROM giveaways WHERE message_id = ?", (message_id,)
+        )
 
     def get_active_giveaways(self) -> List[Dict]:
         return self._fetchall("SELECT * FROM giveaways WHERE ended = 0", ())
 
     def update_giveaway(self, message_id: int, **kwargs) -> None:
-        if not kwargs: return
+        if not kwargs:
+            return
         invalid = set(kwargs) - VALID_GIVEAWAY_COLUMNS
         if invalid:
             raise ValueError(f"Columnas inválidas en giveaways: {invalid}")
-        ops = [(f"UPDATE giveaways SET {col} = ? WHERE message_id = ?", (val, message_id)) for col, val in kwargs.items()]
+        ops = [
+            (f"UPDATE giveaways SET {col} = ? WHERE message_id = ?", (val, message_id))
+            for col, val in kwargs.items()
+        ]
         self._executemany(ops)
 
     # ── AutoRoles ─────────────────────────────────────────────────────────────
-    def set_autorole(self, message_id: int, guild_id: int, channel_id: int, mapping_data: str) -> None:
+    def set_autorole(
+        self, message_id: int, guild_id: int, channel_id: int, mapping_data: str
+    ) -> None:
         ops = []
         if self.db_type == "sqlite":
-            ops.append(("INSERT OR REPLACE INTO autoroles (message_id, guild_id, channel_id, mapping_data) VALUES (?, ?, ?, ?)", (message_id, guild_id, channel_id, mapping_data)))
+            ops.append(
+                (
+                    "INSERT OR REPLACE INTO autoroles (message_id, guild_id, channel_id, mapping_data) VALUES (?, ?, ?, ?)",
+                    (message_id, guild_id, channel_id, mapping_data),
+                )
+            )
         elif self.db_type == "postgresql":
-            ops.append(("INSERT INTO autoroles (message_id, guild_id, channel_id, mapping_data) VALUES (?, ?, ?, ?) ON CONFLICT (message_id) DO UPDATE SET mapping_data = EXCLUDED.mapping_data", (message_id, guild_id, channel_id, mapping_data)))
+            ops.append(
+                (
+                    "INSERT INTO autoroles (message_id, guild_id, channel_id, mapping_data) VALUES (?, ?, ?, ?) ON CONFLICT (message_id) DO UPDATE SET mapping_data = EXCLUDED.mapping_data",
+                    (message_id, guild_id, channel_id, mapping_data),
+                )
+            )
         else:
-            ops.append(("INSERT INTO autoroles (message_id, guild_id, channel_id, mapping_data) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE mapping_data=VALUES(mapping_data)", (message_id, guild_id, channel_id, mapping_data)))
+            ops.append(
+                (
+                    "INSERT INTO autoroles (message_id, guild_id, channel_id, mapping_data) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE mapping_data=VALUES(mapping_data)",
+                    (message_id, guild_id, channel_id, mapping_data),
+                )
+            )
         self._executemany(ops)
 
     def get_autorole(self, message_id: int) -> Optional[Dict]:
-        return self._fetchone("SELECT * FROM autoroles WHERE message_id = ?", (message_id,))
+        return self._fetchone(
+            "SELECT * FROM autoroles WHERE message_id = ?", (message_id,)
+        )
 
     def get_guild_autoroles(self, guild_id: int) -> List[Dict]:
         return self._fetchall("SELECT * FROM autoroles WHERE guild_id = ?", (guild_id,))
@@ -1826,48 +2094,93 @@ class DatabaseManager:
 
     # ── Lofi Config ───────────────────────────────────────────────────────────
     def get_lofi_config(self, guild_id: int) -> Dict:
-        row = self._fetchone("SELECT * FROM lofi_config WHERE guild_id = ?", (guild_id,))
-        return row or {"guild_id": guild_id, "channel_id": None, "volume": 100, "enabled": 0}
+        row = self._fetchone(
+            "SELECT * FROM lofi_config WHERE guild_id = ?", (guild_id,)
+        )
+        return row or {
+            "guild_id": guild_id,
+            "channel_id": None,
+            "volume": 100,
+            "enabled": 0,
+        }
 
     def set_lofi_config(self, guild_id: int, **kwargs) -> None:
         self._upsert_config("lofi_config", guild_id, **kwargs)
 
     # ── Bot Stats (Web Panel IPC) ─────────────────────────────────────────────
-    def update_bot_stats(self, members_online: int, total_members: int, open_tickets: int, uptime_seconds: int) -> None:
+    def update_bot_stats(
+        self,
+        members_online: int,
+        total_members: int,
+        open_tickets: int,
+        uptime_seconds: int,
+    ) -> None:
         ops = []
         now = datetime.now(timezone.utc).isoformat()
         if self.db_type == "sqlite":
             ops.append(("INSERT OR IGNORE INTO bot_stats (id) VALUES (1)", ()))
         elif self.db_type == "postgresql":
-            ops.append(("INSERT INTO bot_stats (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ()))
+            ops.append(
+                (
+                    "INSERT INTO bot_stats (id) VALUES (1) ON CONFLICT (id) DO NOTHING",
+                    (),
+                )
+            )
         else:
             ops.append(("INSERT IGNORE INTO bot_stats (id) VALUES (1)", ()))
-            
-        ops.append((
-            "UPDATE bot_stats SET members_online = ?, total_members = ?, open_tickets = ?, uptime_seconds = ?, last_updated = ? WHERE id = 1",
-            (members_online, total_members, open_tickets, uptime_seconds, now)
-        ))
+
+        ops.append(
+            (
+                "UPDATE bot_stats SET members_online = ?, total_members = ?, open_tickets = ?, uptime_seconds = ?, last_updated = ? WHERE id = 1",
+                (members_online, total_members, open_tickets, uptime_seconds, now),
+            )
+        )
         self._executemany(ops)
 
     def get_bot_stats(self) -> Dict:
         row = self._fetchone("SELECT * FROM bot_stats WHERE id = 1", ())
-        return row or {"members_online": 0, "total_members": 0, "open_tickets": 0, "uptime_seconds": 0, "last_updated": ""}
+        return row or {
+            "members_online": 0,
+            "total_members": 0,
+            "open_tickets": 0,
+            "uptime_seconds": 0,
+            "last_updated": "",
+        }
 
     # ── Tickets ───────────────────────────────────────────────────────────────
     def get_ticket_config(self, guild_id: int) -> Dict:
-        row = self._fetchone("SELECT * FROM ticket_config WHERE guild_id = ?", (guild_id,))
-        return row or {"guild_id": guild_id, "panel_channel_id": None, "category_id": None, "log_channel_id": None, "allowed_roles": "[]", "immune_roles": "[]"}
+        row = self._fetchone(
+            "SELECT * FROM ticket_config WHERE guild_id = ?", (guild_id,)
+        )
+        return row or {
+            "guild_id": guild_id,
+            "panel_channel_id": None,
+            "category_id": None,
+            "log_channel_id": None,
+            "allowed_roles": "[]",
+            "immune_roles": "[]",
+        }
 
     def set_ticket_config(self, guild_id: int, **kwargs) -> None:
         self._upsert_config("ticket_config", guild_id, **kwargs)
 
     def get_ticket_categories(self, guild_id: int) -> List[Dict]:
-        return self._fetchall("SELECT * FROM ticket_categories WHERE guild_id = ?", (guild_id,))
+        return self._fetchall(
+            "SELECT * FROM ticket_categories WHERE guild_id = ?", (guild_id,)
+        )
 
-    def add_ticket_category(self, guild_id: int, name: str, emoji: str, questions: str, close_reasons: str, welcome_embed_data: str = None) -> None:
+    def add_ticket_category(
+        self,
+        guild_id: int,
+        name: str,
+        emoji: str,
+        questions: str,
+        close_reasons: str,
+        welcome_embed_data: str = None,
+    ) -> None:
         self._execute(
             "INSERT INTO ticket_categories (guild_id, name, emoji, questions, close_reasons, welcome_embed_data) VALUES (?, ?, ?, ?, ?, ?)",
-            (guild_id, name, emoji, questions, close_reasons, welcome_embed_data)
+            (guild_id, name, emoji, questions, close_reasons, welcome_embed_data),
         )
 
     def delete_ticket_category(self, category_id: int) -> None:
@@ -1875,91 +2188,122 @@ class DatabaseManager:
 
     def create_ticket(self, guild_id: int, user_id: int, category_name: str) -> Dict:
         # Generate global number
-        row = self._fetchone("SELECT MAX(global_number) as max_num FROM tickets WHERE guild_id = ?", (guild_id,))
+        row = self._fetchone(
+            "SELECT MAX(global_number) as max_num FROM tickets WHERE guild_id = ?",
+            (guild_id,),
+        )
         global_num = (row["max_num"] or 0) + 1 if row else 1
-        
+
         now = datetime.now(timezone.utc).isoformat()
         self._execute(
             "INSERT INTO tickets (global_number, guild_id, user_id, category_name, created_at) VALUES (?, ?, ?, ?, ?)",
-            (global_num, guild_id, user_id, category_name, now)
+            (global_num, guild_id, user_id, category_name, now),
         )
-        
-        last = self._fetchone("SELECT * FROM tickets WHERE guild_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1", (guild_id, user_id))
-        return last # type: ignore
+
+        last = self._fetchone(
+            "SELECT * FROM tickets WHERE guild_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
+            (guild_id, user_id),
+        )
+        return last  # type: ignore
 
     def get_ticket_by_channel(self, channel_id: int) -> Optional[Dict]:
-        return self._fetchone("SELECT * FROM tickets WHERE channel_id = ?", (channel_id,))
+        return self._fetchone(
+            "SELECT * FROM tickets WHERE channel_id = ?", (channel_id,)
+        )
 
     def get_ticket(self, ticket_id: int) -> Optional[Dict]:
         return self._fetchone("SELECT * FROM tickets WHERE id = ?", (ticket_id,))
 
     def update_ticket(self, ticket_id: int, **kwargs) -> None:
-        if not kwargs: return
+        if not kwargs:
+            return
         invalid = set(kwargs) - VALID_TICKET_COLUMNS
         if invalid:
             raise ValueError(f"Columnas inválidas en tickets: {invalid}")
-        ops = [(f"UPDATE tickets SET {col} = ? WHERE id = ?", (val, ticket_id)) for col, val in kwargs.items()]
+        ops = [
+            (f"UPDATE tickets SET {col} = ? WHERE id = ?", (val, ticket_id))
+            for col, val in kwargs.items()
+        ]
         self._executemany(ops)
 
     def count_open_tickets_by_user(self, guild_id: int, user_id: int) -> int:
         row = self._fetchone(
             "SELECT COUNT(*) as cnt FROM tickets WHERE guild_id = ? AND user_id = ? AND status = 'OPEN'",
-            (guild_id, user_id)
+            (guild_id, user_id),
         )
         return int(row["cnt"]) if row else 0
 
     def get_last_ticket_time(self, guild_id: int, user_id: int) -> Optional[str]:
         row = self._fetchone(
             "SELECT MAX(created_at) as last FROM tickets WHERE guild_id = ? AND user_id = ?",
-            (guild_id, user_id)
+            (guild_id, user_id),
         )
         return row["last"] if row else None
 
     # ── Tags ──────────────────────────────────────────────────────────────────
 
     def get_tag(self, guild_id: int, name: str) -> Optional[Dict]:
-        return self._fetchone("SELECT * FROM tags WHERE guild_id = ? AND name = ?", (guild_id, name.lower()))
+        return self._fetchone(
+            "SELECT * FROM tags WHERE guild_id = ? AND name = ?",
+            (guild_id, name.lower()),
+        )
 
     def get_all_tags(self, guild_id: int) -> List[Dict]:
-        return self._fetchall("SELECT * FROM tags WHERE guild_id = ? ORDER BY name ASC", (guild_id,))
+        return self._fetchall(
+            "SELECT * FROM tags WHERE guild_id = ? ORDER BY name ASC", (guild_id,)
+        )
 
-    def create_tag(self, guild_id: int, name: str, content: str, creator_id: int) -> None:
+    def create_tag(
+        self, guild_id: int, name: str, content: str, creator_id: int
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         self._execute(
             "INSERT INTO tags (guild_id, name, content, creator_id, created_at) VALUES (?, ?, ?, ?, ?)",
-            (guild_id, name.lower(), content, creator_id, now)
+            (guild_id, name.lower(), content, creator_id, now),
         )
 
     def update_tag(self, guild_id: int, name: str, content: str) -> None:
         self._execute(
             "UPDATE tags SET content = ? WHERE guild_id = ? AND name = ?",
-            (content, guild_id, name.lower())
+            (content, guild_id, name.lower()),
         )
 
     def delete_tag(self, guild_id: int, name: str) -> None:
-        self._execute("DELETE FROM tags WHERE guild_id = ? AND name = ?", (guild_id, name.lower()))
+        self._execute(
+            "DELETE FROM tags WHERE guild_id = ? AND name = ?", (guild_id, name.lower())
+        )
 
     def increment_tag_uses(self, guild_id: int, name: str) -> None:
-        self._execute("UPDATE tags SET uses = uses + 1 WHERE guild_id = ? AND name = ?", (guild_id, name.lower()))
+        self._execute(
+            "UPDATE tags SET uses = uses + 1 WHERE guild_id = ? AND name = ?",
+            (guild_id, name.lower()),
+        )
 
     # ── Reports ───────────────────────────────────────────────────────────────
 
-    def create_report(self, guild_id: int, reporter_id: int, reported_user_id: int, reason: str) -> int:
+    def create_report(
+        self, guild_id: int, reporter_id: int, reported_user_id: int, reason: str
+    ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         self._execute(
             "INSERT INTO reports (guild_id, reporter_id, reported_user_id, reason, created_at) VALUES (?, ?, ?, ?, ?)",
-            (guild_id, reporter_id, reported_user_id, reason, now)
+            (guild_id, reporter_id, reported_user_id, reason, now),
         )
         row = self._fetchone(
             "SELECT id FROM reports WHERE guild_id = ? AND reporter_id = ? ORDER BY id DESC LIMIT 1",
-            (guild_id, reporter_id)
+            (guild_id, reporter_id),
         )
         return int(row["id"]) if row else 0
 
     def get_reports(self, guild_id: int, status: str = None) -> List[Dict]:
         if status:
-            return self._fetchall("SELECT * FROM reports WHERE guild_id = ? AND status = ? ORDER BY id DESC", (guild_id, status))
-        return self._fetchall("SELECT * FROM reports WHERE guild_id = ? ORDER BY id DESC", (guild_id,))
+            return self._fetchall(
+                "SELECT * FROM reports WHERE guild_id = ? AND status = ? ORDER BY id DESC",
+                (guild_id, status),
+            )
+        return self._fetchall(
+            "SELECT * FROM reports WHERE guild_id = ? ORDER BY id DESC", (guild_id,)
+        )
 
     def get_report(self, report_id: int) -> Optional[Dict]:
         """Obtiene un reporte por su ID."""
@@ -1970,45 +2314,81 @@ class DatabaseManager:
         invalid = set(kwargs) - valid
         if invalid:
             raise ValueError(f"Columnas inválidas en reports: {invalid}")
-        ops = [(f"UPDATE reports SET {col} = ? WHERE id = ?", (val, report_id)) for col, val in kwargs.items()]
+        ops = [
+            (f"UPDATE reports SET {col} = ? WHERE id = ?", (val, report_id))
+            for col, val in kwargs.items()
+        ]
         self._executemany(ops)
 
     # ── Scheduled Messages ────────────────────────────────────────────────────
 
-    def create_schedule(self, guild_id: int, name: str, channel_id: int,
-                        content: str, interval_seconds: int, created_by: int) -> None:
+    def create_schedule(
+        self,
+        guild_id: int,
+        name: str,
+        channel_id: int,
+        content: str,
+        interval_seconds: int,
+        created_by: int,
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         self._execute(
             "INSERT INTO scheduled_messages (guild_id, name, channel_id, content, interval_seconds, created_by, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (guild_id, name, channel_id, content, interval_seconds, created_by, now)
+            (guild_id, name, channel_id, content, interval_seconds, created_by, now),
         )
 
     def get_schedules(self, guild_id: int) -> List[Dict]:
-        return self._fetchall("SELECT * FROM scheduled_messages WHERE guild_id = ? ORDER BY name ASC", (guild_id,))
+        return self._fetchall(
+            "SELECT * FROM scheduled_messages WHERE guild_id = ? ORDER BY name ASC",
+            (guild_id,),
+        )
 
     def get_all_active_schedules(self) -> List[Dict]:
         return self._fetchall("SELECT * FROM scheduled_messages WHERE enabled = 1", ())
 
     def update_schedule(self, schedule_id: int, **kwargs) -> None:
-        valid = frozenset({"enabled", "channel_id", "content", "interval_seconds", "last_sent"})
+        valid = frozenset(
+            {"enabled", "channel_id", "content", "interval_seconds", "last_sent"}
+        )
         invalid = set(kwargs) - valid
         if invalid:
             raise ValueError(f"Columnas inválidas en scheduled_messages: {invalid}")
-        ops = [(f"UPDATE scheduled_messages SET {col} = ? WHERE id = ?", (val, schedule_id)) for col, val in kwargs.items()]
+        ops = [
+            (
+                f"UPDATE scheduled_messages SET {col} = ? WHERE id = ?",
+                (val, schedule_id),
+            )
+            for col, val in kwargs.items()
+        ]
         self._executemany(ops)
 
     def delete_schedule(self, guild_id: int, name: str) -> None:
-        self._execute("DELETE FROM scheduled_messages WHERE guild_id = ? AND name = ?", (guild_id, name))
+        self._execute(
+            "DELETE FROM scheduled_messages WHERE guild_id = ? AND name = ?",
+            (guild_id, name),
+        )
 
     def get_schedule_by_name(self, guild_id: int, name: str) -> Optional[Dict]:
-        return self._fetchone("SELECT * FROM scheduled_messages WHERE guild_id = ? AND name = ?", (guild_id, name))
+        return self._fetchone(
+            "SELECT * FROM scheduled_messages WHERE guild_id = ? AND name = ?",
+            (guild_id, name),
+        )
 
     # ── Levels / XP ───────────────────────────────────────────────────────────
 
     def get_user_level(self, user_id: int, guild_id: int) -> Dict:
-        row = self._fetchone("SELECT * FROM user_levels WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
-        return row or {"user_id": user_id, "guild_id": guild_id, "xp": 0, "level": 0, "message_count": 0}
+        row = self._fetchone(
+            "SELECT * FROM user_levels WHERE user_id = ? AND guild_id = ?",
+            (user_id, guild_id),
+        )
+        return row or {
+            "user_id": user_id,
+            "guild_id": guild_id,
+            "xp": 0,
+            "level": 0,
+            "message_count": 0,
+        }
 
     @staticmethod
     def _xp_for_level(n: int) -> int:
@@ -2043,26 +2423,40 @@ class DatabaseManager:
             self._execute(
                 "INSERT INTO user_levels (user_id, guild_id, xp, level, message_count) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(user_id, guild_id) DO UPDATE SET xp = ?, level = ?, message_count = ?",
-                (user_id, guild_id, new_xp, new_level, new_count, new_xp, new_level, new_count)
+                (
+                    user_id,
+                    guild_id,
+                    new_xp,
+                    new_level,
+                    new_count,
+                    new_xp,
+                    new_level,
+                    new_count,
+                ),
             )
         elif self.db_type == "postgresql":
             self._execute(
                 "INSERT INTO user_levels (user_id, guild_id, xp, level, message_count) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT (user_id, guild_id) DO UPDATE SET xp = EXCLUDED.xp, level = EXCLUDED.level, message_count = EXCLUDED.message_count",
-                (user_id, guild_id, new_xp, new_level, new_count)
+                (user_id, guild_id, new_xp, new_level, new_count),
             )
         else:
             self._execute(
                 "INSERT INTO user_levels (user_id, guild_id, xp, level, message_count) VALUES (?, ?, ?, ?, ?) "
                 "ON DUPLICATE KEY UPDATE xp = VALUES(xp), level = VALUES(level), message_count = VALUES(message_count)",
-                (user_id, guild_id, new_xp, new_level, new_count)
+                (user_id, guild_id, new_xp, new_level, new_count),
             )
-        return {"xp": new_xp, "level": new_level, "old_level": old_level, "leveled_up": leveled_up}
+        return {
+            "xp": new_xp,
+            "level": new_level,
+            "old_level": old_level,
+            "leveled_up": leveled_up,
+        }
 
     def reset_user_level(self, user_id: int, guild_id: int) -> None:
         self._execute(
             "UPDATE user_levels SET xp = 0, level = 0, message_count = 0 WHERE user_id = ? AND guild_id = ?",
-            (user_id, guild_id)
+            (user_id, guild_id),
         )
 
     def get_leaderboard(self, guild_id: int, limit: int = 10) -> List[Dict]:
@@ -2070,48 +2464,64 @@ class DatabaseManager:
             "SELECT user_id, xp, level, message_count, "
             "ROW_NUMBER() OVER (ORDER BY xp DESC) as position "
             "FROM user_levels WHERE guild_id = ? ORDER BY xp DESC LIMIT ?",
-            (guild_id, limit)
+            (guild_id, limit),
         )
 
     def get_xp_config(self, guild_id: int) -> Dict:
         row = self._fetchone("SELECT * FROM xp_config WHERE guild_id = ?", (guild_id,))
         return row or {
-            "guild_id": guild_id, "enabled": 0, "xp_min": 15, "xp_max": 25,
-            "cooldown_seconds": 60, "ignored_channels": "[]", "channel_multipliers": "{}",
-            "announcement_channel_id": None, "announcement_message": None, "stack_rewards": 1,
+            "guild_id": guild_id,
+            "enabled": 0,
+            "xp_min": 15,
+            "xp_max": 25,
+            "cooldown_seconds": 60,
+            "ignored_channels": "[]",
+            "channel_multipliers": "{}",
+            "announcement_channel_id": None,
+            "announcement_message": None,
+            "stack_rewards": 1,
         }
 
     def set_xp_config(self, guild_id: int, **kwargs) -> None:
         self._upsert_config("xp_config", guild_id, **kwargs)
 
     def get_level_rewards(self, guild_id: int) -> List[Dict]:
-        return self._fetchall("SELECT * FROM level_rewards WHERE guild_id = ? ORDER BY level ASC", (guild_id,))
+        return self._fetchall(
+            "SELECT * FROM level_rewards WHERE guild_id = ? ORDER BY level ASC",
+            (guild_id,),
+        )
 
     def set_level_reward(self, guild_id: int, level: int, role_id: int) -> None:
         if self.db_type == "sqlite":
             self._execute(
                 "INSERT INTO level_rewards (guild_id, level, role_id) VALUES (?, ?, ?) "
                 "ON CONFLICT(guild_id, level) DO UPDATE SET role_id = ?",
-                (guild_id, level, role_id, role_id)
+                (guild_id, level, role_id, role_id),
             )
         elif self.db_type == "postgresql":
             self._execute(
                 "INSERT INTO level_rewards (guild_id, level, role_id) VALUES (?, ?, ?) "
                 "ON CONFLICT (guild_id, level) DO UPDATE SET role_id = EXCLUDED.role_id",
-                (guild_id, level, role_id)
+                (guild_id, level, role_id),
             )
         else:
             self._execute(
                 "INSERT INTO level_rewards (guild_id, level, role_id) VALUES (?, ?, ?) "
                 "ON DUPLICATE KEY UPDATE role_id = VALUES(role_id)",
-                (guild_id, level, role_id)
+                (guild_id, level, role_id),
             )
 
     def delete_level_reward(self, guild_id: int, level: int) -> None:
-        self._execute("DELETE FROM level_rewards WHERE guild_id = ? AND level = ?", (guild_id, level))
+        self._execute(
+            "DELETE FROM level_rewards WHERE guild_id = ? AND level = ?",
+            (guild_id, level),
+        )
 
     def get_level_reward(self, guild_id: int, level: int) -> Optional[Dict]:
-        return self._fetchone("SELECT * FROM level_rewards WHERE guild_id = ? AND level = ?", (guild_id, level))
+        return self._fetchone(
+            "SELECT * FROM level_rewards WHERE guild_id = ? AND level = ?",
+            (guild_id, level),
+        )
 
     # ── Web Panel helpers ─────────────────────────────────────────────────────
 
@@ -2128,7 +2538,9 @@ class DatabaseManager:
 
     def count_all_open_tickets(self) -> int:
         """Cuenta todos los tickets abiertos en todos los servidores."""
-        row = self._fetchone("SELECT COUNT(*) AS cnt FROM tickets WHERE status = 'OPEN'", ())
+        row = self._fetchone(
+            "SELECT COUNT(*) AS cnt FROM tickets WHERE status = 'OPEN'", ()
+        )
         return int(row["cnt"]) if row else 0
 
     def count_open_tickets_by_guild(self, guild_id: int) -> int:
@@ -2139,8 +2551,13 @@ class DatabaseManager:
         )
         return int(row["cnt"]) if row else 0
 
-    def get_all_tickets(self, guild_id: int, status: Optional[str] = None,
-                        limit: int = 50, offset: int = 0) -> List[Dict]:
+    def get_all_tickets(
+        self,
+        guild_id: int,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict]:
         """Retorna tickets de un servidor con paginación y filtro opcional."""
         if status:
             return self._fetchall(
@@ -2153,7 +2570,9 @@ class DatabaseManager:
             (guild_id, limit, offset),
         )
 
-    def get_guild_giveaways(self, guild_id: int, active_only: bool = True) -> List[Dict]:
+    def get_guild_giveaways(
+        self, guild_id: int, active_only: bool = True
+    ) -> List[Dict]:
         """Retorna sorteos de un servidor, opcionalmente solo activos."""
         if active_only:
             return self._fetchall(
@@ -2165,7 +2584,9 @@ class DatabaseManager:
             (guild_id,),
         )
 
-    def get_mod_actions(self, guild_id: int, limit: int = 50, offset: int = 0) -> List[Dict]:
+    def get_mod_actions(
+        self, guild_id: int, limit: int = 50, offset: int = 0
+    ) -> List[Dict]:
         """Retorna acciones de moderación de un servidor con paginación."""
         return self._fetchall(
             "SELECT * FROM mod_actions WHERE guild_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
@@ -2199,7 +2620,9 @@ class DatabaseManager:
         """Obtiene un custom command por su ID."""
         return self._fetchone("SELECT * FROM custom_commands WHERE id = ?", (cc_id,))
 
-    def get_enabled_custom_commands(self, guild_id: int, trigger_type: str = None) -> List[Dict]:
+    def get_enabled_custom_commands(
+        self, guild_id: int, trigger_type: str = None
+    ) -> List[Dict]:
         """Retorna CCs habilitados, opcionalmente filtrados por tipo de trigger."""
         if trigger_type:
             return self._fetchall(
@@ -2211,30 +2634,55 @@ class DatabaseManager:
             (guild_id,),
         )
 
-    def create_custom_command(self, guild_id: int, name: str, trigger_type: str,
-                               trigger_value: str, conditions: str, actions: str,
-                               creator_id: int) -> Optional[Dict]:
+    def create_custom_command(
+        self,
+        guild_id: int,
+        name: str,
+        trigger_type: str,
+        trigger_value: str,
+        conditions: str,
+        actions: str,
+        creator_id: int,
+    ) -> Optional[Dict]:
         """Crea un nuevo custom command y retorna el registro."""
         now = datetime.now(timezone.utc).isoformat()
         self._execute(
             "INSERT INTO custom_commands (guild_id, name, trigger_type, trigger_value, "
             "conditions, actions, creator_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (guild_id, name.lower(), trigger_type, trigger_value, conditions, actions, creator_id, now),
+            (
+                guild_id,
+                name.lower(),
+                trigger_type,
+                trigger_value,
+                conditions,
+                actions,
+                creator_id,
+                now,
+            ),
         )
         return self.get_custom_command(guild_id, name)
 
     def update_custom_command(self, guild_id: int, name: str, **kwargs) -> None:
         """Actualiza campos de un custom command."""
-        valid = frozenset({
-            "enabled", "trigger_type", "trigger_value", "conditions",
-            "actions", "uses", "last_used",
-        })
+        valid = frozenset(
+            {
+                "enabled",
+                "trigger_type",
+                "trigger_value",
+                "conditions",
+                "actions",
+                "uses",
+                "last_used",
+            }
+        )
         invalid = set(kwargs) - valid
         if invalid:
             raise ValueError(f"Columnas inválidas en custom_commands: {invalid}")
         ops = [
-            (f"UPDATE custom_commands SET {col} = ? WHERE guild_id = ? AND name = ?",
-             (val, guild_id, name.lower()))
+            (
+                f"UPDATE custom_commands SET {col} = ? WHERE guild_id = ? AND name = ?",
+                (val, guild_id, name.lower()),
+            )
             for col, val in kwargs.items()
         ]
         self._executemany(ops)
@@ -2256,7 +2704,9 @@ class DatabaseManager:
 
     # ── CC Variables (persistentes) ───────────────────────────────────────────
 
-    def get_cc_variable(self, guild_id: int, key: str, scope: str = "guild") -> Optional[str]:
+    def get_cc_variable(
+        self, guild_id: int, key: str, scope: str = "guild"
+    ) -> Optional[str]:
         """Obtiene el valor de una variable. Retorna None si no existe."""
         row = self._fetchone(
             "SELECT value FROM cc_variables WHERE guild_id = ? AND key = ? AND scope = ?",
@@ -2264,7 +2714,9 @@ class DatabaseManager:
         )
         return row["value"] if row else None
 
-    def set_cc_variable(self, guild_id: int, key: str, value: str, scope: str = "guild") -> None:
+    def set_cc_variable(
+        self, guild_id: int, key: str, value: str, scope: str = "guild"
+    ) -> None:
         """Crea o actualiza una variable persistente."""
         if self.db_type == "sqlite":
             self._execute(
@@ -2299,8 +2751,9 @@ class DatabaseManager:
             (guild_id, key, scope),
         )
 
-    def increment_cc_variable(self, guild_id: int, key: str, amount: int = 1,
-                               scope: str = "guild") -> str:
+    def increment_cc_variable(
+        self, guild_id: int, key: str, amount: int = 1, scope: str = "guild"
+    ) -> str:
         """Incrementa una variable numérica y retorna el nuevo valor."""
         current = self.get_cc_variable(guild_id, key, scope)
         try:
@@ -2342,18 +2795,28 @@ class DatabaseManager:
         row = self._fetchone(
             "SELECT * FROM voice_gen_config WHERE guild_id = ?", (guild_id,)
         )
-        return dict(row) if row else {
-            "guild_id": guild_id, "generator_channel_id": None, "category_id": None,
-            "panel_channel_id": None, "name_template": "{username}'s VC",
-            "default_limit": 0, "enabled": 0,
-        }
+        return (
+            dict(row)
+            if row
+            else {
+                "guild_id": guild_id,
+                "generator_channel_id": None,
+                "category_id": None,
+                "panel_channel_id": None,
+                "name_template": "{username}'s VC",
+                "default_limit": 0,
+                "enabled": 0,
+            }
+        )
 
     def set_voice_gen_config(self, guild_id: int, **kwargs) -> None:
         """Crea o actualiza la configuración del generador de voz."""
         self._ensure_voice_gen_tables()
         self._upsert_config("voice_gen_config", guild_id, **kwargs)
 
-    def create_voice_gen_channel(self, channel_id: int, guild_id: int, owner_id: int) -> None:
+    def create_voice_gen_channel(
+        self, channel_id: int, guild_id: int, owner_id: int
+    ) -> None:
         """Registra un canal de voz generado."""
         self._ensure_voice_gen_tables()
         self._execute(
@@ -2382,7 +2845,9 @@ class DatabaseManager:
             (guild_id,),
         )
 
-    def update_voice_gen_channel_owner(self, channel_id: int, new_owner_id: int) -> None:
+    def update_voice_gen_channel_owner(
+        self, channel_id: int, new_owner_id: int
+    ) -> None:
         """Cambia el dueño de un canal generado."""
         self._ensure_voice_gen_tables()
         self._execute(
@@ -2395,4 +2860,71 @@ class DatabaseManager:
         self._ensure_voice_gen_tables()
         self._execute(
             "DELETE FROM voice_gen_channels WHERE channel_id = ?", (channel_id,)
+        )
+
+    # ── Invites ───────────────────────────────────────────────────────────────
+
+    def get_invite_config(self, guild_id: int) -> Dict:
+        """Obtiene la configuración de invitaciones de un servidor."""
+        row = self._fetchone(
+            "SELECT * FROM invite_config WHERE guild_id = ?", (guild_id,)
+        )
+        return row or {"guild_id": guild_id, "channel_id": None, "enabled": 1}
+
+    def set_invite_config(self, guild_id: int, **kwargs) -> None:
+        """Crea o actualiza la configuración de invitaciones."""
+        self._upsert_config("invite_config", guild_id, **kwargs)
+
+    def record_invite(
+        self, guild_id: int, inviter_id: int, invited_id: int, invite_code: str
+    ) -> None:
+        """Registra un evento de invitación (quién invitó a quién)."""
+        from datetime import datetime, timezone
+
+        try:
+            self._execute(
+                "INSERT OR REPLACE INTO invite_stats "
+                "(guild_id, inviter_id, invited_id, invite_code, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    guild_id,
+                    inviter_id,
+                    invited_id,
+                    invite_code,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        except Exception:
+            pass
+
+    def get_user_invite_count(self, guild_id: int, user_id: int) -> int:
+        """Devuelve cuántas personas ha invitado un usuario en este servidor."""
+        row = self._fetchone(
+            "SELECT COUNT(*) as c FROM invite_stats "
+            "WHERE guild_id = ? AND inviter_id = ?",
+            (guild_id, user_id),
+        )
+        return row["c"] if row else 0
+
+    def get_invite_leaderboard(self, guild_id: int, limit: int = 10) -> List[Dict]:
+        """Devuelve los top inviters de un servidor ordenados por total de invitaciones."""
+        return self._fetchall(
+            "SELECT inviter_id, COUNT(*) as total "
+            "FROM invite_stats WHERE guild_id = ? "
+            "GROUP BY inviter_id ORDER BY total DESC LIMIT ?",
+            (guild_id, limit),
+        )
+
+    def get_all_suggestions(self, guild_id: int, status: str = None) -> List[Dict]:
+        """Devuelve sugerencias de un servidor, opcionalmente filtradas por estado."""
+        if status:
+            return self._fetchall(
+                "SELECT * FROM suggestions WHERE guild_id = ? AND status = ? "
+                "ORDER BY created_at DESC",
+                (guild_id, status),
+            )
+        return self._fetchall(
+            "SELECT * FROM suggestions WHERE guild_id = ? "
+            "ORDER BY created_at DESC LIMIT 50",
+            (guild_id,),
         )
