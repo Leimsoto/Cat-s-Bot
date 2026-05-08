@@ -9,3 +9,6 @@ data/
 # Entorno y logs
 .env
 bot.log
+
+#claude
+.claude/
