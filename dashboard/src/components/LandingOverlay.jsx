@@ -1,5 +1,6 @@
 // LandingOverlay — Selector de servidor con tarjetas 3D tilt (CSS hover puro)
 // El efecto de inclinación 3D se hace con CSS ::hover y sibling selectors sin JS
+import CatLogo from "./CatLogo";
 
 const TRACKERS = Array.from({ length: 9 }, (_, i) => i + 1);
 
@@ -58,14 +59,13 @@ export default function LandingOverlay({ guilds, onSelectGuild }) {
           <div style={{ textAlign: 'center', marginBottom: 32 }}>
             <div style={{
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              width: 56, height: 56, borderRadius: 18,
-              background: 'linear-gradient(135deg, rgba(99,102,241,0.3), rgba(139,92,246,0.2))',
-              border: '1px solid rgba(139,92,246,0.4)',
-              marginBottom: 18, fontSize: '1.6rem',
-              boxShadow: '0 0 24px rgba(139,92,246,0.3)',
-            }}>🛡️</div>
+              width: 64, height: 64, borderRadius: 18, marginBottom: 18,
+              boxShadow: '0 0 28px rgba(168,85,247,0.45)',
+            }}>
+              <CatLogo size={64} ariaLabel="Cats Bots" />
+            </div>
             <p style={{ fontSize: '0.78rem', fontWeight: 800, letterSpacing: '0.15em', color: 'var(--accent)', textTransform: 'uppercase', margin: '0 0 8px' }}>
-              Panel de Control · Bot ES
+              Panel de Control · Cats Bots
             </p>
             <h2 style={{ margin: '0 0 8px', fontSize: '1.8rem', fontWeight: 900 }}>
               Selecciona un servidor
@@ -77,9 +77,11 @@ export default function LandingOverlay({ guilds, onSelectGuild }) {
 
           {guilds.length === 0 ? (
             <div className="dashboard-empty-state" style={{ padding: '28px', textAlign: 'center' }}>
-              <span style={{ fontSize: '3rem', display: 'block', marginBottom: 12 }}>🤖</span>
+              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
+                <CatLogo size={56} ariaLabel="Cats Bots" />
+              </div>
               <h3>Sin servidores disponibles</h3>
-              <p style={{ color: 'var(--muted)' }}>El bot no está en ninguno de tus servidores de administrador.</p>
+              <p style={{ color: 'var(--muted)' }}>Cats Bots aún no está en ninguno de tus servidores de administrador.</p>
               <a
                 href={`https://discord.com/oauth2/authorize?client_id=${import.meta.env.VITE_DISCORD_CLIENT_ID || ''}&permissions=8&scope=bot+applications.commands`}
                 className="btn-primary" target="_blank" rel="noreferrer"

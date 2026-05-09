@@ -299,7 +299,7 @@ export default function IAConfig({ selectedGuild: guildId }) {
             <input
               type="text"
               value={cfg?.ai_webhook_name || ""}
-              placeholder="Bot ES IA"
+              placeholder="Cats Bots IA"
               onChange={(e) => set("ai_webhook_name", e.target.value)}
             />
           </div>

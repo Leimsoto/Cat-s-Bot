@@ -11,10 +11,11 @@ Novedades v2:
 
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Thread
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -59,6 +60,7 @@ def create_app(db=None, bot=None) -> FastAPI:
         app.state.db = db
     if bot is not None:
         app.state.bot = bot
+    app.state.started_at = datetime.now(timezone.utc)
 
     # ── Registrar routers API ─────────────────────────────────────────────────
     from api.auth import router as auth_router
@@ -102,44 +104,87 @@ def create_app(db=None, bot=None) -> FastAPI:
         router_admin as ai_keys_admin_router,
         router_guild as ai_keys_guild_router,
     )
+    from api.routes.public_stats import router as public_stats_router
 
     app.include_router(welcome_router)
     app.include_router(suggestions_router)
     app.include_router(invites_router)
     app.include_router(ai_keys_admin_router)  # /api/ai/keys/* (master admin)
     app.include_router(ai_keys_guild_router)  # /api/guilds/{id}/ia/key (guild admin)
+    app.include_router(public_stats_router)  # /api/public/stats (sin auth)
 
     # ── Health-check ──────────────────────────────────────────────────────────
-    @app.get("/", tags=["health"])
-    async def health():
-        return {"status": "online", "bot": "Bot ES", "api": "v2.0.0"}
-
     @app.get("/api/health", tags=["health"])
     async def api_health():
-        return {"status": "ok"}
+        return {"status": "ok", "bot": "Cats Bots", "api": "v2.0.0"}
 
-    # ── Servir nuevo Dashboard React (SPA) ────────────────────────────────────
+    # ── Servir SPA (Cats Bots) ─────────────────────────────────────────────────
     if DASHBOARD_DIR.is_dir():
-        # Montar assets estáticos de Vite (JS, CSS, imágenes)
         assets_dir = DASHBOARD_DIR / "assets"
         if assets_dir.is_dir():
             app.mount(
+                "/assets",
+                StaticFiles(directory=str(assets_dir)),
+                name="spa-assets",
+            )
+            # Compat: builds previos referenciaban /panel/assets/*
+            app.mount(
                 "/panel/assets",
                 StaticFiles(directory=str(assets_dir)),
-                name="panel-assets",
+                name="panel-assets-legacy",
             )
 
-        @app.get("/panel/{full_path:path}", tags=["panel"], include_in_schema=False)
-        async def serve_panel(full_path: str, request: Request):
-            """SPA fallback — devuelve index.html para cualquier ruta /panel/*"""
-            index = DASHBOARD_DIR / "index.html"
-            if index.is_file():
-                return FileResponse(str(index))
-            return {
-                "error": "Panel no compilado. Ejecuta: cd dashboard && npm run build"
-            }
+        index_file = DASHBOARD_DIR / "index.html"
 
-        logger.info("✅ Panel React disponible en /panel/")
+        # Servir favicon y otros archivos estáticos top-level si existen
+        def _make_static_handler(path: Path):
+            async def _serve_static():
+                return FileResponse(str(path))
+            return _serve_static
+
+        for static_name in (
+            "favicon.svg",
+            "favicon.ico",
+            "logo.png",
+            "logo.svg",
+            "robots.txt",
+            "sitemap.xml",
+            "site.webmanifest",
+        ):
+            candidate = DASHBOARD_DIR / static_name
+            if candidate.is_file():
+                app.add_api_route(
+                    f"/{static_name}",
+                    _make_static_handler(candidate),
+                    methods=["GET"],
+                    include_in_schema=False,
+                )
+
+        async def _serve_index(_request: Request = None):
+            if index_file.is_file():
+                return FileResponse(str(index_file))
+            return {"error": "SPA no compilada. Ejecuta: cd dashboard && npm run build"}
+
+        @app.get("/", include_in_schema=False)
+        async def serve_root():
+            return await _serve_index()
+
+        @app.get("/auth/callback", include_in_schema=False)
+        async def serve_auth_callback():
+            return await _serve_index()
+
+        @app.get("/panel/{full_path:path}", include_in_schema=False)
+        async def serve_panel(full_path: str, request: Request):
+            return await _serve_index()
+
+        # SPA fallback final — cualquier path no /api/* ni /assets/* sirve index.
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def serve_spa(full_path: str, request: Request):
+            if full_path.startswith("api/") or full_path.startswith("assets/"):
+                raise HTTPException(404, "Not found")
+            return await _serve_index()
+
+        logger.info("✅ SPA Cats Bots disponible en /")
     else:
         logger.warning(
             "⚠️  dashboard/dist/ no encontrado. Ejecuta: cd dashboard && npm run build"

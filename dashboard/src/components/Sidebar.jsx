@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { ICONS } from "../lib/icons";
+import CatLogo from "./CatLogo";
 
 const NAV_SECTIONS = [
   {
@@ -75,7 +76,7 @@ export default function Sidebar({
 
   const handleLogout = () => {
     localStorage.removeItem("botES_token");
-    window.location.href = "/panel/login";
+    window.location.href = "/";
   };
 
   const close = () => {
@@ -93,9 +94,12 @@ export default function Sidebar({
           width: "100%",
         }}
       >
-        <div className="sidebar-brand-block">
-          <p className="sidebar-kicker">Panel de Control</p>
-          <h2 className="brand-text-glow">BOT ES</h2>
+        <div className="sidebar-brand-block sidebar-brand-row">
+          <CatLogo size={38} ariaLabel="Cats Bots" />
+          <div>
+            <p className="sidebar-kicker">Panel de Control</p>
+            <h2 className="brand-text-glow">Cats Bots</h2>
+          </div>
         </div>
         <button
           className="btn-icon mobile-only"

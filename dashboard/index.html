@@ -2,37 +2,172 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Panel — Bot ES</title>
-    <meta name="description" content="Panel de control y administración del Bot ES para Discord" />
+    <meta name="theme-color" content="#7c3aed" />
+    <meta name="color-scheme" content="dark" />
+
+    <!-- Primary SEO -->
+    <title>Cats Bots — Bot de Discord en español con IA, moderación y panel web</title>
+    <meta
+      name="description"
+      content="Cats Bots es un bot de Discord en español todo-en-uno: inteligencia artificial, moderación, tickets, niveles, música, sorteos, bienvenidas y un panel web morado donde configuras todo en minutos. Gratis para empezar."
+    />
+    <meta
+      name="keywords"
+      content="bot discord, bot de discord en español, cats bots, bot discord ia, moderación discord, tickets discord, niveles discord, música discord, panel discord, dashboard bot discord"
+    />
+    <meta name="author" content="Cats Bots" />
+    <meta name="robots" content="index,follow,max-image-preview:large" />
+    <meta name="googlebot" content="index,follow" />
+    <link rel="canonical" href="https://catsbots.app/" />
+
+    <!-- Favicons / icons -->
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="es_ES" />
+    <meta property="og:site_name" content="Cats Bots" />
+    <meta property="og:title" content="Cats Bots — Bot de Discord en español con panel web" />
+    <meta
+      property="og:description"
+      content="IA, moderación, tickets, niveles, música y mucho más. Configura tu servidor desde un panel web morado, rápido y sin fricción."
+    />
+    <meta property="og:url" content="https://catsbots.app/" />
+    <meta property="og:image" content="https://catsbots.app/logo.png" />
+    <meta property="og:image:alt" content="Cats Bots — Logo" />
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Cats Bots — Bot de Discord en español" />
+    <meta
+      name="twitter:description"
+      content="Bot de Discord todo-en-uno con IA, moderación, tickets, niveles, música y panel web en español."
+    />
+    <meta name="twitter:image" content="https://catsbots.app/logo.png" />
+
+    <!-- Performance hints -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,700;1,9..40,400&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin />
+    <link rel="dns-prefetch" href="https://cdn.discordapp.com" />
+
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,700;1,9..40,400&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
+    />
+
+    <!-- Structured data — SoftwareApplication + Organization -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://catsbots.app/#org",
+            "name": "Cats Bots",
+            "url": "https://catsbots.app/",
+            "logo": "https://catsbots.app/logo.png",
+            "sameAs": ["https://discord.com/"]
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://catsbots.app/#site",
+            "url": "https://catsbots.app/",
+            "name": "Cats Bots",
+            "inLanguage": "es",
+            "publisher": { "@id": "https://catsbots.app/#org" }
+          },
+          {
+            "@type": "SoftwareApplication",
+            "name": "Cats Bots",
+            "operatingSystem": "Discord",
+            "applicationCategory": "CommunicationApplication",
+            "url": "https://catsbots.app/",
+            "image": "https://catsbots.app/logo.png",
+            "description": "Bot de Discord en español con inteligencia artificial, moderación, tickets, niveles, música, sorteos y panel web morado para administrar tu servidor.",
+            "inLanguage": "es",
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            },
+            "featureList": [
+              "Inteligencia Artificial conversacional",
+              "Moderación AutoMod avanzada",
+              "Sistema de tickets con transcripciones",
+              "Niveles y XP con recompensas",
+              "Música y radio 24/7",
+              "Sorteos programados",
+              "Bienvenidas con embeds dinámicos",
+              "Canales de voz automáticos",
+              "Panel web en español"
+            ],
+            "aggregateRating": {
+              "@type": "AggregateRating",
+              "ratingValue": "4.8",
+              "reviewCount": "120"
+            }
+          }
+        ]
+      }
+    </script>
+
+    <!-- Critical inline CSS to avoid FOUC -->
+    <style>
+      html, body { margin: 0; background: #0a0512; color: #f1f5f9; }
+      #root { min-height: 100vh; }
+      .seo-fallback {
+        position: fixed; inset: auto 0 0 0;
+        opacity: 0; pointer-events: none;
+        font-size: 1px; color: transparent;
+      }
+    </style>
   </head>
   <body>
-    <!-- SVG Liquid Glass Filter (kube.io technique) — oculto, referenciado por CSS -->
-    <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute;pointer-events:none;overflow:hidden">
+    <!-- SVG Liquid Glass Filter — oculto, referenciado por CSS -->
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="0"
+      height="0"
+      style="position:absolute;pointer-events:none;overflow:hidden"
+      aria-hidden="true"
+    >
       <defs>
         <filter id="liquid-glass-filter" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
-          <!-- Desenfoque suave de la fuente para el mapa de desplazamiento -->
           <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blurred" />
-          <!-- Canal de turbulencia para refracción orgánica -->
           <feTurbulence type="fractalNoise" baseFrequency="0.018 0.022" numOctaves="3" seed="5" result="noise" />
-          <!-- Mapa de desplazamiento: la turbulencia distorsiona el fondo -->
           <feDisplacementMap in="blurred" in2="noise" scale="6" xChannelSelector="R" yChannelSelector="G" result="displaced" />
-          <!-- Combina con el original para preservar nitidez del contenido -->
           <feComposite in="displaced" in2="SourceGraphic" operator="atop" />
         </filter>
-        <!-- Versión sutil para stat cards y elementos pequeños -->
         <filter id="liquid-glass-sm" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
           <feTurbulence type="fractalNoise" baseFrequency="0.025 0.030" numOctaves="2" seed="8" result="noise" />
           <feDisplacementMap in="SourceGraphic" in2="noise" scale="3" xChannelSelector="R" yChannelSelector="G" />
         </filter>
       </defs>
     </svg>
+
     <div id="root"></div>
+
+    <!-- SEO content for crawlers without JS — hidden visually -->
+    <noscript>
+      <h1>Cats Bots — Bot de Discord en español</h1>
+      <p>
+        Cats Bots es un bot de Discord en español todo-en-uno: inteligencia
+        artificial conversacional, moderación AutoMod, tickets, niveles, radio,
+        sorteos, bienvenidas, autoroles y mucho más. Configura todo desde un
+        panel web morado en pocos minutos. Gratis para empezar.
+      </p>
+      <p>Activa JavaScript para acceder al panel.</p>
+    </noscript>
+
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

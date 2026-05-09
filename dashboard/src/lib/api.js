@@ -53,7 +53,7 @@ async function requestJson(path, options = {}) {
 
   if (response.status === 401) {
     localStorage.removeItem('botES_token');
-    window.location.href = '/panel/login';
+    window.location.href = '/';
     throw new Error('No autorizado');
   }
 

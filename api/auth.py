@@ -99,13 +99,13 @@ async def callback(
 
     # Error desde Discord (usuario rechazó)
     if error or not code:
-        return RedirectResponse(f"{dashboard}/panel/login?error=access_denied")
+        return RedirectResponse(f"{dashboard}/?error=access_denied")
 
     # Verificar state CSRF
     expiry = _oauth_states.pop(state or "", None)
     if expiry is None or time.time() > expiry:
         logger.warning("OAuth2 callback con state inválido o expirado")
-        return RedirectResponse(f"{dashboard}/panel/login?error=invalid_state")
+        return RedirectResponse(f"{dashboard}/?error=invalid_state")
 
     cfg = _cfg()
     if not cfg["client_id"] or not cfg["client_secret"] or not cfg["jwt_secret"]:
@@ -127,7 +127,7 @@ async def callback(
 
         if token_r.status_code != 200:
             logger.warning(f"Token exchange falló: {token_r.text}")
-            return RedirectResponse(f"{dashboard}/panel/login?error=token_failed")
+            return RedirectResponse(f"{dashboard}/?error=token_failed")
 
         access_token = token_r.json()["access_token"]
         headers = {"Authorization": f"Bearer {access_token}"}
@@ -137,7 +137,7 @@ async def callback(
         guilds_r = await client.get(f"{DISCORD_API}/users/@me/guilds", headers=headers)
 
     if user_r.status_code != 200:
-        return RedirectResponse(f"{dashboard}/panel/login?error=user_failed")
+        return RedirectResponse(f"{dashboard}/?error=user_failed")
 
     user_data = user_r.json()
     guilds_raw = guilds_r.json() if guilds_r.status_code == 200 else []
@@ -167,7 +167,7 @@ async def callback(
     token = pyjwt.encode(payload, cfg["jwt_secret"], algorithm="HS256")
 
     # Redirigir al panel con el token
-    return RedirectResponse(f"{dashboard}/panel/auth/callback?token={token}")
+    return RedirectResponse(f"{dashboard}/auth/callback?token={token}")
 
 
 @router.get("/me")

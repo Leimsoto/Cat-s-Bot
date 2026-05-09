@@ -19,6 +19,7 @@ import VoiceGen from "../components/VoiceGen";
 import Welcome from "../components/Welcome";
 import Suggestions from "../components/Suggestions";
 import { apiGet, apiPreload } from "../lib/api";
+import CatLogo from "../components/CatLogo";
 
 const PAGE_TITLES = {
   overview: "Resumen del Servidor",
@@ -55,11 +56,11 @@ function readCache(key, fallback) {
 function LoadingScreen() {
   return (
     <div className="loading-stage">
-      <div className="loading-orb">
-        <span>B</span>
+      <div className="loading-orb loading-orb--cat">
+        <CatLogo size={56} />
       </div>
       <div className="loading-copy">
-        <p className="topbar-eyebrow">Bot ES — Panel de Control</p>
+        <p className="topbar-eyebrow">Cats Bots — Panel de Control</p>
         <h1>Sincronizando el panel</h1>
         <p>Verificando sesión, servidores y módulos disponibles.</p>
       </div>
@@ -120,7 +121,7 @@ export default function Dashboard() {
           setShowLanding(true);
         }
       } catch {
-        navigate("/panel/login");
+        navigate("/");
       } finally {
         setLoading(false);
       }
@@ -180,7 +181,7 @@ export default function Dashboard() {
               <i className="fa-solid fa-bars" />
             </button>
             <div className="topbar-title-wrap">
-              <p className="topbar-eyebrow">Bot ES — Panel</p>
+              <p className="topbar-eyebrow">Cats Bots — Panel</p>
               <h1 style={{ margin: 0 }}>
                 {PAGE_TITLES[activePage] || "Panel"}
               </h1>

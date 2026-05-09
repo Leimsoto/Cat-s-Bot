@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  base: '/panel/',
+  base: '/',
   build: {
     outDir: 'dist',
   },

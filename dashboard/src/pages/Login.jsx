@@ -1,79 +1,539 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import CatLogo from "../components/CatLogo";
+
+const LOGIN_URL = "/api/auth/login";
+
+const FEATURES = [
+  {
+    icon: "fa-microchip",
+    title: "IA Conversacional",
+    text: "Modelo de lenguaje integrado con memoria por canal, comandos y respuestas contextuales en español.",
+    color: "#a78bfa",
+  },
+  {
+    icon: "fa-shield-halved",
+    title: "Moderación Avanzada",
+    text: "AutoMod con detección de spam, palabras prohibidas, raid protection y casos persistentes.",
+    color: "#f43f5e",
+  },
+  {
+    icon: "fa-ticket",
+    title: "Sistema de Tickets",
+    text: "Categorías personalizables, transcripciones automáticas y panel para staff.",
+    color: "#38bdf8",
+  },
+  {
+    icon: "fa-music",
+    title: "Radio & Música",
+    text: "Streaming 24/7, lofi, estaciones globales y comandos de cola.",
+    color: "#34d399",
+  },
+  {
+    icon: "fa-chart-line",
+    title: "Niveles & XP",
+    text: "Sistema de progresión con recompensas de rol, leaderboard y multiplicadores.",
+    color: "#f59e0b",
+  },
+  {
+    icon: "fa-door-open",
+    title: "Bienvenidas & Boosters",
+    text: "Mensajes con embeds dinámicos, imágenes generadas y reconocimiento de boosts.",
+    color: "#22d3ee",
+  },
+  {
+    icon: "fa-gift",
+    title: "Sorteos",
+    text: "Giveaways programados con condiciones, ganadores múltiples y reroll.",
+    color: "#ec4899",
+  },
+  {
+    icon: "fa-headset",
+    title: "Canales de Voz Auto",
+    text: "Crea canales temporales bajo demanda, controla permisos y límites.",
+    color: "#818cf8",
+  },
+  {
+    icon: "fa-clock",
+    title: "Mensajes Programados",
+    text: "Envía recordatorios y avisos en intervalos cron, sin perder el ritmo.",
+    color: "#fbbf24",
+  },
+  {
+    icon: "fa-code",
+    title: "Embed Builder",
+    text: "Constructor visual con preview en vivo, plantillas y envío por API.",
+    color: "#67e8f9",
+  },
+  {
+    icon: "fa-flag",
+    title: "Reportes",
+    text: "Sistema de reportes con seguimiento, asignación y resolución.",
+    color: "#fb7185",
+  },
+  {
+    icon: "fa-link",
+    title: "Tracking de Invites",
+    text: "Quién invitó a quién, ranking, leaderboard y rewards por invitaciones.",
+    color: "#60a5fa",
+  },
+];
+
+const ADVANTAGES = [
+  {
+    icon: "fa-bolt",
+    title: "Latencia mínima",
+    text: "Backend FastAPI + caché en memoria. Respuestas inmediatas, panel siempre fluido.",
+  },
+  {
+    icon: "fa-lock",
+    title: "OAuth2 seguro",
+    text: "Autenticación oficial de Discord. Sólo administradores y dueños acceden al panel.",
+  },
+  {
+    icon: "fa-sliders",
+    title: "Configurable por servidor",
+    text: "Cada guild tiene su propia configuración persistente. Sin colisiones entre comunidades.",
+  },
+  {
+    icon: "fa-language",
+    title: "100% en español",
+    text: "Comandos, mensajes y dashboard en español nativo. Sin traducciones automáticas.",
+  },
+  {
+    icon: "fa-arrows-rotate",
+    title: "Actualizaciones constantes",
+    text: "Módulos nuevos cada semana, sin interrumpir tu servidor.",
+  },
+  {
+    icon: "fa-shield-heart",
+    title: "Código abierto y auditable",
+    text: "Todo el código del bot es público y auditable. Cualquiera puede revisar la moderación, la IA y el manejo de datos — transparencia total y un extra de seguridad para tu comunidad.",
+  },
+];
+
+function useReveal() {
+  const ref = useRef(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!ref.current) return;
+    const node = ref.current;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            setVisible(true);
+            obs.unobserve(e.target);
+          }
+        });
+      },
+      { threshold: 0.12 },
+    );
+    obs.observe(node);
+    return () => obs.disconnect();
+  }, []);
+  return [ref, visible];
+}
+
+function Reveal({ children, delay = 0, as: Tag = "div", className = "" }) {
+  const [ref, visible] = useReveal();
+  return (
+    <Tag
+      ref={ref}
+      className={`reveal ${visible ? "is-visible" : ""} ${className}`}
+      style={{ transitionDelay: `${delay}ms` }}
+    >
+      {children}
+    </Tag>
+  );
+}
+
+function useCounter(target, durationMs = 1400, start = false) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    if (!start) return;
+    if (!target || target <= 0) return;
+    let raf = 0;
+    const t0 = performance.now();
+    const tick = (now) => {
+      const p = Math.min(1, (now - t0) / durationMs);
+      const eased = 1 - Math.pow(1 - p, 3);
+      setValue(Math.round(target * eased));
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, durationMs, start]);
+  return value;
+}
+
+function StatCounter({ value, label, icon, color, started }) {
+  const animated = useCounter(value, 1400, started);
+  return (
+    <div className="ll-stat-card glass-panel">
+      <span className="ll-stat-icon" style={{ color, background: `${color}1f` }}>
+        <i className={`fa-solid ${icon}`} />
+      </span>
+      <span className="ll-stat-value">{animated.toLocaleString("es")}</span>
+      <span className="ll-stat-label">{label}</span>
+    </div>
+  );
+}
+
+function formatUptime(seconds) {
+  if (!seconds || seconds < 60) return "Iniciando";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
 export default function Login() {
   const error = new URLSearchParams(window.location.search).get("error");
+  const [stats, setStats] = useState(null);
+  const [statsReady, setStatsReady] = useState(false);
 
-  const handleLogin = () => {
-    window.location.href = "/api/auth/login";
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/public/stats", { credentials: "omit" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled) return;
+        setStats(data);
+        requestAnimationFrame(() => setStatsReady(true));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setStats(null);
+        setStatsReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleLogin = (e) => {
+    e?.preventDefault?.();
+    window.location.href = LOGIN_URL;
   };
 
+  const modules = useMemo(() => stats?.modules ?? [], [stats]);
+  const serverCount = stats?.server_count ?? 0;
+  const memberCount = stats?.member_count ?? 0;
+  const moduleCount = stats?.module_count ?? FEATURES.length;
+  const channelCount = stats?.channel_count ?? 0;
+  const isOnline = stats?.online ?? false;
+  const uptime = formatUptime(stats?.uptime_seconds ?? 0);
+  const latency = stats?.latency_ms ?? 0;
+
   return (
-    <div className="login-body">
-      <div className="login-card glass-panel">
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: "80px",
-            height: "80px",
-            margin: "0 auto 20px auto",
-            background: "rgba(56,189,248,0.1)",
-            border: "1px solid rgba(56,189,248,0.3)",
-            borderRadius: "24px",
-            boxShadow: "0 0 30px rgba(56,189,248,0.2)",
-          }}
-        >
-          <span
-            style={{
-              fontSize: "3rem",
-              fontWeight: "900",
-              fontFamily: "'Plus Jakarta Sans',sans-serif",
-              lineHeight: 1,
-              background: "linear-gradient(135deg,#38bdf8,#2563eb)",
-              WebkitBackgroundClip: "text",
-              WebkitTextFillColor: "transparent",
-            }}
-          >
-            B
+    <div className="landing-shell">
+      <div className="landing-bg-grid" aria-hidden="true" />
+      <div className="landing-bg-orb landing-bg-orb--a" aria-hidden="true" />
+      <div className="landing-bg-orb landing-bg-orb--b" aria-hidden="true" />
+      <div className="landing-bg-orb landing-bg-orb--c" aria-hidden="true" />
+
+      <header className="landing-nav">
+        <a className="landing-logo" href="#top">
+          <span className="landing-logo-mark landing-logo-mark--cat">
+            <CatLogo size={32} ariaLabel="Cats Bots" />
           </span>
-        </div>
-        <h2
-          className="brand-text-glow"
-          style={{ margin: 0, paddingBottom: "6px" }}
-        >
-          BOT ES
-        </h2>
-        <p style={{ color: "var(--muted)", marginBottom: "28px" }}>
-          Panel de Control &amp; Administración
-        </p>
-        {error && (
-          <div className="login-error-msg">
-            {error === "access_denied"
-              ? "Acceso denegado. Debes aceptar los permisos."
-              : error === "invalid_state"
-                ? "Sesión expirada. Intenta de nuevo."
-                : error === "token_failed"
-                  ? "Error al obtener el token. Intenta de nuevo."
-                  : "Error de autenticación. Intenta de nuevo."}
-          </div>
-        )}
-        <button
-          onClick={handleLogin}
-          className="btn-discord"
-          style={{ width: "100%" }}
-        >
+          <span className="landing-logo-text">
+            Cats <span>Bots</span>
+          </span>
+        </a>
+        <nav className="landing-nav-links">
+          <a href="#caracteristicas">Características</a>
+          <a href="#modulos">Módulos</a>
+          <a href="#ventajas">Ventajas</a>
+          <a href="#estadisticas">Estadísticas</a>
+        </nav>
+        <button className="landing-nav-cta" onClick={handleLogin}>
           <i className="fa-brands fa-discord" />
-          Iniciar sesión con Discord
+          Iniciar sesión
         </button>
-        <p
-          style={{
-            color: "var(--dim)",
-            fontSize: "0.78rem",
-            marginTop: "18px",
-          }}
-        >
-          Solo acceso para administradores y dueños de servidores
-        </p>
-      </div>
+      </header>
+
+      <main id="top">
+        <section className="landing-hero">
+          <div className="landing-hero-inner">
+            <span className="landing-pill">
+              <span className={`landing-pill-dot ${isOnline ? "is-on" : ""}`} />
+              {isOnline ? "Bot en línea" : "Conectando..."}
+              {isOnline && (
+                <>
+                  <span className="landing-pill-sep">·</span>
+                  <span>{latency} ms</span>
+                  <span className="landing-pill-sep">·</span>
+                  <span>uptime {uptime}</span>
+                </>
+              )}
+            </span>
+
+            <h1 className="landing-hero-title">
+              Cats Bots — el bot de Discord en español que tu comunidad{" "}
+              <span className="landing-hero-accent">realmente</span> necesita.
+            </h1>
+
+            <p className="landing-hero-sub">
+              Moderación, IA, tickets, niveles, música y mucho más — todo
+              configurable desde un panel web morado, rápido y sin fricción.
+              Pensado para servidores serios que crecen.
+            </p>
+
+            {error && (
+              <div className="landing-error">
+                <i className="fa-solid fa-circle-exclamation" />
+                {error === "access_denied"
+                  ? "Acceso denegado. Debes aceptar los permisos de Discord."
+                  : error === "invalid_state"
+                    ? "Sesión expirada. Vuelve a iniciar sesión."
+                    : error === "token_failed"
+                      ? "Error al obtener el token. Inténtalo de nuevo."
+                      : "Error de autenticación. Inténtalo de nuevo."}
+              </div>
+            )}
+
+            <div className="landing-hero-actions">
+              <button className="landing-cta-primary" onClick={handleLogin}>
+                <i className="fa-brands fa-discord" />
+                Acceder al panel
+                <i className="fa-solid fa-arrow-right landing-cta-arrow" />
+              </button>
+              <a className="landing-cta-secondary" href="#caracteristicas">
+                Ver capacidades
+              </a>
+            </div>
+
+            <p className="landing-hero-note">
+              <i className="fa-solid fa-shield-halved" /> Login OAuth2 oficial
+              de Discord · Sólo admins y owners acceden al panel
+            </p>
+          </div>
+
+          <div className="landing-hero-card glass-panel">
+            <div className="landing-hero-card-head">
+              <div className="landing-hero-card-id">
+                <span className="landing-hero-card-mark landing-hero-card-mark--cat">
+                  <CatLogo size={42} ariaLabel="Cats Bots" />
+                </span>
+                <div>
+                  <strong>Cats Bots</strong>
+                  <small>Panel · v2.0</small>
+                </div>
+              </div>
+              <span
+                className={`landing-hero-status ${
+                  isOnline ? "is-on" : "is-off"
+                }`}
+              >
+                <span /> {isOnline ? "Operativo" : "Sin conexión"}
+              </span>
+            </div>
+            <ul className="landing-hero-card-list">
+              <li>
+                <i className="fa-solid fa-server" />
+                <span>Servidores activos</span>
+                <strong>{serverCount.toLocaleString("es")}</strong>
+              </li>
+              <li>
+                <i className="fa-solid fa-users" />
+                <span>Miembros alcanzados</span>
+                <strong>{memberCount.toLocaleString("es")}</strong>
+              </li>
+              <li>
+                <i className="fa-solid fa-puzzle-piece" />
+                <span>Módulos disponibles</span>
+                <strong>{moduleCount}</strong>
+              </li>
+              <li>
+                <i className="fa-solid fa-bolt" />
+                <span>Latencia API</span>
+                <strong>{latency} ms</strong>
+              </li>
+            </ul>
+            <div className="landing-hero-card-foot">
+              <span className="landing-hero-card-pulse" />
+              Sincronizado en tiempo real
+            </div>
+          </div>
+        </section>
+
+        <section id="estadisticas" className="landing-section">
+          <Reveal className="landing-section-head">
+            <span className="landing-eyebrow">Cifras en vivo</span>
+            <h2>Datos reales. No promesas.</h2>
+            <p>
+              Estadísticas globales del bot, calculadas desde los servidores
+              donde está presente ahora mismo.
+            </p>
+          </Reveal>
+          <div className="landing-stats-grid">
+            <Reveal delay={0}>
+              <StatCounter
+                value={serverCount}
+                label="Servidores activos"
+                icon="fa-server"
+                color="#818cf8"
+                started={statsReady}
+              />
+            </Reveal>
+            <Reveal delay={80}>
+              <StatCounter
+                value={memberCount}
+                label="Miembros totales"
+                icon="fa-users"
+                color="#22d3ee"
+                started={statsReady}
+              />
+            </Reveal>
+            <Reveal delay={160}>
+              <StatCounter
+                value={channelCount}
+                label="Canales gestionados"
+                icon="fa-hashtag"
+                color="#34d399"
+                started={statsReady}
+              />
+            </Reveal>
+            <Reveal delay={240}>
+              <StatCounter
+                value={moduleCount}
+                label="Módulos disponibles"
+                icon="fa-puzzle-piece"
+                color="#f59e0b"
+                started={statsReady}
+              />
+            </Reveal>
+          </div>
+        </section>
+
+        <section id="caracteristicas" className="landing-section">
+          <Reveal className="landing-section-head">
+            <span className="landing-eyebrow">Características</span>
+            <h2>Todo lo que tu servidor necesita en un solo lugar.</h2>
+            <p>
+              Cada módulo está pensado para resolver un problema real de las
+              comunidades en español: orden, retención, automatización.
+            </p>
+          </Reveal>
+          <div className="landing-features-grid">
+            {FEATURES.map((f, i) => (
+              <Reveal key={f.title} delay={i * 60}>
+                <article className="landing-feature glass-panel">
+                  <span
+                    className="landing-feature-icon"
+                    style={{ color: f.color, background: `${f.color}1c` }}
+                  >
+                    <i className={`fa-solid ${f.icon}`} />
+                  </span>
+                  <h3>{f.title}</h3>
+                  <p>{f.text}</p>
+                </article>
+              </Reveal>
+            ))}
+          </div>
+        </section>
+
+        <section id="modulos" className="landing-section">
+          <Reveal className="landing-section-head">
+            <span className="landing-eyebrow">Módulos disponibles</span>
+            <h2>{moduleCount} módulos listos para usar.</h2>
+            <p>
+              Activa, desactiva y configura cada uno desde el panel. Sin tocar
+              código, sin reinicios.
+            </p>
+          </Reveal>
+          <div className="landing-modules-marquee" aria-hidden="true">
+            <div className="landing-modules-track">
+              {[...modules, ...modules, ...FEATURES.map((f) => ({
+                key: f.title,
+                name: f.title,
+                icon: f.icon,
+              }))].map((m, i) => (
+                <span key={`${m.key}-${i}`} className="landing-module-chip">
+                  <i className={`fa-solid ${m.icon}`} />
+                  {m.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section id="ventajas" className="landing-section">
+          <Reveal className="landing-section-head">
+            <span className="landing-eyebrow">Por qué Cats Bots</span>
+            <h2>Pensado por y para administradores serios.</h2>
+            <p>
+              Cada decisión técnica del bot está orientada a no dejarte solo
+              cuando tu servidor crece.
+            </p>
+          </Reveal>
+          <div className="landing-advantages-grid">
+            {ADVANTAGES.map((a, i) => (
+              <Reveal key={a.title} delay={i * 80}>
+                <article className="landing-advantage glass-panel">
+                  <span className="landing-advantage-icon">
+                    <i className={`fa-solid ${a.icon}`} />
+                  </span>
+                  <div>
+                    <h3>{a.title}</h3>
+                    <p>{a.text}</p>
+                  </div>
+                </article>
+              </Reveal>
+            ))}
+          </div>
+        </section>
+
+        <section className="landing-section landing-cta-section">
+          <Reveal>
+            <div className="landing-cta-card glass-panel">
+              <div>
+                <span className="landing-eyebrow">Listo cuando tú lo estés</span>
+                <h2>
+                  Inicia sesión y empieza a configurar tu servidor en minutos.
+                </h2>
+                <p>
+                  Acceso restringido a administradores y dueños del servidor
+                  mediante OAuth2 oficial de Discord.
+                </p>
+              </div>
+              <div className="landing-cta-card-actions">
+                <button className="landing-cta-primary" onClick={handleLogin}>
+                  <i className="fa-brands fa-discord" />
+                  Acceder al panel
+                </button>
+                <small>
+                  <i className="fa-solid fa-lock" /> Tus credenciales nunca se
+                  almacenan
+                </small>
+              </div>
+            </div>
+          </Reveal>
+        </section>
+      </main>
+
+      <footer className="landing-footer">
+        <div>
+          <span className="landing-logo-mark landing-logo-mark--sm landing-logo-mark--cat">
+            <CatLogo size={20} ariaLabel="Cats Bots" />
+          </span>
+          <span>Cats Bots</span>
+          <small>Panel de control v2.0</small>
+        </div>
+        <div className="landing-footer-meta">
+          <span>
+            <span
+              className={`landing-pill-dot ${isOnline ? "is-on" : ""}`}
+            />
+            {isOnline ? "Servicio operativo" : "Conectando"}
+          </span>
+          <span>· {serverCount.toLocaleString("es")} servidores</span>
+          <span>· hecho con cariño en español</span>
+        </div>
+      </footer>
     </div>
   );
 }
