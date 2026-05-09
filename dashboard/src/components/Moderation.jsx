@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { apiGet, apiPatch } from "../lib/api";
+import { Icon } from "../lib/icons";
+import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
 
 export default function Moderation({ selectedGuild: guildId }) {
   const [tab, setTab] = useState("config");
   const [cfg, setCfg] = useState(null);
   const [cases, setCases] = useState([]);
-  const [channels, setChannels] = useState([]);
-  const [roles, setRoles] = useState([]);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -21,16 +21,8 @@ export default function Moderation({ selectedGuild: guildId }) {
     if (!guildId) return;
     setLoading(true);
     try {
-      const [modCfg, chData, rolesData] = await Promise.all([
-        apiGet(`/api/guilds/${guildId}/moderation`),
-        apiGet(`/api/guilds/${guildId}/channels`).catch(() => ({
-          channels: [],
-        })),
-        apiGet(`/api/guilds/${guildId}/roles`).catch(() => ({ roles: [] })),
-      ]);
+      const modCfg = await apiGet(`/api/guilds/${guildId}/moderation`);
       setCfg(modCfg || {});
-      setChannels((chData.channels || []).filter((c) => c.type === "text"));
-      setRoles(rolesData.roles || []);
     } catch {
       showToast("Error cargando configuración", "error");
     } finally {
@@ -62,12 +54,16 @@ export default function Moderation({ selectedGuild: guildId }) {
     setDirty(true);
   };
 
+  // Wrapper para que SearchableSelect (que devuelve string) entregue al estado
+  // un int o null, manteniendo compatibilidad con el resto de la página.
+  const setId = (k) => (v) => set(k, v ? parseInt(v, 10) : null);
+
   const save = async () => {
     setSaving(true);
     try {
       await apiPatch(`/api/guilds/${guildId}/moderation`, cfg);
       setDirty(false);
-      showToast("✅ Configuración guardada");
+      showToast("Configuración guardada");
     } catch (e) {
       showToast(e.message, "error");
     } finally {
@@ -102,6 +98,50 @@ export default function Moderation({ selectedGuild: guildId }) {
       </div>
     );
 
+  // Renderizadores enriquecidos para SearchableSelect.
+  const renderChannelOption = (opt) => (
+    <>
+      <Icon name="channel" />
+      <span className="ss-option-label">{opt.name}</span>
+      {opt.category ? (
+        <span className="ss-option-sub">{opt.category}</span>
+      ) : null}
+    </>
+  );
+  const renderChannelSelected = (opt) => (
+    <>
+      <Icon name="channel" /> {opt.name}
+    </>
+  );
+  const renderRoleOption = (opt) => (
+    <>
+      {opt.color ? (
+        <span
+          className="ss-swatch"
+          style={{ background: opt.color }}
+          aria-hidden="true"
+        />
+      ) : (
+        <Icon name="role" />
+      )}
+      <span className="ss-option-label">{opt.name}</span>
+    </>
+  );
+  const renderRoleSelected = (opt) => (
+    <>
+      {opt.color ? (
+        <span
+          className="ss-swatch"
+          style={{ background: opt.color }}
+          aria-hidden="true"
+        />
+      ) : (
+        <Icon name="role" />
+      )}{" "}
+      {opt.name}
+    </>
+  );
+
   return (
     <div className="ov-container animate-fade-in">
       <Toast toast={toast} onDismiss={() => setToast(null)} />
@@ -114,14 +154,14 @@ export default function Moderation({ selectedGuild: guildId }) {
             WebkitTextFillColor: "transparent",
           }}
         >
-          🛡️ Moderación
+          Moderación
         </h2>
       </div>
 
       <div className="tabs-container">
         {[
-          ["config", "⚙️ Configuración"],
-          ["cases", "📋 Casos"],
+          ["config", "Configuración"],
+          ["cases", "Casos"],
         ].map(([id, label]) => (
           <button
             key={id}
@@ -146,74 +186,50 @@ export default function Moderation({ selectedGuild: guildId }) {
             }}
           >
             <div className="section-title">
-              <h3 style={{ margin: 0 }}>🔧 Canales y Roles</h3>
+              <h3 style={{ margin: 0 }}>Canales y roles</h3>
             </div>
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))",
+                gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))",
                 gap: 16,
               }}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
-                <label>Canal Mod-Logs</label>
-                <select
+                <label>Canal de mod-logs</label>
+                <SearchableSelect
                   value={cfg.modlog_channel || ""}
-                  onChange={(e) =>
-                    set(
-                      "modlog_channel",
-                      e.target.value ? parseInt(e.target.value) : null,
-                    )
-                  }
-                  style={{ padding: "10px 12px" }}
-                >
-                  <option value="">— Sin canal —</option>
-                  {channels.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      #{c.name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setId("modlog_channel")}
+                  endpoint={`/api/guilds/${guildId}/channels`}
+                  itemsKey="channels"
+                  placeholder="Selecciona un canal de texto…"
+                  renderOption={renderChannelOption}
+                  renderSelected={renderChannelSelected}
+                />
               </div>
               <div className="config-item" style={{ marginBottom: 0 }}>
-                <label>Rol de Mute</label>
-                <select
+                <label>Rol de mute</label>
+                <SearchableSelect
                   value={cfg.mute_role_id || ""}
-                  onChange={(e) =>
-                    set(
-                      "mute_role_id",
-                      e.target.value ? parseInt(e.target.value) : null,
-                    )
-                  }
-                  style={{ padding: "10px 12px" }}
-                >
-                  <option value="">— Sin rol —</option>
-                  {roles.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      @{r.name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setId("mute_role_id")}
+                  endpoint={`/api/guilds/${guildId}/roles`}
+                  itemsKey="roles"
+                  placeholder="Selecciona un rol…"
+                  renderOption={renderRoleOption}
+                  renderSelected={renderRoleSelected}
+                />
               </div>
               <div className="config-item" style={{ marginBottom: 0 }}>
-                <label>Rol de Moderador</label>
-                <select
+                <label>Rol de moderador</label>
+                <SearchableSelect
                   value={cfg.mod_role_id || ""}
-                  onChange={(e) =>
-                    set(
-                      "mod_role_id",
-                      e.target.value ? parseInt(e.target.value) : null,
-                    )
-                  }
-                  style={{ padding: "10px 12px" }}
-                >
-                  <option value="">— Sin rol —</option>
-                  {roles.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      @{r.name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setId("mod_role_id")}
+                  endpoint={`/api/guilds/${guildId}/roles`}
+                  itemsKey="roles"
+                  placeholder="Selecciona un rol…"
+                  renderOption={renderRoleOption}
+                  renderSelected={renderRoleSelected}
+                />
               </div>
             </div>
             <div
@@ -243,34 +259,19 @@ export default function Moderation({ selectedGuild: guildId }) {
             style={{ padding: 24, borderRadius: 22 }}
           >
             <div className="section-title">
-              <h3 style={{ margin: 0 }}>⚠️ Sistema de Warns</h3>
+              <h3 style={{ margin: 0 }}>Sistema de warns</h3>
             </div>
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))",
+                gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
                 gap: 14,
               }}
             >
               {[
-                [
-                  "warn_mute_enabled",
-                  "warn_mute_threshold",
-                  "🔇 Auto-Mute",
-                  true,
-                ],
-                [
-                  "warn_kick_enabled",
-                  "warn_kick_threshold",
-                  "👢 Auto-Kick",
-                  false,
-                ],
-                [
-                  "warn_ban_enabled",
-                  "warn_ban_threshold",
-                  "🔨 Auto-Ban",
-                  false,
-                ],
+                ["warn_mute_enabled", "warn_mute_threshold", "Auto-mute", true],
+                ["warn_kick_enabled", "warn_kick_threshold", "Auto-kick", false],
+                ["warn_ban_enabled", "warn_ban_threshold", "Auto-ban", false],
               ].map(([enK, thrK, lbl, hasDur]) => (
                 <div
                   key={enK}
@@ -355,7 +356,7 @@ export default function Moderation({ selectedGuild: guildId }) {
                   onClick={save}
                   disabled={saving}
                 >
-                  {saving ? "Guardando…" : "💾 Guardar"}
+                  {saving ? "Guardando…" : "Guardar"}
                 </button>
               </div>
             </div>

@@ -29,16 +29,21 @@ logger = logging.getLogger(__name__)
 # ── Views ─────────────────────────────────────────────────────────────────────
 
 class ReportActionView(discord.ui.View):
-    """Botones para gestionar un reporte desde el modlog."""
+    """
+    Vista persistente para gestionar reportes desde el modlog.
+    El report_id se resuelve siempre desde el footer del embed
+    (formato `ID: <n>`) — una sola instancia sirve para todos los reportes.
+    """
 
-    def __init__(self, report_id: int):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.report_id = report_id
 
     @discord.ui.button(label="Resolver", style=discord.ButtonStyle.success, emoji="✅",
                        custom_id="report_resolve")
     async def resolve_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         report_id = self._get_report_id(interaction)
+        if report_id is None:
+            return await interaction.response.send_message("❌ No se pudo determinar el ID del reporte.", ephemeral=True)
         interaction.client.db.update_report(report_id, status="RESOLVED")
         await self._mark_done(interaction, "RESUELTO", discord.Color.green())
 
@@ -46,18 +51,20 @@ class ReportActionView(discord.ui.View):
                        custom_id="report_dismiss")
     async def dismiss_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         report_id = self._get_report_id(interaction)
+        if report_id is None:
+            return await interaction.response.send_message("❌ No se pudo determinar el ID del reporte.", ephemeral=True)
         interaction.client.db.update_report(report_id, status="DISMISSED")
         await self._mark_done(interaction, "DESESTIMADO", discord.Color.greyple())
 
-    def _get_report_id(self, interaction: discord.Interaction) -> int:
-        """Extrae el ID del reporte del footer del embed."""
+    def _get_report_id(self, interaction: discord.Interaction) -> int | None:
+        """Extrae el ID del reporte del footer del embed (`ID: <n>`)."""
         try:
             if interaction.message and interaction.message.embeds:
                 footer = interaction.message.embeds[0].footer.text or ""
-                return int(footer.split("ID:")[-1].strip())
+                return int(footer.split("ID:")[-1].split("·")[0].strip())
         except (ValueError, IndexError, AttributeError):
             pass
-        return self.report_id
+        return None
 
     async def _mark_done(self, interaction: discord.Interaction, label: str, color: discord.Color):
         if interaction.message and interaction.message.embeds:
@@ -101,7 +108,7 @@ class Reports(commands.Cog):
         channel = guild.get_channel(int(modlog_id))
         if channel and isinstance(channel, discord.TextChannel):
             try:
-                await channel.send(embed=embed, view=ReportActionView(report_id))
+                await channel.send(embed=embed, view=ReportActionView())
             except discord.Forbidden:
                 logger.warning(f"Sin permisos para enviar reporte al modlog en {guild.name}")
 
@@ -274,7 +281,7 @@ class Reports(commands.Cog):
         embed.set_footer(text=f"ID: {report['id']}")
 
         if report["status"] == "PENDING":
-            await interaction.response.send_message(embed=embed, view=ReportActionView(id_reporte), ephemeral=True)
+            await interaction.response.send_message(embed=embed, view=ReportActionView(), ephemeral=True)
         else:
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -282,4 +289,4 @@ class Reports(commands.Cog):
 async def setup(bot: commands.Bot):
     cog = Reports(bot)
     await bot.add_cog(cog)
-    bot.add_view(ReportActionView(0))  # registrar vista persistente
+    bot.add_view(ReportActionView())  # vista persistente: resuelve report_id desde el embed

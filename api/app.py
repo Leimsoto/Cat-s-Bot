@@ -67,7 +67,6 @@ def create_app(db=None, bot=None) -> FastAPI:
         channels,
         embeds,
         giveaways,
-        levels,
         moderation,
         radio,
         reports,
@@ -87,7 +86,6 @@ def create_app(db=None, bot=None) -> FastAPI:
     app.include_router(moderation.router)
     app.include_router(tickets.router)
     app.include_router(tags.router)
-    app.include_router(levels.router)
     app.include_router(reports.router)
     app.include_router(schedules.router)
     app.include_router(giveaways.router)
@@ -100,10 +98,16 @@ def create_app(db=None, bot=None) -> FastAPI:
     from api.routes.invites_route import router as invites_router
     from api.routes.suggestions_route import router as suggestions_router
     from api.routes.welcome import router as welcome_router
+    from api.routes.ai_keys import (
+        router_admin as ai_keys_admin_router,
+        router_guild as ai_keys_guild_router,
+    )
 
     app.include_router(welcome_router)
     app.include_router(suggestions_router)
     app.include_router(invites_router)
+    app.include_router(ai_keys_admin_router)  # /api/ai/keys/* (master admin)
+    app.include_router(ai_keys_guild_router)  # /api/guilds/{id}/ia/key (guild admin)
 
     # ── Health-check ──────────────────────────────────────────────────────────
     @app.get("/", tags=["health"])

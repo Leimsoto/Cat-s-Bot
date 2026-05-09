@@ -140,10 +140,10 @@ def build_warn_embed(
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.add_field(name="👤 Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
-        embed.add_field(name="👮 Moderador", value=moderador.mention, inline=True)
+        embed.add_field(name="Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
+        embed.add_field(name="Moderador", value=moderador.mention, inline=True)
         embed.add_field(name="⚠️ Warns", value=f"`{warns}`", inline=True)
-        embed.add_field(name="📝 Razón", value=razon, inline=False)
+        embed.add_field(name="Razón", value=razon, inline=False)
         embed.set_thumbnail(url=usuario.display_avatar.url)
         embed.set_footer(text=f"ID usuario: {usuario.id}")
 
@@ -346,7 +346,7 @@ class Moderation(commands.Cog):
                         )
 
                         log_embed = discord.Embed(
-                            title="🔓 Mute expirado",
+                            title="Mute expirado",
                             description=f"{member.mention} fue desmuteado automáticamente.",
                             color=discord.Color.green(),
                             timestamp=datetime.now(timezone.utc),
@@ -395,7 +395,7 @@ class Moderation(commands.Cog):
         await self._dm(
             usuario,
             discord.Embed(
-                title="🔨 Has sido baneado",
+                title="Has sido baneado",
                 description=f"Has sido baneado de **{interaction.guild.name}**.",
                 color=discord.Color.dark_red(),
             ).add_field(name="Razón", value=razon)
@@ -427,16 +427,16 @@ class Moderation(commands.Cog):
         )
 
         embed = discord.Embed(
-            title="🔨 Usuario baneado",
+            title="Usuario baneado",
             description=f"**{usuario}** ha sido baneado permanentemente.",
             color=discord.Color.dark_red(),
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_thumbnail(url=usuario.display_avatar.url)
-        embed.add_field(name="👤 Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
-        embed.add_field(name="👮 Moderador", value=interaction.user.mention, inline=True)
-        embed.add_field(name="🗑️ Msgs eliminados", value=f"{eliminar_mensajes} día(s)", inline=True)
-        embed.add_field(name="📝 Razón", value=razon, inline=False)
+        embed.add_field(name="Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
+        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Msgs eliminados", value=f"{eliminar_mensajes} día(s)", inline=True)
+        embed.add_field(name="Razón", value=razon, inline=False)
 
         await interaction.followup.send(embed=embed)
         await self._send_log(interaction.guild, embed)
@@ -501,9 +501,9 @@ class Moderation(commands.Cog):
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_thumbnail(url=entry.user.display_avatar.url)
-        embed.add_field(name="👤 Usuario", value=f"{entry.user.mention}\n`{uid}`", inline=True)
-        embed.add_field(name="👮 Moderador", value=interaction.user.mention, inline=True)
-        embed.add_field(name="📝 Razón", value=razon, inline=False)
+        embed.add_field(name="Usuario", value=f"{entry.user.mention}\n`{uid}`", inline=True)
+        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Razón", value=razon, inline=False)
 
         await interaction.followup.send(embed=embed)
         await self._send_log(interaction.guild, embed)
@@ -537,7 +537,7 @@ class Moderation(commands.Cog):
         await self._dm(
             usuario,
             discord.Embed(
-                title="👢 Has sido expulsado",
+                title="Has sido expulsado",
                 description=f"Has sido expulsado de **{interaction.guild.name}**.",
                 color=discord.Color.orange(),
             ).add_field(name="Razón", value=razon)
@@ -563,15 +563,15 @@ class Moderation(commands.Cog):
         self.db.log_action(interaction.guild_id, usuario.id, interaction.user.id, "KICK", razon)
 
         embed = discord.Embed(
-            title="👢 Usuario expulsado",
+            title="Usuario expulsado",
             description=f"**{usuario}** fue expulsado del servidor.",
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_thumbnail(url=usuario.display_avatar.url)
-        embed.add_field(name="👤 Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
-        embed.add_field(name="👮 Moderador", value=interaction.user.mention, inline=True)
-        embed.add_field(name="📝 Razón", value=razon, inline=False)
+        embed.add_field(name="Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
+        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Razón", value=razon, inline=False)
 
         await interaction.followup.send(embed=embed)
         await self._send_log(interaction.guild, embed)
@@ -649,18 +649,18 @@ class Moderation(commands.Cog):
         )
 
         embed = discord.Embed(
-            title="🔇 Usuario silenciado",
+            title="Usuario silenciado",
             description=f"{usuario.mention} ha sido silenciado.",
             color=discord.Color.red(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.add_field(name="👤 Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
-        embed.add_field(name="👮 Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
+        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
         embed.add_field(name="⏱️ Duración", value=fmt_duration(secs), inline=True)
         if secs:
             expiry = datetime.now(timezone.utc) + timedelta(seconds=secs)
-            embed.add_field(name="🕐 Expira", value=f"<t:{int(expiry.timestamp())}:R>", inline=True)
-        embed.add_field(name="📝 Razón", value=razon, inline=False)
+            embed.add_field(name="Expira", value=f"<t:{int(expiry.timestamp())}:R>", inline=True)
+        embed.add_field(name="Razón", value=razon, inline=False)
 
         await interaction.response.send_message(embed=embed)
         await self._send_log(interaction.guild, embed)
@@ -669,7 +669,7 @@ class Moderation(commands.Cog):
         await self._dm(
             usuario,
             discord.Embed(
-                title="🔇 Has sido silenciado",
+                title="Has sido silenciado",
                 description=f"Has sido silenciado en **{interaction.guild.name}**.",
                 color=discord.Color.red(),
             ).add_field(name="Duración", value=fmt_duration(secs))
@@ -727,14 +727,14 @@ class Moderation(commands.Cog):
         self.db.log_action(interaction.guild_id, usuario.id, interaction.user.id, "UNMUTE", razon)
 
         embed = discord.Embed(
-            title="🔓 Usuario desilenciado",
+            title="Usuario desilenciado",
             description=f"{usuario.mention} fue desilenciado.",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.add_field(name="👤 Usuario", value=usuario.mention, inline=True)
-        embed.add_field(name="👮 Moderador", value=interaction.user.mention, inline=True)
-        embed.add_field(name="📝 Razón", value=razon, inline=False)
+        embed.add_field(name="Usuario", value=usuario.mention, inline=True)
+        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Razón", value=razon, inline=False)
 
         await interaction.response.send_message(embed=embed)
         await self._send_log(interaction.guild, embed)
@@ -742,7 +742,7 @@ class Moderation(commands.Cog):
         await self._dm(
             usuario,
             discord.Embed(
-                title="🔓 Fuiste desilenciado",
+                title="Fuiste desilenciado",
                 description=f"Tu silencio en **{interaction.guild.name}** fue levantado.",
                 color=discord.Color.green(),
             ).add_field(name="Razón", value=razon),
@@ -806,7 +806,7 @@ class Moderation(commands.Cog):
                     "AUTO_BAN", f"Alcanzó {warns} warns",
                 )
                 consequence_embed = discord.Embed(
-                    title="🔨 Ban automático",
+                    title="Ban automático",
                     description=f"{usuario.mention} fue baneado por alcanzar **{warns} warns**.",
                     color=discord.Color.dark_red(),
                     timestamp=datetime.now(timezone.utc),
@@ -823,7 +823,7 @@ class Moderation(commands.Cog):
                     "AUTO_KICK", f"Alcanzó {warns} warns",
                 )
                 consequence_embed = discord.Embed(
-                    title="👢 Kick automático",
+                    title="Kick automático",
                     description=f"{usuario.mention} fue expulsado por alcanzar **{warns} warns**.",
                     color=discord.Color.dark_orange(),
                     timestamp=datetime.now(timezone.utc),
@@ -846,7 +846,7 @@ class Moderation(commands.Cog):
                         "AUTO_MUTE", f"Alcanzó {warns} warns", {"duration_secs": dur},
                     )
                     consequence_embed = discord.Embed(
-                        title="🔇 Mute automático",
+                        title="Mute automático",
                         description=(
                             f"{usuario.mention} fue silenciado por alcanzar **{warns} warns**.\n"
                             f"Duración: **{fmt_duration(dur)}**"
@@ -898,7 +898,7 @@ class Moderation(commands.Cog):
         )
 
         embed = discord.Embed(
-            title=f"📋 Warns de {target.display_name}",
+            title=f"Warns de {target.display_name}",
             color=color,
             timestamp=datetime.now(timezone.utc),
         )
@@ -914,7 +914,7 @@ class Moderation(commands.Cog):
             marker = " ← próximo" if enabled and next_threshold is not None and thr == next_threshold else ""
             lines.append(f"{icon} **{name}** a los {thr} warns{marker}")
 
-        embed.add_field(name="🎚️ Consecuencias configuradas", value="\n".join(lines), inline=False)
+        embed.add_field(name="Consecuencias configuradas", value="\n".join(lines), inline=False)
         embed.set_footer(text=f"ID: {target.id}")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -948,14 +948,14 @@ class Moderation(commands.Cog):
         )
 
         embed = discord.Embed(
-            title="🧹 Warns limpiados",
+            title="Warns limpiados",
             description=f"Se eliminaron **{old}** warn(s) de {usuario.mention}.",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.add_field(name="👤 Usuario", value=usuario.mention, inline=True)
-        embed.add_field(name="👮 Moderador", value=interaction.user.mention, inline=True)
-        embed.add_field(name="📝 Razón", value=razon, inline=False)
+        embed.add_field(name="Usuario", value=usuario.mention, inline=True)
+        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Razón", value=razon, inline=False)
 
         await interaction.response.send_message(embed=embed)
         await self._send_log(interaction.guild, embed)
@@ -1036,7 +1036,7 @@ class AppealUserModal(discord.ui.Modal, title="Apelar Sanción"):
             return
 
         embed = discord.Embed(
-            title="📩 Nueva Apelación Recibida",
+            title="Nueva Apelación Recibida",
             color=discord.Color.blue(),
             timestamp=datetime.now(timezone.utc)
         )

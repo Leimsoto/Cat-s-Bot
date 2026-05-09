@@ -8,11 +8,33 @@ from discord import app_commands
 logger = logging.getLogger(__name__)
 
 class AutoRoles(commands.Cog):
-    """Módulo de Autoroles Inteligentes por Reacción"""
+    """Módulo de Autoroles: por reacción + asignación automática al unirse."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = bot.db # type: ignore
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        """Asigna los join-autoroles configurados al nuevo miembro."""
+        if member.bot:
+            return
+        rows = self.db.get_join_autoroles(member.guild.id)
+        if not rows:
+            return
+        roles_to_add = []
+        for row in rows:
+            role = member.guild.get_role(int(row["role_id"]))
+            if role and not role.managed and role != member.guild.default_role:
+                if role.position < member.guild.me.top_role.position:
+                    roles_to_add.append(role)
+        if roles_to_add:
+            try:
+                await member.add_roles(*roles_to_add, reason="Auto-asignación al unirse")
+            except discord.Forbidden:
+                logger.warning("Sin permisos para asignar autoroles en %s", member.guild.name)
+            except discord.HTTPException as e:
+                logger.warning("Error asignando autoroles: %s", e)
 
     @app_commands.command(name="autorolereact", description="Configura un rol por reacción en un mensaje existente")
     @app_commands.describe(

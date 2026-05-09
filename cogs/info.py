@@ -32,13 +32,13 @@ class Info(commands.Cog):
         ms = round(self.bot.latency * 1000)
 
         if ms < 100:
-            color, label = discord.Color.green(), "🟢 Excelente"
+            color, label = discord.Color.green(), "Excelente"
         elif ms < 200:
-            color, label = discord.Color.yellow(), "🟡 Normal"
+            color, label = discord.Color.yellow(), "Normal"
         else:
-            color, label = discord.Color.red(), "🔴 Alta"
+            color, label = discord.Color.red(), "Alta"
 
-        embed = discord.Embed(title="🏓 Pong!", color=color)
+        embed = discord.Embed(title="Pong", color=color)
         embed.add_field(name="Latencia API", value=f"`{ms} ms`", inline=True)
         embed.add_field(name="Estado", value=label, inline=True)
 
@@ -69,40 +69,40 @@ class Info(commands.Cog):
         ram_total = ram.total // 1024 ** 2
 
         embed = discord.Embed(
-            title=f"🤖 {self.bot.user.name}",
+            title=self.bot.user.name,
             color=discord.Color.blurple(),
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_thumbnail(url=self.bot.user.display_avatar.url)
 
         embed.add_field(
-            name="📡 Latencia",
+            name="Latencia",
             value=f"`{round(self.bot.latency * 1000)} ms`",
             inline=True,
         )
-        embed.add_field(name="⏱️ Uptime", value=f"`{uptime_str}`", inline=True)
+        embed.add_field(name="Uptime", value=f"`{uptime_str}`", inline=True)
         embed.add_field(
-            name="🖥️ Servidores",
+            name="Servidores",
             value=f"`{len(self.bot.guilds)}`",
             inline=True,
         )
-        embed.add_field(name="🧠 CPU", value=f"`{cpu_pct:.1f}%`", inline=True)
+        embed.add_field(name="CPU", value=f"`{cpu_pct:.1f}%`", inline=True)
         embed.add_field(
-            name="💾 RAM",
+            name="RAM",
             value=f"`{ram_used} MB / {ram_total} MB ({ram.percent:.1f}%)`",
             inline=True,
         )
         embed.add_field(
-            name="🐍 Python",
+            name="Python",
             value=f"`{platform.python_version()}`",
             inline=True,
         )
 
         # Info del servidor donde se ejecutó el comando
         guild = interaction.guild
-        embed.add_field(name="🏠 Servidor", value=guild.name, inline=True)
+        embed.add_field(name="Servidor", value=guild.name, inline=True)
         embed.add_field(
-            name="👥 Miembros",
+            name="Miembros",
             value=f"`{guild.member_count}`",
             inline=True,
         )

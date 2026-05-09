@@ -369,25 +369,61 @@ class VoiceGen(commands.Cog):
         except discord.Forbidden:
             logger.warning("VoiceGen: no se pudo mover a %s", member)
 
-        # Enviar panel de control
+        # Panel automático (si no está desactivado por config).
+        if int(cfg.get("auto_send_panel", 1) or 0):
+            await self.send_panel(guild, vc)
+
+    async def send_panel(self, guild: discord.Guild, vc: discord.VoiceChannel, force: bool = False) -> bool:
+        """
+        Envía el panel de control al canal de panel configurado.
+
+        Personalizable vía config del guild:
+          panel_title       — título del embed (default: "Tu canal de voz está listo")
+          panel_description — descripción (acepta {channel}, {owner})
+          panel_color       — color hex (e.g. "#7c3aed")
+
+        Si `force=False`, respeta `auto_send_panel`. `force=True` lo manda igual
+        (usado por el endpoint resend-panel desde el dashboard).
+
+        Devuelve True si se envió, False si no se pudo (canal no configurado,
+        sin permisos, etc.).
+        """
+        cfg = self.db.get_voice_gen_config(guild.id)
         panel_ch_id = cfg.get("panel_channel_id")
         panel_ch = guild.get_channel(panel_ch_id) if panel_ch_id else None
+        if not panel_ch or not isinstance(panel_ch, discord.TextChannel):
+            return False
 
-        if panel_ch and isinstance(panel_ch, discord.TextChannel):
-            embed = discord.Embed(
-                title="🔊 Tu canal de voz está listo",
-                description=(
-                    f"**{member.mention}** — Bienvenido a **{ch_name}**\n\n"
-                    "Usa los botones de abajo para configurar tu canal.\n"
-                    "El canal se eliminará automáticamente cuando esté vacío."
-                ),
-                color=0x7c3aed,
-            )
-            embed.set_footer(text=f"ID del canal: {vc.id}")
-            try:
-                await panel_ch.send(embed=embed, view=VCControlView(self))
-            except discord.Forbidden:
-                logger.warning("VoiceGen: sin permisos para enviar panel en %s", panel_ch)
+        # Resolver el dueño desde la tabla (no asumimos que sea el primer miembro).
+        row = self.db.get_voice_gen_channel(vc.id) or {}
+        owner_id = int(row.get("owner_id", 0)) or 0
+        owner = guild.get_member(owner_id) if owner_id else None
+
+        title = cfg.get("panel_title") or "Tu canal de voz está listo"
+        desc_template = cfg.get("panel_description") or (
+            "**{owner}** — Bienvenido a **{channel}**\n\n"
+            "Usa los botones de abajo para configurar tu canal.\n"
+            "El canal se eliminará automáticamente cuando esté vacío."
+        )
+        desc = desc_template.format(
+            channel=vc.name,
+            owner=(owner.mention if owner else f"<@{owner_id}>" if owner_id else "el dueño"),
+        )
+
+        color_str = (cfg.get("panel_color") or "").strip()
+        try:
+            color = int(color_str.lstrip("#"), 16) if color_str else 0x7c3aed
+        except ValueError:
+            color = 0x7c3aed
+
+        embed = discord.Embed(title=title, description=desc, color=color)
+        embed.set_footer(text=f"ID del canal: {vc.id}")
+        try:
+            await panel_ch.send(embed=embed, view=VCControlView(self))
+            return True
+        except discord.Forbidden:
+            logger.warning("VoiceGen: sin permisos para enviar panel en %s", panel_ch)
+            return False
 
     # ─── Comandos slash /vc ──────────────────────────────────────────────────
 
@@ -396,11 +432,28 @@ class VoiceGen(commands.Cog):
         description="Gestiona tu canal de voz generado",
     )
 
+    @vc_group.command(name="panel", description="Reenvía el panel de control al canal configurado")
+    async def vc_panel(self, interaction: discord.Interaction):
+        """Reenvía manualmente el panel del VC actual del usuario."""
+        if not await _assert_owner(interaction, self.db):
+            return
+        vc = interaction.user.voice.channel
+        sent = await self.send_panel(interaction.guild, vc, force=True)
+        if sent:
+            await interaction.response.send_message(
+                "Panel reenviado al canal configurado.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "No se pudo enviar el panel. Revisa que haya un canal de panel configurado y permisos.",
+                ephemeral=True,
+            )
+
     @vc_group.command(name="lock", description="Bloquear el canal a nuevas conexiones")
     async def vc_lock(self, interaction: discord.Interaction):
         if not await _assert_owner(interaction, self.db): return
         await interaction.user.voice.channel.set_permissions(interaction.guild.default_role, connect=False)
-        await interaction.response.send_message("🔒 Canal bloqueado.", ephemeral=True)
+        await interaction.response.send_message("Canal bloqueado.", ephemeral=True)
 
     @vc_group.command(name="unlock", description="Permitir que cualquiera se conecte")
     async def vc_unlock(self, interaction: discord.Interaction):

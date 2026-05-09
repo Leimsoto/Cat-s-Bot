@@ -18,7 +18,6 @@ import Logs from "../components/Logs";
 import VoiceGen from "../components/VoiceGen";
 import Welcome from "../components/Welcome";
 import Suggestions from "../components/Suggestions";
-import InviteTracker from "../components/InviteTracker";
 import { apiGet, apiPreload } from "../lib/api";
 
 const PAGE_TITLES = {
@@ -268,9 +267,6 @@ export default function Dashboard() {
               )}
               {activePage === "suggestions" && (
                 <Suggestions selectedGuild={selectedGuild} />
-              )}
-              {activePage === "invites" && (
-                <InviteTracker selectedGuild={selectedGuild} />
               )}
             </>
           )}

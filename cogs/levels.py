@@ -100,20 +100,74 @@ class Levels(commands.Cog):
             await self._assign_reward(message.author, message.guild, result["level"], cfg)
 
     async def _announce_levelup(self, message: discord.Message, new_level: int, cfg: dict):
-        custom_msg = cfg.get("announcement_message") or "¡{user} ha subido al **nivel {level}**! 🎉"
-        text = custom_msg.replace("{user}", message.author.mention).replace("{level}", str(new_level))
+        """
+        Anuncia subida de nivel respetando las opciones de Fase 9:
+          • levelup_persist (1)            → no autoeliminar nada
+          • levelup_autodelete (0)         → si 1, aplica delete_after
+          • levelup_delete_after_seconds   → segundos antes de borrar
+          • levelup_embed_config (JSON)    → si está, usa embed; sino texto plano
+        """
+        custom_msg = cfg.get("announcement_message") or "¡{user} ha subido al **nivel {level}**!"
+        text = (
+            custom_msg
+            .replace("{user}", message.author.mention)
+            .replace("{level}", str(new_level))
+            .replace("{username}", message.author.display_name)
+        )
+
+        # Si hay embed JSON, intentamos construirlo; en caso contrario, fallback a texto.
+        embed = None
+        embed_raw = cfg.get("levelup_embed_config")
+        if embed_raw:
+            try:
+                from cogs.embeds import EmbedBuilder
+                builder = EmbedBuilder.from_json(embed_raw)
+                embed = builder.build()
+                if embed.title:
+                    embed.title = (
+                        embed.title
+                        .replace("{user}", message.author.display_name)
+                        .replace("{username}", message.author.display_name)
+                        .replace("{level}", str(new_level))
+                    )
+                if embed.description:
+                    embed.description = (
+                        embed.description
+                        .replace("{user}", message.author.mention)
+                        .replace("{username}", message.author.display_name)
+                        .replace("{level}", str(new_level))
+                    )
+            except Exception as e:
+                logger.warning("levelup_embed_config inválido, usando texto: %s", e)
+                embed = None
+
+        # Calcular delete_after a partir de las flags (persist=0 fuerza autodelete).
+        persist = int(cfg.get("levelup_persist", 1) or 0)
+        autodel = int(cfg.get("levelup_autodelete", 0) or 0)
+        ttl = int(cfg.get("levelup_delete_after_seconds", 30) or 30)
+        delete_after = None
+        if not persist or autodel:
+            delete_after = max(1, ttl)
+
+        send_kwargs = {}
+        if embed is not None:
+            send_kwargs["embed"] = embed
+        else:
+            send_kwargs["content"] = text
+        if delete_after is not None:
+            send_kwargs["delete_after"] = delete_after
 
         ann_ch_id = cfg.get("announcement_channel_id")
         if ann_ch_id:
             channel = message.guild.get_channel(int(ann_ch_id))
             if channel and isinstance(channel, discord.TextChannel):
                 try:
-                    await channel.send(text)
+                    await channel.send(**send_kwargs)
                     return
                 except discord.Forbidden:
                     pass
         try:
-            await message.channel.send(text, delete_after=15)
+            await message.channel.send(**send_kwargs)
         except discord.Forbidden:
             pass
 

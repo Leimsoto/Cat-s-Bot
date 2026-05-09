@@ -1,0 +1,272 @@
+/**
+ * SearchableSelect.css
+ * ────────────────────
+ * Estilos del componente. Usa CSS variables del design system existente
+ * (var(--bg), --panel, --border, --accent, etc.).
+ */
+
+.ss-root {
+  position: relative;
+  width: 100%;
+  font-family: var(--font-main);
+  color: var(--text);
+}
+
+.ss-disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* ── Trigger ───────────────────────────────────────────────────────────── */
+
+.ss-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+  text-align: left;
+}
+
+.ss-trigger:hover:not(:disabled) {
+  border-color: var(--border-accent);
+  background: var(--panel-hover);
+}
+
+.ss-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ss-open .ss-trigger {
+  border-color: var(--accent);
+  background: var(--panel-hover);
+}
+
+.ss-trigger:disabled {
+  cursor: not-allowed;
+}
+
+.ss-trigger-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ss-placeholder {
+  color: var(--text-muted);
+}
+
+.ss-selected-single {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ss-caret {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  transition: transform 0.15s ease;
+}
+
+.ss-open .ss-caret {
+  transform: rotate(180deg);
+  color: var(--accent);
+}
+
+/* ── Chips (multi) ─────────────────────────────────────────────────────── */
+
+.ss-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.ss-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--accent-light);
+  color: var(--text);
+  border: 1px solid var(--border-accent);
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.4;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ss-chip-more {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+/* ── Popover (portal al body, position:fixed via inline style) ─────────── */
+
+.ss-popover {
+  background: var(--surface);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 9999;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  animation: ss-fade-in 0.12s ease;
+}
+
+@keyframes ss-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── Search input ──────────────────────────────────────────────────────── */
+
+.ss-search {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.ss-search-input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.12s ease;
+}
+
+.ss-search-input:focus {
+  border-color: var(--accent);
+}
+
+.ss-search-input::placeholder {
+  color: var(--text-dim);
+}
+
+/* ── List ──────────────────────────────────────────────────────────────── */
+
+.ss-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-accent) transparent;
+}
+
+.ss-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.ss-list::-webkit-scrollbar-thumb {
+  background: var(--border-accent);
+  border-radius: 4px;
+}
+
+.ss-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ── Option ────────────────────────────────────────────────────────────── */
+
+.ss-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.08s ease;
+}
+
+.ss-option:hover,
+.ss-active {
+  background: var(--panel-hover);
+}
+
+.ss-selected {
+  background: var(--accent-light);
+}
+
+.ss-selected:hover,
+.ss-selected.ss-active {
+  background: var(--accent-light);
+  filter: brightness(1.15);
+}
+
+.ss-option-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ss-option-sub {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.ss-check {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 14px;
+}
+
+/* ── Visual decorators (color swatch, avatar) ──────────────────────────── */
+
+.ss-swatch {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+}
+
+.ss-avatar {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+}

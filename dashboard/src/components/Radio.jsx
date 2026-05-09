@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiGet, apiPatch } from '../lib/api';
+import { Icon } from '../lib/icons';
+import { SearchableSelect } from './ui';
 
 // ─── Cassette decorativo ────────────────────────────────────────────────────
 function CassetteArt({ spinning = false, stationName = 'Lofi Radio 24/7' }) {
@@ -55,7 +57,6 @@ export default function Radio({ selectedGuild }) {
   const guildId = selectedGuild;
 
   const [cfg, setCfg]           = useState(null);
-  const [channels, setChannels] = useState([]);
   const [dirty, setDirty]       = useState(false);
   const [saving, setSaving]     = useState(false);
   const [loading, setLoading]   = useState(true);
@@ -77,12 +78,8 @@ export default function Radio({ selectedGuild }) {
     if (!guildId) return;
     setLoading(true);
     try {
-      const [rData, chData] = await Promise.all([
-        apiGet(`/api/guilds/${guildId}/radio/config`),
-        apiGet(`/api/guilds/${guildId}/channels`).catch(() => ({ channels: [] })),
-      ]);
+      const rData = await apiGet(`/api/guilds/${guildId}/radio/config`);
       setCfg(rData?.radio_config || {});
-      setChannels((chData.channels || []).filter(c => c.type === 'voice'));
     } catch { showToast('Error cargando configuración', 'error'); }
     finally { setLoading(false); }
   }, [guildId]);
@@ -90,13 +87,25 @@ export default function Radio({ selectedGuild }) {
   useEffect(() => { load(); }, [load]);
 
   const set = (k, v) => { setCfg(p => ({ ...p, [k]: v })); setDirty(true); };
+  const setId = (k) => (v) => set(k, v ? parseInt(v, 10) : null);
 
   const save = async () => {
     setSaving(true);
     try {
-      await apiPatch(`/api/guilds/${guildId}/radio/config`, cfg);
+      // Solo enviamos columnas válidas de lofi_config para evitar errores
+      // silenciosos con campos espurios.
+      const payload = {
+        enabled: cfg?.enabled ? 1 : 0,
+        channel_id: cfg?.channel_id ?? null,
+        stream_url: cfg?.stream_url ?? null,
+        station_name: cfg?.station_name ?? null,
+        volume: cfg?.volume ?? 50,
+        auto_reconnect: cfg?.auto_reconnect ? 1 : 0,
+        pause_on_empty: cfg?.pause_on_empty ? 1 : 0,
+      };
+      await apiPatch(`/api/guilds/${guildId}/radio/config`, payload);
       setDirty(false);
-      showToast('✅ Configuración guardada');
+      showToast('Configuración guardada');
     } catch (e) { showToast(e.message || 'Error guardando', 'error'); }
     finally { setSaving(false); }
   };
@@ -225,17 +234,26 @@ export default function Radio({ selectedGuild }) {
           {/* Canal de voz */}
           <div className="config-item" style={{marginBottom:0}}>
             <label>Canal de voz</label>
-            <select
+            <SearchableSelect
               value={cfg?.channel_id || ''}
-              onChange={e => set('channel_id', e.target.value ? parseInt(e.target.value) : null)}
-            >
-              <option value="">— Sin canal —</option>
-              {channels.map(c => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+              onChange={setId('channel_id')}
+              endpoint={`/api/guilds/${guildId}/channels?type=voice,stage_voice`}
+              itemsKey="channels"
+              placeholder="Selecciona un canal de voz…"
+              renderOption={(opt) => (
+                <>
+                  <Icon name="voiceChannel" />
+                  <span className="ss-option-label">{opt.name}</span>
+                  {opt.category ? <span className="ss-option-sub">{opt.category}</span> : null}
+                </>
+              )}
+              renderSelected={(opt) => (
+                <><Icon name="voiceChannel" /> {opt.name}</>
+              )}
+            />
+            <span style={{fontSize:'0.74rem',color:'var(--muted)'}}>
+              Solo se listan canales de voz. Filtrado server-side.
+            </span>
           </div>
 
           {/* Estación actual */}
@@ -344,9 +362,14 @@ export default function Radio({ selectedGuild }) {
               <div className="loading-spinner" style={{width:16,height:16,borderWidth:2}} />
             )}
             {searchQ && !searching && (
-              <button onClick={() => { setSearchQ(''); setResults([]); }} style={{
-                background:'none',border:'none',cursor:'pointer',color:'var(--muted)',fontSize:'1rem',padding:0,
-              }}>✕</button>
+              <button
+                onClick={() => { setSearchQ(''); setResults([]); }}
+                aria-label="Limpiar búsqueda"
+                style={{
+                  background:'none',border:'none',cursor:'pointer',color:'var(--muted)',fontSize:'1rem',padding:0,
+                }}>
+                <Icon name="close" />
+              </button>
             )}
           </div>
         </div>
@@ -439,7 +462,7 @@ export default function Radio({ selectedGuild }) {
           <div className="save-bar-actions">
             <button className="btn-secondary" onClick={load} disabled={saving}>Descartar</button>
             <button className="btn-primary btn-save" onClick={save} disabled={saving}>
-              {saving ? 'Guardando…' : '💾 Guardar'}
+              {saving ? 'Guardando…' : 'Guardar'}
             </button>
           </div>
         </div>

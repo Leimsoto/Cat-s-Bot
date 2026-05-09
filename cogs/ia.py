@@ -1,6 +1,6 @@
 """
-cogs/ia.py — Módulo de IA para TortuguBot
-──────────────────────────────────────────
+cogs/ia.py — Módulo de IA
+─────────────────────────
 • Chat con historial por usuario/guild    (Gemini 2.5 Flash-Lite → Flash → Pro)
 • Lectura multimodal en adjuntos          (imágenes, PDFs, audio, vídeo)
 • System prompt por guild configurable    (DB o .env como fallback)
@@ -9,12 +9,25 @@ cogs/ia.py — Módulo de IA para TortuguBot
 • Backoff exponencial
 • Métricas en memoria + /ai_status
 
-Modelos soportados (abril 2026):
-  Gemini: gemini-3.1-flash, gemini-3.1-flash-lite
-  Gemma: gemma-4-26b-a4b-it
+Modelos soportados (verificados contra google-genai SDK 2025/2026):
+  • gemini-2.5-flash         — equilibrio velocidad/calidad (default)
+  • gemini-2.5-flash-lite    — más rápido, menor coste
+  • gemini-2.5-pro           — máxima calidad
+  • gemini-2.0-flash         — modelo estable previo
+  • gemma-3-27b-it           — modelo abierto vía Google AI
+
+Las variantes 'gemini-3.1-*' y 'gemma-4-*' que figuraban antes NO existen en la
+API pública y producían 404 al primer mensaje. Se migran configs antiguos al
+default automáticamente en cog_load.
+
+Multi-API-keys:
+  El cog mantiene un pool de clientes (uno por API key registrada en la tabla
+  ai_api_keys). El cliente para procesar un mensaje se elige según la key
+  asignada al guild en ai_guild_keys. Si el guild no tiene key asignada, se
+  intenta el fallback a GEMINI_API_KEY del .env.
 
 Variables de entorno:
-  GEMINI_API_KEY          — requerida
+  GEMINI_API_KEY          — fallback si el guild no tiene key asignada
   AI_SYSTEM_PROMPT        — prompt base global (guild puede sobreescribir vía DB)
   AI_RATE_CAPACITY        — requests por periodo (default 10)
   AI_RATE_PERIOD          — periodo en segundos  (default 60)
@@ -48,23 +61,26 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ── Modelos ────────────────────────────────────────────────────────────────
-# Opciones disponibles de IA para el usuario
+# ── Modelos ──────────────────────────────────────────────────────────────────
+# Verificados contra docs públicas del SDK google-genai. El primer elemento
+# es el default cuando no hay configuración o hay que migrar uno inválido.
 CHAT_MODELS = [
-    "gemini-3.1-flash",           # Rápido y capaz
-    "gemini-3.1-flash-lite",      # Versión más ligera y rápida
-    "gemma-4-26b-a4b-it",         # Gemma 4 26B
-    "gemma-3-27b-it",             # Gemma 3 27B Instruction Tuned
-    "gemma-4-31b-it",             # Gemma 4 31B Instruction Tuned
+    "gemini-2.5-flash",           # default — equilibrio
+    "gemini-2.5-flash-lite",      # más rápido, menor coste
+    "gemini-2.5-pro",             # máxima calidad
+    "gemini-2.0-flash",           # estable previo
+    "gemma-3-27b-it",             # modelo abierto vía Google AI
 ]
 
-# Etiquetas legibles para la UI
+DEFAULT_MODEL = CHAT_MODELS[0]
+
+# Etiquetas legibles para la UI (sin emojis decorativos — política Fase 2)
 _MODEL_LABELS = {
-    "gemini-3.1-flash":           "Gemini 3.1 Flash 🔥",
-    "gemini-3.1-flash-lite":      "Gemini 3.1 Flash-Lite ⚡",
-    "gemma-4-26b-a4b-it":         "Gemma 4 (26B) 🦙",
-    "gemma-3-27b-it":             "Gemma 3 (27B) 🦙",
-    "gemma-4-31b-it":             "Gemma 4 (31B) 🚀",
+    "gemini-2.5-flash":      "Gemini 2.5 Flash",
+    "gemini-2.5-flash-lite": "Gemini 2.5 Flash-Lite",
+    "gemini-2.5-pro":        "Gemini 2.5 Pro",
+    "gemini-2.0-flash":      "Gemini 2.0 Flash",
+    "gemma-3-27b-it":        "Gemma 3 (27B)",
 }
 
 # ── MIME types aceptados como adjunto ────────────────────────────────────────
@@ -216,12 +232,28 @@ class IA(commands.Cog):
         self._server_contexts: Dict[int, str]  = {}   # guild_id → contexto sincronizado
         self._chat_histories:  Dict[str, List] = {}   # "guild_user" → List[Content]
 
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key or not genai:
-            logger.warning("GEMINI_API_KEY no encontrada o google-genai no instalado.")
+        # ── Pool de clientes ──────────────────────────────────────────────────
+        # Cada API key tiene su propio Client. Se cachean por valor de la key
+        # para evitar re-crear conexiones. El cliente fallback (env) se usa
+        # cuando un guild no tiene key asignada.
+        #
+        # `client` se mantiene como alias del fallback para compatibilidad con
+        # checks existentes (`if self.client: ...`); las llamadas reales pasan
+        # por _get_client_for_guild().
+        self._clients: Dict[str, "genai.Client"] = {}
+        self._fallback_key: Optional[str] = os.getenv("GEMINI_API_KEY") or None
+
+        if not genai:
+            logger.warning("google-genai no instalado — el cog está cargado pero las llamadas fallarán.")
+            self.client = None
+        elif not self._fallback_key:
+            logger.warning(
+                "GEMINI_API_KEY no encontrada en .env. Los guilds sin key asignada "
+                "en ai_api_keys no podrán usar IA."
+            )
             self.client = None
         else:
-            self.client = genai.Client(api_key=api_key)
+            self.client = self._build_client(self._fallback_key)
 
         # ── Rate limiting: TOKEN BUCKET = 1 slot por REQUEST ─────────────────
         # (No tokens del LLM — eso causaba el bug de "excede")
@@ -257,6 +289,41 @@ class IA(commands.Cog):
 
         self._http: Optional[aiohttp.ClientSession] = None
 
+    def _build_client(self, api_key: str) -> Optional["genai.Client"]:
+        """Crea (o reutiliza del cache) un Client de google-genai por api_key."""
+        if not genai or not api_key:
+            return None
+        if api_key not in self._clients:
+            try:
+                self._clients[api_key] = genai.Client(api_key=api_key)
+            except Exception as e:
+                logger.error(f"No se pudo crear cliente IA: {e}")
+                return None
+        return self._clients[api_key]
+
+    def _get_client_for_guild(self, guild_id: int) -> Optional["genai.Client"]:
+        """
+        Devuelve el Client a usar para un guild concreto.
+
+        Prioridad:
+          1. Key asignada al guild en ai_guild_keys (si existe y está active).
+          2. Fallback GEMINI_API_KEY del .env.
+          3. None — el caller debe avisar al usuario.
+        """
+        try:
+            assigned = self.db.get_ai_key_for_guild(guild_id)
+        except Exception as e:
+            logger.error(f"Error consultando ai_key_for_guild({guild_id}): {e}")
+            assigned = None
+
+        if assigned and int(assigned.get("active", 0)) and assigned.get("api_key"):
+            return self._build_client(assigned["api_key"])
+
+        if self._fallback_key:
+            return self._build_client(self._fallback_key)
+
+        return None
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def cog_load(self):
@@ -266,8 +333,36 @@ class IA(commands.Cog):
                 self._worker_loop(i), name=f"ia_worker_{i}"
             )
             self._workers.append(task)
+
+        # Migración: cualquier guild con un ai_model fuera del catálogo actual
+        # (e.g. "gemini-3.1-flash" antiguo) se reasigna al default. Logs lo
+        # reportan para auditoría. No bloquea el arranque si la query falla.
+        try:
+            self._migrate_invalid_models()
+        except Exception as e:
+            logger.warning(f"Migración de modelos IA omitida: {e}")
+
         logger.info(f"IA cog cargado – {self._concurrency} workers. "
-                    f"Modelo primario: {CHAT_MODELS[0]}")
+                    f"Modelo primario: {DEFAULT_MODEL}")
+
+    def _migrate_invalid_models(self) -> None:
+        """Resetea ai_config.ai_model al default si el actual no está en CHAT_MODELS."""
+        rows = self.db._fetchall(
+            "SELECT guild_id, ai_model FROM ai_config WHERE ai_model IS NOT NULL", ()
+        )
+        valid = set(CHAT_MODELS)
+        migrated = 0
+        for r in rows:
+            current = (r.get("ai_model") or "").strip()
+            if current and current not in valid:
+                self.db.set_ai_config(int(r["guild_id"]), ai_model=DEFAULT_MODEL)
+                logger.info(
+                    "Migración IA guild=%s: '%s' → '%s'",
+                    r["guild_id"], current, DEFAULT_MODEL,
+                )
+                migrated += 1
+        if migrated:
+            logger.info("Migración IA: %d guilds actualizados al modelo default.", migrated)
 
     async def cog_unload(self):
         for task in self._workers:
@@ -285,31 +380,31 @@ class IA(commands.Cog):
 
     def _build_ia_embed(self, guild: discord.Guild, cfg: dict) -> discord.Embed:
         embed = discord.Embed(
-            title="🧠 Configuración de Inteligencia Artificial",
+            title="Configuración de Inteligencia Artificial",
             description="Controla cómo interactúa el bot con Gemini API.",
             color=discord.Color.purple(),
         )
         ch_id = cfg.get("ai_channel_id")
         embed.add_field(
-            name="💬 Canal Chat",
+            name="Canal Chat",
             value=f"<#{ch_id}>" if ch_id else "❌ No configurado",
             inline=True,
         )
         r_id = cfg.get("ai_role_id")
         embed.add_field(
-            name="👥 Rol Ping",
+            name="Rol Ping",
             value=f"<@&{r_id}>" if r_id else "❌ No configurado",
             inline=True,
         )
         model = cfg.get("ai_model", CHAT_MODELS[0])
         embed.add_field(
-            name="🤖 Modelo primario",
+            name="Modelo primario",
             value=f"`{model}`\n_{_MODEL_LABELS.get(model, '')}_",
             inline=True,
         )
         sys_prompt = cfg.get("ai_system_prompt")
         embed.add_field(
-            name="📝 System Prompt",
+            name="System Prompt",
             value=(f"_{sys_prompt[:80]}…_" if sys_prompt and len(sys_prompt) > 80
                    else (f"_{sys_prompt}_" if sys_prompt else "_Global (.env)_")),
             inline=False,
@@ -472,10 +567,17 @@ class IA(commands.Cog):
         config,
         retries: int = 3,
         backoff_base: float = 1.5,
+        client: Optional["genai.Client"] = None,
     ):
         """
         Llama a Gemini con reintentos exponenciales por modelo.
+
+        `client` permite pasar un Client específico (per-guild). Si no se
+        proporciona, se usa self.client (fallback compartido).
         """
+        active_client = client or self.client
+        if active_client is None:
+            raise RuntimeError("No hay cliente Gemini disponible para esta llamada.")
         last_exc: Optional[BaseException] = None
 
         def _extract_retry_delay(err) -> Optional[float]:
@@ -509,7 +611,7 @@ class IA(commands.Cog):
                 async with self._semaphore:
                     try:
                         resp = await asyncio.to_thread(
-                            self.client.models.generate_content,
+                            active_client.models.generate_content,
                             model=current_model,
                             contents=contents,
                             config=config,
@@ -615,8 +717,28 @@ class IA(commands.Cog):
                 pass
             return
 
-        # Elegir modelo disponible (respetando backoff individual)
-        model_pref = self.db.get_ai_config(message.guild.id).get("ai_model", CHAT_MODELS[0])
+        # Cliente per-guild (key asignada en ai_guild_keys, o fallback env).
+        guild_client = self._get_client_for_guild(message.guild.id)
+        if guild_client is None:
+            try:
+                await message.channel.send(
+                    "❌ No hay API key de IA disponible para este servidor. "
+                    "Contacta con el administrador del bot."
+                )
+            except Exception:
+                pass
+            return
+
+        # Elegir modelo disponible (respetando backoff individual). Si el guild
+        # tiene un valor desconocido, caer al default en lugar de fallar.
+        model_pref = self.db.get_ai_config(message.guild.id).get("ai_model") or DEFAULT_MODEL
+        if model_pref not in CHAT_MODELS:
+            logger.warning(
+                "Guild %s usa modelo '%s' fuera del catálogo. Forzando default.",
+                message.guild.id, model_pref,
+            )
+            model_pref = DEFAULT_MODEL
+
         chosen = model_pref if self._model_backoff.get(model_pref, 0.0) < monotonic() else None
 
         if not chosen:
@@ -646,6 +768,7 @@ class IA(commands.Cog):
                     model=chosen,
                     contents=contents,
                     config=config,
+                    client=guild_client,
                 )
                 self._inc("total_latency", monotonic() - t0)
                 self._inc("latency_count")

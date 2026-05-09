@@ -134,8 +134,6 @@ class BotES(commands.Bot):
             "cogs.scheduler",
             "cogs.levels",
             "cogs.voice_gen",
-            # ── Rastreo de invitaciones ──
-            "cogs.invites",
         ]
         for cog in cogs:
             try:

@@ -168,7 +168,7 @@ class TicketCloseReasonView(discord.ui.View):
 
 class TicketModal(discord.ui.Modal):
     def __init__(self, cog, category):
-        super().__init__(title=f"Ticket: {category['name']}")
+        super().__init__(title="Ticket: {category['name']}")
         self.cog = cog
         self.category = category
         self.questions = json.loads(category.get("questions", "[]"))
@@ -329,8 +329,9 @@ class Tickets(commands.Cog):
             
             self.db.update_ticket(ticket["id"], channel_id=channel.id)
             
-            # Crear embed de bienvenida
-            welcome_data = category.get("welcome_embed_data")
+            # Crear embed de bienvenida.
+            # Prioridad: template_key (pool reutilizable) → welcome_embed_data inline.
+            welcome_data = self._resolve_welcome_data(guild.id, category)
             if welcome_data:
                 try:
                     from cogs.embeds import EmbedBuilder
@@ -340,9 +341,9 @@ class Tickets(commands.Cog):
                     if embed.title: embed.title = embed.title.replace("{username}", interaction.user.name).replace("{number}", str(global_num))
                     if embed.description: embed.description = embed.description.replace("{username}", interaction.user.name).replace("{number}", str(global_num))
                 except Exception:
-                    embed = discord.Embed(title=f"Ticket #{global_num} - {category['name']}", color=discord.Color.blurple())
+                    embed = discord.Embed(title="Ticket #{global_num} - {category['name']}", color=discord.Color.blurple())
             else:
-                embed = discord.Embed(title=f"Ticket #{global_num} - {category['name']}", color=discord.Color.blurple())
+                embed = discord.Embed(title="Ticket #{global_num} - {category['name']}", color=discord.Color.blurple())
                 embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
             
             # Siempre añadir las respuestas como campos
@@ -390,7 +391,7 @@ class Tickets(commands.Cog):
                         staff = guild.get_member(ticket["staff_id"]) if ticket.get("staff_id") else None
                         staffname = staff.mention if staff else "Ninguno"
                         
-                        embed = discord.Embed(title=f"🔒 Ticket Cerrado: #{ticket['global_number']}", color=discord.Color.red(), timestamp=datetime.now(timezone.utc))
+                        embed = discord.Embed(title="Ticket Cerrado: #{ticket['global_number']}", color=discord.Color.red(), timestamp=datetime.now(timezone.utc))
                         embed.add_field(name="Categoría", value=ticket["category_name"], inline=True)
                         embed.add_field(name="Usuario", value=username, inline=True)
                         embed.add_field(name="Atendido por", value=staffname, inline=True)
@@ -450,6 +451,39 @@ class Tickets(commands.Cog):
     # El comando /tickets panel (spawn) se gestiona desde el dashboard:
     # selecciona el canal y pulsa "Enviar Panel" para enviarlo.
 
+    # ── Resolución de plantillas (pool reutilizable) ──────────────────────────
+    def _resolve_welcome_data(self, guild_id: int, category: dict):
+        """
+        Devuelve el JSON del embed de bienvenida para una categoría.
+
+        Prioridad:
+          1. category.welcome_embed_template_key → busca en ticket_template_embeds.
+          2. category.welcome_embed_data → JSON inline (legacy).
+          3. None — el caller usa un embed por defecto.
+        """
+        key = category.get("welcome_embed_template_key")
+        if key:
+            tpl = self.db.get_ticket_template(guild_id, key)
+            if tpl and tpl.get("embed_data"):
+                return tpl["embed_data"]
+        return category.get("welcome_embed_data")
+
+    def _resolve_panel_data(self, guild_id: int, config: dict):
+        """
+        Resuelve el JSON del embed del panel de selección.
+
+        Prioridad:
+          1. config.panel_select_template → ticket_template_embeds.
+          2. config.panel_embed_data → JSON inline.
+          3. None.
+        """
+        key = config.get("panel_select_template")
+        if key:
+            tpl = self.db.get_ticket_template(guild_id, key)
+            if tpl and tpl.get("embed_data"):
+                return tpl["embed_data"]
+        return config.get("panel_embed_data")
+
     # ── Enviar panel desde dashboard (endpoint en API) ────────────────────────
     async def send_panel_to_channel(self, guild: discord.Guild, channel_id: int):
         """Envía el panel de tickets a un canal. Llamado desde el endpoint API."""
@@ -458,7 +492,7 @@ class Tickets(commands.Cog):
             return False, "No hay categorías configuradas"
 
         config = self.db.get_ticket_config(guild.id)
-        panel_data = config.get("panel_embed_data")
+        panel_data = self._resolve_panel_data(guild.id, config)
 
         if panel_data:
             try:

@@ -1,36 +1,36 @@
 import { useState, useRef, useEffect } from "react";
+import { ICONS } from "../lib/icons";
 
 const NAV_SECTIONS = [
   {
     label: "General",
     items: [
-      { id: "overview", icon: "fa-chart-pie", label: "Resumen" },
-      { id: "moderation", icon: "fa-gavel", label: "Moderación" },
-      { id: "logs", icon: "fa-stream", label: "Registros" },
+      { id: "overview", icon: ICONS.overview, label: "Resumen" },
+      { id: "moderation", icon: ICONS.moderation, label: "Moderación" },
+      { id: "logs", icon: ICONS.logs, label: "Registros" },
     ],
   },
   {
     label: "Módulos",
     items: [
-      { id: "ia", icon: "fa-brain", label: "Inteligencia Artificial" },
-      { id: "radio", icon: "fa-radio", label: "Radio / Música" },
-      { id: "voice-gen", icon: "fa-headphones", label: "Canales de Voz Auto" },
-      { id: "tickets", icon: "fa-ticket", label: "Tickets" },
-      { id: "levels", icon: "fa-star", label: "Niveles" },
-      { id: "autoroles", icon: "fa-user-plus", label: "Autoroles" },
-      { id: "giveaways", icon: "fa-gift", label: "Sorteos" },
-      { id: "tags", icon: "fa-tags", label: "Tags" },
-      { id: "invites", icon: "fa-paper-plane", label: "Invitaciones" },
+      { id: "ia", icon: ICONS.ia, label: "Inteligencia Artificial" },
+      { id: "radio", icon: ICONS.radio, label: "Radio / Música" },
+      { id: "voice-gen", icon: ICONS.voiceGen, label: "Generador de VCs" },
+      { id: "tickets", icon: ICONS.tickets, label: "Tickets" },
+      { id: "levels", icon: ICONS.levels, label: "Niveles" },
+      { id: "autoroles", icon: ICONS.autoroles, label: "Autoroles" },
+      { id: "giveaways", icon: ICONS.giveaways, label: "Sorteos" },
+      { id: "tags", icon: ICONS.tags, label: "Tags" },
     ],
   },
   {
     label: "Herramientas",
     items: [
-      { id: "embeds", icon: "fa-palette", label: "Creador de Embeds" },
-      { id: "reports", icon: "fa-flag", label: "Reportes" },
-      { id: "schedules", icon: "fa-clock", label: "Horarios" },
-      { id: "welcome", icon: "fa-hand-wave", label: "Bienvenidas" },
-      { id: "suggestions", icon: "fa-lightbulb", label: "Sugerencias" },
+      { id: "embeds", icon: ICONS.embeds, label: "Creador de Embeds" },
+      { id: "reports", icon: ICONS.reports, label: "Reportes" },
+      { id: "schedules", icon: ICONS.schedules, label: "Horarios" },
+      { id: "welcome", icon: ICONS.welcome, label: "Bienvenidas e Invitaciones" },
+      { id: "suggestions", icon: ICONS.suggestions, label: "Sugerencias" },
     ],
   },
 ];

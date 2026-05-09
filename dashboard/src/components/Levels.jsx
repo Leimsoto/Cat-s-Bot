@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { apiGet, apiPatch, apiPost, apiDelete } from "../lib/api";
+import { Icon } from "../lib/icons";
+import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
 
 export default function Levels({ selectedGuild: guildId }) {
   const [tab, setTab] = useState("config");
   const [cfg, setCfg] = useState(null);
   const [rewards, setRewards] = useState([]);
-  const [channels, setChannels] = useState([]);
-  const [roles, setRoles] = useState([]);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -21,17 +21,9 @@ export default function Levels({ selectedGuild: guildId }) {
     if (!guildId) return;
     setLoading(true);
     try {
-      const [lvData, chData, rolesData] = await Promise.all([
-        apiGet(`/api/guilds/${guildId}/levels`),
-        apiGet(`/api/guilds/${guildId}/channels`).catch(() => ({
-          channels: [],
-        })),
-        apiGet(`/api/guilds/${guildId}/roles`).catch(() => ({ roles: [] })),
-      ]);
+      const lvData = await apiGet(`/api/guilds/${guildId}/levels`);
       setCfg(lvData.config || {});
       setRewards(lvData.rewards || []);
-      setChannels((chData.channels || []).filter((c) => c.type === "text"));
-      setRoles(rolesData.roles || []);
     } catch {
       showToast("Error cargando niveles", "error");
     } finally {
@@ -47,13 +39,27 @@ export default function Levels({ selectedGuild: guildId }) {
     setCfg((p) => ({ ...p, [k]: v }));
     setDirty(true);
   };
+  const setId = (k) => (v) => set(k, v ? parseInt(v, 10) : null);
 
   const save = async () => {
     setSaving(true);
     try {
-      await apiPatch(`/api/guilds/${guildId}/levels`, cfg);
+      const payload = {
+        enabled: cfg.enabled ? 1 : 0,
+        xp_min: cfg.xp_min ?? 15,
+        xp_max: cfg.xp_max ?? 25,
+        cooldown_seconds: cfg.cooldown_seconds ?? 60,
+        announcement_channel_id: cfg.announcement_channel_id ?? null,
+        announcement_message: cfg.announcement_message ?? null,
+        stack_rewards: cfg.stack_rewards ? 1 : 0,
+        levelup_persist: cfg.levelup_persist ? 1 : 0,
+        levelup_autodelete: cfg.levelup_autodelete ? 1 : 0,
+        levelup_delete_after_seconds: cfg.levelup_delete_after_seconds ?? 30,
+        levelup_embed_config: cfg.levelup_embed_config ?? null,
+      };
+      await apiPatch(`/api/guilds/${guildId}/levels`, payload);
       setDirty(false);
-      showToast("✅ Configuración guardada");
+      showToast("Configuración guardada");
     } catch (e) {
       showToast(e.message, "error");
     } finally {
@@ -75,7 +81,7 @@ export default function Levels({ selectedGuild: guildId }) {
         cache: false,
       });
       setRewards(data.rewards || []);
-      showToast("✅ Recompensa añadida");
+      showToast("Recompensa añadida");
     } catch (e) {
       showToast(e.message, "error");
     } finally {
@@ -101,6 +107,30 @@ export default function Levels({ selectedGuild: guildId }) {
       </div>
     );
 
+  const renderChannel = (opt) => (
+    <>
+      <Icon name="channel" />
+      <span className="ss-option-label">{opt.name}</span>
+      {opt.category ? <span className="ss-option-sub">{opt.category}</span> : null}
+    </>
+  );
+  const renderRole = (opt) => (
+    <>
+      {opt.color ? (
+        <span className="ss-swatch" style={{ background: opt.color }} aria-hidden="true" />
+      ) : (
+        <Icon name="role" />
+      )}
+      <span className="ss-option-label">{opt.name}</span>
+    </>
+  );
+
+  // Texto para describir el comportamiento del mensaje según las flags.
+  const persist = !!cfg?.levelup_persist;
+  const autodel = !!cfg?.levelup_autodelete;
+  const ttl = cfg?.levelup_delete_after_seconds ?? 30;
+  const willDelete = !persist || autodel;
+
   return (
     <div className="ov-container animate-fade-in">
       <Toast toast={toast} onDismiss={() => setToast(null)} />
@@ -113,14 +143,14 @@ export default function Levels({ selectedGuild: guildId }) {
             WebkitTextFillColor: "transparent",
           }}
         >
-          🌟 Sistema de Niveles
+          Niveles
         </h2>
       </div>
 
       <div className="tabs-container">
         {[
-          ["config", "⚙️ Configuración"],
-          ["rewards", "🎁 Recompensas"],
+          ["config", "Configuración"],
+          ["rewards", `Recompensas (${rewards.length})`],
         ].map(([id, label]) => (
           <button
             key={id}
@@ -136,22 +166,13 @@ export default function Levels({ selectedGuild: guildId }) {
         <>
           <div
             className="glass-panel mod-section"
-            style={{
-              padding: 24,
-              borderRadius: 22,
-              display: "flex",
-              flexDirection: "column",
-              gap: 16,
-            }}
+            style={{ padding: 24, borderRadius: 22, display: "flex", flexDirection: "column", gap: 16 }}
           >
-            <div
-              className="config-item inline-check"
-              style={{ marginBottom: 0 }}
-            >
+            <div className="config-item inline-check" style={{ marginBottom: 0 }}>
               <div>
                 <div style={{ fontWeight: 800 }}>Sistema de XP activo</div>
                 <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
-                  Los usuarios ganan XP por enviar mensajes
+                  Los usuarios ganan XP al enviar mensajes.
                 </div>
               </div>
               <label className="toggle-switch">
@@ -172,7 +193,7 @@ export default function Levels({ selectedGuild: guildId }) {
               }}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
-                <label>XP Mínimo/mensaje</label>
+                <label>XP mínimo / mensaje</label>
                 <input
                   type="number"
                   min="1"
@@ -182,7 +203,7 @@ export default function Levels({ selectedGuild: guildId }) {
                 />
               </div>
               <div className="config-item" style={{ marginBottom: 0 }}>
-                <label>XP Máximo/mensaje</label>
+                <label>XP máximo / mensaje</label>
                 <input
                   type="number"
                   min="1"
@@ -198,9 +219,7 @@ export default function Levels({ selectedGuild: guildId }) {
                   min="0"
                   max="3600"
                   value={cfg.cooldown_seconds ?? 60}
-                  onChange={(e) =>
-                    set("cooldown_seconds", parseInt(e.target.value))
-                  }
+                  onChange={(e) => set("cooldown_seconds", parseInt(e.target.value))}
                 />
               </div>
             </div>
@@ -208,59 +227,130 @@ export default function Levels({ selectedGuild: guildId }) {
 
           <div
             className="glass-panel mod-section"
-            style={{
-              padding: 24,
-              borderRadius: 22,
-              display: "flex",
-              flexDirection: "column",
-              gap: 16,
-            }}
+            style={{ padding: 24, borderRadius: 22, display: "flex", flexDirection: "column", gap: 16 }}
           >
             <div className="section-title">
-              <h3 style={{ margin: 0 }}>📢 Anuncios de Nivel</h3>
+              <h3 style={{ margin: 0 }}>Anuncio de subida de nivel</h3>
             </div>
+
             <div className="config-item">
               <label>Canal de anuncios</label>
-              <select
+              <SearchableSelect
                 value={cfg.announcement_channel_id || ""}
-                onChange={(e) =>
-                  set(
-                    "announcement_channel_id",
-                    e.target.value ? parseInt(e.target.value) : null,
-                  )
-                }
-                style={{ padding: "10px 12px" }}
-              >
-                <option value="">💬 Mismo canal del mensaje</option>
-                {channels.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    #{c.name}
-                  </option>
-                ))}
-              </select>
+                onChange={setId("announcement_channel_id")}
+                endpoint={`/api/guilds/${guildId}/channels?type=text`}
+                itemsKey="channels"
+                placeholder="Mismo canal del mensaje (default)…"
+                renderOption={renderChannel}
+                renderSelected={(opt) => (
+                  <><Icon name="channel" /> {opt.name}</>
+                )}
+              />
             </div>
+
             <div className="config-item">
-              <label>Mensaje de subida de nivel</label>
+              <label>Mensaje de subida (texto plano)</label>
               <input
                 type="text"
                 value={cfg.announcement_message || ""}
-                placeholder="¡{user} ha subido al nivel {level}! 🎉"
+                placeholder="¡{user} ha subido al nivel {level}!"
                 onChange={(e) => set("announcement_message", e.target.value)}
               />
-              <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
-                Variables: {"{" + "user" + "}"}, {"{" + "level" + "}"}
+              <span style={{ fontSize: "0.74rem", color: "var(--muted)" }}>
+                Variables: <code>{"{user}"}</code> <code>{"{level}"}</code>{" "}
+                <code>{"{username}"}</code>
               </span>
             </div>
-            <div
-              className="config-item inline-check"
-              style={{ marginBottom: 0 }}
-            >
+
+            <div className="config-item inline-check" style={{ marginBottom: 0 }}>
               <div>
-                <div style={{ fontWeight: 700 }}>
-                  Apilar roles de recompensa
+                <div style={{ fontWeight: 700 }}>Persistir mensaje</div>
+                <div style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
+                  Si está activo, el mensaje queda en el canal. Si lo desactivas
+                  el bot lo borra automáticamente al cabo de {ttl}s.
                 </div>
-                <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
-                  El usuario mantiene roles anteriores al subir de nivel
+              </div>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={!!cfg.levelup_persist}
+                  onChange={(e) =>
+                    set("levelup_persist", e.target.checked ? 1 : 0)
+                  }
+                />
+                <span className="slider" />
+              </label>
+            </div>
+
+            <div className="config-item inline-check" style={{ marginBottom: 0 }}>
+              <div>
+                <div style={{ fontWeight: 700 }}>Autoeliminar siempre</div>
+                <div style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
+                  Aplica delete_after incluso si "Persistir" está activo. Útil
+                  si quieres mensajes efímeros incondicionales.
+                </div>
+              </div>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={!!cfg.levelup_autodelete}
+                  onChange={(e) =>
+                    set("levelup_autodelete", e.target.checked ? 1 : 0)
+                  }
+                />
+                <span className="slider" />
+              </label>
+            </div>
+
+            <div className="config-item" style={{ marginBottom: 0, maxWidth: 220 }}>
+              <label>Borrar después de (seg)</label>
+              <input
+                type="number"
+                min="3"
+                max="3600"
+                value={cfg.levelup_delete_after_seconds ?? 30}
+                onChange={(e) =>
+                  set("levelup_delete_after_seconds", parseInt(e.target.value))
+                }
+                disabled={!willDelete}
+                style={{ opacity: willDelete ? 1 : 0.4 }}
+              />
+            </div>
+
+            <div className="config-item" style={{ marginBottom: 0 }}>
+              <label>Embed personalizado (JSON, opcional)</label>
+              <textarea
+                rows={6}
+                value={cfg.levelup_embed_config || ""}
+                placeholder='{"title":"Subiste de nivel","description":"{user} ahora es nivel {level}","color":3447003}'
+                onChange={(e) =>
+                  set("levelup_embed_config", e.target.value || null)
+                }
+                spellCheck={false}
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  background: "var(--panel)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-md)",
+                  color: "var(--text)",
+                  fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+                  fontSize: "0.82rem",
+                  resize: "vertical",
+                }}
+              />
+              <span style={{ fontSize: "0.74rem", color: "var(--muted)" }}>
+                Si está vacío, se usa el mensaje de texto. Variables disponibles
+                en <code>title</code> y <code>description</code>.
+              </span>
+            </div>
+
+            <div className="config-item inline-check" style={{ marginBottom: 0 }}>
+              <div>
+                <div style={{ fontWeight: 700 }}>Apilar roles de recompensa</div>
+                <div style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
+                  Si está activo, el usuario conserva los roles previos al subir.
+                  Si lo apagas, se sustituye por el último.
                 </div>
               </div>
               <label className="toggle-switch">
@@ -282,11 +372,7 @@ export default function Levels({ selectedGuild: guildId }) {
                 Cambios sin guardar
               </span>
               <div className="save-bar-actions">
-                <button
-                  className="btn-secondary"
-                  onClick={load}
-                  disabled={saving}
-                >
+                <button className="btn-secondary" onClick={load} disabled={saving}>
                   Descartar
                 </button>
                 <button
@@ -294,7 +380,7 @@ export default function Levels({ selectedGuild: guildId }) {
                   onClick={save}
                   disabled={saving}
                 >
-                  {saving ? "Guardando…" : "💾 Guardar"}
+                  {saving ? "Guardando…" : "Guardar"}
                 </button>
               </div>
             </div>
@@ -304,13 +390,12 @@ export default function Levels({ selectedGuild: guildId }) {
 
       {tab === "rewards" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {/* Add reward */}
           <div
             className="glass-panel mod-section"
             style={{ padding: 20, borderRadius: 22 }}
           >
             <div className="section-title">
-              <h3 style={{ margin: 0 }}>➕ Añadir Recompensa</h3>
+              <h3 style={{ margin: 0 }}>Añadir recompensa</h3>
             </div>
             <div
               style={{
@@ -320,10 +405,7 @@ export default function Levels({ selectedGuild: guildId }) {
                 alignItems: "flex-end",
               }}
             >
-              <div
-                className="config-item"
-                style={{ marginBottom: 0, flex: "0 0 120px" }}
-              >
+              <div className="config-item" style={{ marginBottom: 0, flex: "0 0 120px" }}>
                 <label>Nivel</label>
                 <input
                   type="number"
@@ -338,130 +420,115 @@ export default function Levels({ selectedGuild: guildId }) {
               </div>
               <div
                 className="config-item"
-                style={{ marginBottom: 0, flex: 1, minWidth: 180 }}
+                style={{ marginBottom: 0, flex: 1, minWidth: 220 }}
               >
                 <label>Rol a otorgar</label>
-                <select
+                <SearchableSelect
                   value={newReward.role_id}
-                  onChange={(e) =>
-                    setNewReward((p) => ({ ...p, role_id: e.target.value }))
+                  onChange={(v) =>
+                    setNewReward((p) => ({ ...p, role_id: v || "" }))
                   }
-                  style={{ padding: "10px 12px" }}
-                >
-                  <option value="">— Seleccionar rol —</option>
-                  {roles.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      @{r.name}
-                    </option>
-                  ))}
-                </select>
+                  endpoint={`/api/guilds/${guildId}/roles`}
+                  itemsKey="roles"
+                  placeholder="Selecciona un rol…"
+                  renderOption={renderRole}
+                  renderSelected={(opt) => (
+                    <>
+                      {opt.color ? (
+                        <span
+                          className="ss-swatch"
+                          style={{ background: opt.color }}
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <Icon name="role" />
+                      )}{" "}
+                      {opt.name}
+                    </>
+                  )}
+                />
               </div>
               <button
                 className="btn-primary"
                 onClick={addReward}
                 disabled={addingReward}
-                style={{
-                  height: 42,
-                  padding: "0 20px",
-                  borderRadius: 12,
-                  flexShrink: 0,
-                }}
+                style={{ height: 42, padding: "0 20px", borderRadius: 12, flexShrink: 0 }}
               >
-                {addingReward ? "…" : "+ Añadir"}
+                <Icon name="add" /> {addingReward ? "Añadiendo…" : "Añadir"}
               </button>
             </div>
           </div>
 
-          {/* Rewards list */}
           <div
             className="glass-panel mod-section"
             style={{ padding: 20, borderRadius: 22 }}
           >
             <div className="section-title">
-              <h3 style={{ margin: 0 }}>
-                🎁 Recompensas configuradas ({rewards.length})
-              </h3>
+              <h3 style={{ margin: 0 }}>Recompensas configuradas ({rewards.length})</h3>
             </div>
             {rewards.length === 0 && (
               <div className="no-results">
-                <p>No hay recompensas. ¡Añade una arriba!</p>
+                <p>No hay recompensas. Añade una arriba.</p>
               </div>
             )}
             <div style={{ display: "grid", gap: 10 }}>
               {[...rewards]
                 .sort((a, b) => a.level - b.level)
-                .map((r) => {
-                  const roleObj = roles.find(
-                    (x) => parseInt(x.id) === parseInt(r.role_id),
-                  );
-                  return (
+                .map((r) => (
+                  <div
+                    key={r.level}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 14,
+                      padding: "12px 16px",
+                      borderRadius: 14,
+                      background: "rgba(255,255,255,0.02)",
+                      border: "1px solid var(--border)",
+                    }}
+                  >
                     <div
-                      key={r.level}
                       style={{
+                        width: 44,
+                        height: 44,
+                        borderRadius: 12,
                         display: "flex",
                         alignItems: "center",
-                        gap: 14,
-                        padding: "12px 16px",
-                        borderRadius: 14,
-                        background: "rgba(255,255,255,0.02)",
-                        border: "1px solid rgba(139,92,246,0.14)",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                        background:
+                          "linear-gradient(135deg,rgba(99,102,241,0.25),rgba(139,92,246,0.15))",
+                        fontWeight: 900,
+                        fontSize: "0.95rem",
+                        color: "#c4b5fd",
                       }}
                     >
-                      <div
-                        style={{
-                          width: 44,
-                          height: 44,
-                          borderRadius: 12,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          flexShrink: 0,
-                          background:
-                            "linear-gradient(135deg,rgba(99,102,241,0.25),rgba(139,92,246,0.15))",
-                          fontWeight: 900,
-                          fontSize: "0.95rem",
-                          color: "#c4b5fd",
-                        }}
-                      >
-                        Lv.{r.level}
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontWeight: 700 }}>Nivel {r.level}</div>
-                        <div
-                          style={{ fontSize: "0.82rem", color: "var(--muted)" }}
-                        >
-                          @{roleObj?.name || r.role_id}
-                        </div>
-                      </div>
-                      {roleObj?.color && (
-                        <div
-                          style={{
-                            width: 12,
-                            height: 12,
-                            borderRadius: "50%",
-                            background: roleObj.color,
-                            flexShrink: 0,
-                          }}
-                        />
-                      )}
-                      <button
-                        onClick={() => deleteReward(r.level)}
-                        style={{
-                          background: "rgba(244,63,94,0.12)",
-                          border: "1px solid rgba(244,63,94,0.25)",
-                          borderRadius: 8,
-                          padding: "6px 12px",
-                          color: "#f43f5e",
-                          cursor: "pointer",
-                          fontSize: "0.82rem",
-                          fontWeight: 700,
-                        }}
-                      >
-                        ✕
-                      </button>
+                      Lv.{r.level}
                     </div>
-                  );
-                })}
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700 }}>Nivel {r.level}</div>
+                      <div style={{ fontSize: "0.82rem", color: "var(--muted)" }}>
+                        Rol id <code>{r.role_id}</code>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => deleteReward(r.level)}
+                      aria-label="Eliminar recompensa"
+                      style={{
+                        background: "rgba(244,63,94,0.12)",
+                        border: "1px solid rgba(244,63,94,0.25)",
+                        borderRadius: 8,
+                        padding: "6px 12px",
+                        color: "#f43f5e",
+                        cursor: "pointer",
+                        fontSize: "0.82rem",
+                        fontWeight: 700,
+                      }}
+                    >
+                      <Icon name="close" />
+                    </button>
+                  </div>
+                ))}
             </div>
           </div>
         </div>

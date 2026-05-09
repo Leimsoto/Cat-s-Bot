@@ -23,8 +23,10 @@ POST /api/guilds/{id}/tickets/categories    → añadir categoría
 DELETE/api/guilds/{id}/tickets/categories/{id} → eliminar categoría
 GET  /api/guilds/{id}/radio                 → config radio
 PATCH/api/guilds/{id}/radio                → actualizar radio
-GET  /api/guilds/{id}/channels              → lista canales (desde bot)
-GET  /api/guilds/{id}/roles                 → lista roles (desde bot)
+GET  /api/guilds/{id}/channels              → lista canales (filtros: search, type, limit)
+GET  /api/guilds/{id}/categories            → atajo: solo categorías (search, limit)
+GET  /api/guilds/{id}/roles                 → lista roles (search, limit, include_managed)
+GET  /api/guilds/{id}/members               → autocomplete de miembros (search, limit)
 GET  /api/guilds/{id}/music                 → estado reproducción
 """
 
@@ -127,21 +129,40 @@ async def list_guilds(
 @router.get("/{guild_id}/channels")
 async def get_guild_channels(
     guild_id: int,
+    search: str = "",
+    type: str = "",
+    limit: int = 200,
     bot=Depends(get_bot),
     _user=Depends(require_guild_admin),
 ):
-    """Lista todos los canales del servidor leyendo directamente del bot."""
+    """
+    Lista canales del servidor leyendo directamente del bot.
+
+    Parámetros:
+      search: substring para filtrar por nombre (case-insensitive).
+      type:   filtra por tipo. Acepta uno o varios separados por coma.
+              Valores: text, voice, category, stage_voice, forum, news, announcement.
+      limit:  máximo de canales a devolver (default 200, max 500).
+    """
     if bot is None:
         raise HTTPException(503, "Bot no disponible")
     guild = bot.get_guild(guild_id)
     if guild is None:
         raise HTTPException(404, "Servidor no encontrado en el bot")
 
+    limit = max(1, min(int(limit), 500))
+    type_filter = {t.strip() for t in type.split(",") if t.strip()} if type else set()
+    search_lower = search.strip().lower()
+
     channels = []
     for ch in sorted(
         guild.channels, key=lambda c: c.position if hasattr(c, "position") else 0
     ):
-        ch_type = str(ch.type).split(".")[-1]  # "text", "voice", "category", etc.
+        ch_type = str(ch.type).split(".")[-1]
+        if type_filter and ch_type not in type_filter:
+            continue
+        if search_lower and search_lower not in ch.name.lower():
+            continue
         channels.append(
             {
                 "id": str(ch.id),
@@ -151,7 +172,99 @@ async def get_guild_channels(
                 "category": ch.category.name if ch.category else None,
             }
         )
-    return {"guild_id": str(guild_id), "channels": channels}
+        if len(channels) >= limit:
+            break
+    return {"guild_id": str(guild_id), "channels": channels, "total": len(channels)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /api/guilds/{id}/categories  — atajo: solo categorías
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/{guild_id}/categories")
+async def get_guild_categories(
+    guild_id: int,
+    search: str = "",
+    limit: int = 200,
+    bot=Depends(get_bot),
+    _user=Depends(require_guild_admin),
+):
+    """Atajo: lista solo las categorías del servidor (CategoryChannel)."""
+    if bot is None:
+        raise HTTPException(503, "Bot no disponible")
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        raise HTTPException(404, "Servidor no encontrado en el bot")
+
+    limit = max(1, min(int(limit), 500))
+    search_lower = search.strip().lower()
+
+    categories = []
+    for cat in sorted(guild.categories, key=lambda c: c.position):
+        if search_lower and search_lower not in cat.name.lower():
+            continue
+        categories.append(
+            {
+                "id": str(cat.id),
+                "name": cat.name,
+                "position": cat.position,
+                "channel_count": len(cat.channels),
+            }
+        )
+        if len(categories) >= limit:
+            break
+    return {"guild_id": str(guild_id), "categories": categories, "total": len(categories)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /api/guilds/{id}/members  — autocomplete sobre el cache del bot
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/{guild_id}/members")
+async def get_guild_members(
+    guild_id: int,
+    search: str = "",
+    limit: int = 50,
+    bot=Depends(get_bot),
+    _user=Depends(require_guild_admin),
+):
+    """
+    Autocomplete de miembros del servidor.
+
+    Lee del cache (`guild.members`) — requiere `members` intent (ya está activo).
+    Para guilds grandes se recomienda enviar siempre `search`.
+    """
+    if bot is None:
+        raise HTTPException(503, "Bot no disponible")
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        raise HTTPException(404, "Servidor no encontrado en el bot")
+
+    limit = max(1, min(int(limit), 200))
+    search_lower = search.strip().lower()
+
+    members = []
+    for m in guild.members:
+        if m.bot:
+            continue
+        if search_lower:
+            display = (m.display_name or "").lower()
+            uname = (m.name or "").lower()
+            if search_lower not in display and search_lower not in uname:
+                continue
+        members.append(
+            {
+                "id": str(m.id),
+                "name": m.name,
+                "display_name": m.display_name,
+                "avatar": m.display_avatar.url if m.display_avatar else None,
+            }
+        )
+        if len(members) >= limit:
+            break
+    return {"guild_id": str(guild_id), "members": members, "total": len(members)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,28 +275,50 @@ async def get_guild_channels(
 @router.get("/{guild_id}/roles")
 async def get_guild_roles(
     guild_id: int,
+    search: str = "",
+    limit: int = 200,
+    include_managed: bool = False,
     bot=Depends(get_bot),
     _user=Depends(require_guild_admin),
 ):
-    """Lista todos los roles del servidor leyendo directamente del bot."""
+    """
+    Lista roles del servidor leyendo directamente del bot.
+
+    Parámetros:
+      search:          substring para filtrar por nombre.
+      limit:           máximo de roles (default 200, max 500).
+      include_managed: si True incluye roles gestionados por bots/integraciones
+                       (default False — los oculta porque no son asignables).
+    """
     if bot is None:
         raise HTTPException(503, "Bot no disponible")
     guild = bot.get_guild(guild_id)
     if guild is None:
         raise HTTPException(404, "Servidor no encontrado en el bot")
 
-    roles = [
-        {
-            "id": str(r.id),
-            "name": r.name,
-            "color": f"#{r.color.value:06x}" if r.color.value else None,
-            "position": r.position,
-            "managed": r.managed,
-        }
-        for r in sorted(guild.roles, key=lambda r: -r.position)
-        if r.name != "@everyone"
-    ]
-    return {"guild_id": str(guild_id), "roles": roles}
+    limit = max(1, min(int(limit), 500))
+    search_lower = search.strip().lower()
+
+    roles = []
+    for r in sorted(guild.roles, key=lambda r: -r.position):
+        if r.name == "@everyone":
+            continue
+        if not include_managed and r.managed:
+            continue
+        if search_lower and search_lower not in r.name.lower():
+            continue
+        roles.append(
+            {
+                "id": str(r.id),
+                "name": r.name,
+                "color": f"#{r.color.value:06x}" if r.color.value else None,
+                "position": r.position,
+                "managed": r.managed,
+            }
+        )
+        if len(roles) >= limit:
+            break
+    return {"guild_id": str(guild_id), "roles": roles, "total": len(roles)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -386,12 +521,20 @@ async def patch_moderation_config(
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
 ):
-    """Actualiza la configuración de moderación desde el dashboard."""
+    """
+    Actualiza la configuración de moderación desde el dashboard.
+
+    Las opciones se reparten entre dos tablas:
+      • guild_config  → warns, mute_role, staff_role, warn_embed_config.
+      • server_config → mod_role, modlog_channel, modlog_enabled.
+
+    Antes este endpoint enviaba todo a set_config y rompía con
+    `ValueError: Columnas inválidas` para las claves de server_config.
+    """
+    # Columnas válidas de cada tabla.
     config_keys = {
         "mute_role_id",
-        "mod_role_id",
-        "modlog_channel",
-        "modlog_enabled",
+        "staff_role_id",
         "warn_ban_threshold",
         "warn_kick_threshold",
         "warn_mute_threshold",
@@ -401,10 +544,22 @@ async def patch_moderation_config(
         "warn_mute_duration",
         "warn_embed_config",
     }
-    filtered = {k: v for k, v in body.items() if k in config_keys}
-    if filtered:
-        db.set_config(guild_id, **filtered)
-    return {"status": "ok", "updated_keys": list(filtered.keys())}
+    server_keys = {
+        "mod_role_id",
+        "modlog_channel",
+        "modlog_enabled",
+    }
+
+    config_payload = {k: v for k, v in body.items() if k in config_keys}
+    server_payload = {k: v for k, v in body.items() if k in server_keys}
+
+    if config_payload:
+        db.set_config(guild_id, **config_payload)
+    if server_payload and hasattr(db, "set_server_config"):
+        db.set_server_config(guild_id, **server_payload)
+
+    updated = list(config_payload.keys()) + list(server_payload.keys())
+    return {"status": "ok", "updated_keys": updated}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,6 +583,11 @@ async def patch_levels_config(
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
 ):
+    """
+    Actualiza la configuración de niveles. En Fase 9 se añaden las claves de
+    comportamiento del mensaje de subida (`levelup_*`) — antes el dashboard
+    podía mostrarlas pero no se persistían.
+    """
     allowed = {
         "enabled",
         "xp_min",
@@ -437,11 +597,16 @@ async def patch_levels_config(
         "announcement_message",
         "stack_rewards",
         "ignored_channels",
+        "channel_multipliers",
+        "levelup_persist",
+        "levelup_autodelete",
+        "levelup_delete_after_seconds",
+        "levelup_embed_config",
     }
     filtered = {k: v for k, v in body.items() if k in allowed}
     if filtered:
         db.set_xp_config(guild_id, **filtered)
-    return {"status": "ok"}
+    return {"status": "ok", "updated": list(filtered.keys())}
 
 
 @router.get("/{guild_id}/levels/rewards")
@@ -498,7 +663,16 @@ async def patch_tickets_config(
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
 ):
+    """
+    Actualiza la configuración de tickets.
+
+    `panel_channel_id` y las claves de plantilla (`*_template`) faltaban en el
+    allow-set previo, por lo que el dashboard nunca podía persistir esos campos.
+    `max_tickets_per_user` y `ticket_cooldown_seconds` además no existían como
+    columnas; ahora sí (Fase 7).
+    """
     allowed = {
+        "panel_channel_id",
         "category_id",
         "log_channel_id",
         "allowed_roles",
@@ -507,11 +681,15 @@ async def patch_tickets_config(
         "max_tickets_per_user",
         "ticket_cooldown_seconds",
         "panel_embed_data",
+        "panel_select_template",
+        "panel_inside_template",
+        "msg_open_template",
+        "msg_close_template",
     }
     filtered = {k: v for k, v in body.items() if k in allowed}
     if filtered:
         db.set_ticket_config(guild_id, **filtered)
-    return {"status": "ok"}
+    return {"status": "ok", "updated": list(filtered.keys())}
 
 
 @router.post("/{guild_id}/tickets/send-panel")
@@ -548,10 +726,15 @@ async def add_ticket_category(
     _user=Depends(require_guild_admin),
 ):
     nombre = body.get("name", "").strip()
-    emoji = body.get("emoji", "🎫")
+    emoji = body.get("emoji", "")
     preguntas = body.get("questions", ["¿En qué podemos ayudarte?"])
     if not nombre:
         raise HTTPException(400, "name es requerido")
+
+    welcome_data = body.get("welcome_embed_json") or body.get("welcome_embed_data")
+    if isinstance(welcome_data, dict):
+        welcome_data = json.dumps(welcome_data, ensure_ascii=False)
+
     db.add_ticket_category(
         guild_id,
         nombre,
@@ -562,7 +745,10 @@ async def add_ticket_category(
                 "close_reasons", ["Solucionado", "Cierre Administrativo", "Inactividad"]
             )
         ),
-        body.get("welcome_embed_json"),
+        welcome_data,
+        description=body.get("description"),
+        welcome_embed_template_key=body.get("welcome_embed_template_key"),
+        staff_role_id=body.get("staff_role_id"),
     )
     return {"status": "ok"}
 
@@ -574,8 +760,12 @@ async def delete_ticket_category(
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
 ):
+    """
+    Elimina una categoría. Antes se llamaba a `delete_ticket_category` con dos
+    argumentos pero la firma del manager solo acepta el id → TypeError.
+    """
     if hasattr(db, "delete_ticket_category"):
-        db.delete_ticket_category(guild_id, cat_id)
+        db.delete_ticket_category(cat_id)
     return {"status": "ok"}
 
 

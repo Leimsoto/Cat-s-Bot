@@ -1,217 +1,391 @@
-import { useState, useEffect, useCallback } from 'react';
-import { apiGet, apiPost, apiPatch, apiDelete } from '../lib/api';
-import Toast from './Toast';
+/**
+ * components/Schedules.jsx
+ * ────────────────────────
+ * Mensajes programados (cron). Crear, listar, editar, toggle, test, eliminar.
+ *
+ * Endpoints:
+ *   GET    /api/guilds/{g}/schedules
+ *   POST   /api/guilds/{g}/schedules
+ *   PATCH  /api/guilds/{g}/schedules/{id|name}
+ *   POST   /api/guilds/{g}/schedules/{id|name}/toggle
+ *   POST   /api/guilds/{g}/schedules/{id|name}/test
+ *   DELETE /api/guilds/{g}/schedules/{id|name}
+ */
+
+import { useCallback, useEffect, useState } from "react";
+import { apiGet, apiPost, apiPatch, apiDelete } from "../lib/api";
+import SearchableSelect from "./ui/SearchableSelect";
+import { Icon } from "../lib/icons";
 
 const INTERVAL_PRESETS = [
-  { label: '1 hora',   seconds: 3600 },
-  { label: '2 horas',  seconds: 7200 },
-  { label: '6 horas',  seconds: 21600 },
-  { label: '12 horas', seconds: 43200 },
-  { label: '24 horas', seconds: 86400 },
-  { label: '1 semana', seconds: 604800 },
+  { label: "1 hora",   seconds: 3600 },
+  { label: "2 horas",  seconds: 7200 },
+  { label: "6 horas",  seconds: 21600 },
+  { label: "12 horas", seconds: 43200 },
+  { label: "24 horas", seconds: 86400 },
+  { label: "1 semana", seconds: 604800 },
 ];
 
 function fmtInterval(seconds) {
-  if (!seconds) return '—';
-  if (seconds >= 604800) return `${(seconds / 604800).toFixed(0)} sem`;
-  if (seconds >= 86400)  return `${(seconds / 86400).toFixed(0)}d`;
-  if (seconds >= 3600)   return `${(seconds / 3600).toFixed(0)}h`;
-  return `${Math.floor(seconds / 60)}min`;
+  const s = Number(seconds || 0);
+  if (!s) return "—";
+  if (s >= 604800) return `${Math.floor(s / 604800)} sem`;
+  if (s >= 86400)  return `${Math.floor(s / 86400)}d`;
+  if (s >= 3600)   return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 60)}min`;
 }
 
-export default function Schedules({ selectedGuild }) {
-  const [schedules, setSchedules]   = useState([]);
-  const [channels, setChannels]     = useState([]);
-  const [loading, setLoading]       = useState(true);
-  const [toast, setToast]           = useState(null);
-  const [showCreate, setShowCreate] = useState(false);
-  const [creating, setCreating]     = useState(false);
-  const [form, setForm] = useState({
-    name: '', channel_id: '', content: '',
-    interval_seconds: 3600, custom_interval: '',
-  });
+function fmtDate(iso) {
+  if (!iso) return "Nunca";
+  try {
+    return new Date(iso).toLocaleString("es");
+  } catch {
+    return String(iso);
+  }
+}
 
-  const showToast = (msg, type = 'success') => setToast({ msg, type });
+const EMPTY_FORM = {
+  name: "",
+  channel_id: null,
+  content: "",
+  interval_seconds: 3600,
+  custom_interval_min: "",
+};
+
+export default function Schedules({ selectedGuild, onToast }) {
+  const guildId = selectedGuild;
+  const [schedules, setSchedules] = useState([]);
+  const [limits, setLimits] = useState({ max_schedules: 10, min_interval: 600, max_interval: 2592000 });
+  const [loading, setLoading] = useState(true);
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+  const [form, setForm] = useState(EMPTY_FORM);
+
+  const toast = (kind, msg) => onToast?.({ type: kind, message: msg });
 
   const load = useCallback(async () => {
-    if (!selectedGuild) return;
+    if (!guildId) return;
     setLoading(true);
     try {
-      const [sData, chData] = await Promise.all([
-        apiGet(`/api/guilds/${selectedGuild}/schedules`, { cache: false }),
-        apiGet(`/api/guilds/${selectedGuild}/channels`).catch(() => ({ channels: [] })),
-      ]);
-      setSchedules(sData.schedules || []);
-      setChannels((chData.channels || []).filter(c => c.type === 'text'));
-    } catch { showToast('Error cargando horarios', 'error'); }
-    finally { setLoading(false); }
-  }, [selectedGuild]);
+      const data = await apiGet(`/api/guilds/${guildId}/schedules`, { cache: false });
+      setSchedules(data?.schedules || []);
+      if (data?.limits) setLimits(data.limits);
+    } catch (e) {
+      toast("error", e?.message || "Error cargando horarios");
+    } finally {
+      setLoading(false);
+    }
+  // eslint-disable-next-line
+  }, [guildId]);
 
   useEffect(() => { load(); }, [load]);
 
-  const setF = (k, v) => setForm(p => ({ ...p, [k]: v }));
+  const setF = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+
+  const computedInterval = () => {
+    if (form.custom_interval_min) {
+      const m = parseInt(form.custom_interval_min, 10);
+      if (Number.isFinite(m) && m > 0) return m * 60;
+    }
+    return Number(form.interval_seconds);
+  };
 
   const create = async () => {
-    const interval = form.custom_interval
-      ? parseInt(form.custom_interval) * 60
-      : form.interval_seconds;
-    if (!form.name.trim()) return showToast('El nombre es requerido', 'error');
-    if (!form.channel_id)  return showToast('Selecciona un canal', 'error');
-    if (!form.content.trim()) return showToast('El contenido es requerido', 'error');
+    if (!form.name.trim()) return toast("error", "Nombre requerido");
+    if (!form.channel_id) return toast("error", "Selecciona un canal");
+    if (!form.content.trim()) return toast("error", "Contenido requerido");
+    const interval = computedInterval();
+    if (interval < limits.min_interval) return toast("error", `Intervalo mínimo: ${limits.min_interval / 60} min`);
+    if (interval > limits.max_interval) return toast("error", "Intervalo máximo: 30 días");
+
     setCreating(true);
     try {
-      await apiPost(`/api/guilds/${selectedGuild}/schedules`, {
+      await apiPost(`/api/guilds/${guildId}/schedules`, {
         name: form.name.trim(),
-        channel_id: parseInt(form.channel_id),
+        channel_id: Number(form.channel_id),
         content: form.content.trim(),
         interval_seconds: interval,
       });
-      showToast('✅ Horario creado correctamente');
-      setForm({ name: '', channel_id: '', content: '', interval_seconds: 3600, custom_interval: '' });
+      toast("success", "Horario creado");
+      setForm(EMPTY_FORM);
       setShowCreate(false);
       await load();
-    } catch (e) { showToast(e.message, 'error'); }
-    finally { setCreating(false); }
+    } catch (e) {
+      toast("error", e?.message || "Error creando horario");
+    } finally {
+      setCreating(false);
+    }
   };
 
   const toggleEnabled = async (s) => {
+    setBusyId(s.id);
     try {
-      await apiPatch(`/api/guilds/${selectedGuild}/schedules/${encodeURIComponent(s.name)}`, {
-        enabled: s.enabled ? 0 : 1,
-      });
-      setSchedules(prev => prev.map(x => x.name === s.name ? { ...x, enabled: x.enabled ? 0 : 1 } : x));
-    } catch (e) { showToast(e.message, 'error'); }
+      await apiPost(`/api/guilds/${guildId}/schedules/${s.id}/toggle`, {});
+      await load();
+    } catch (e) {
+      toast("error", e?.message || "Error al cambiar estado");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const testSchedule = async (s) => {
+    setBusyId(s.id);
+    try {
+      await apiPost(`/api/guilds/${guildId}/schedules/${s.id}/test`, {});
+      toast("success", `Mensaje de prueba enviado: ${s.name}`);
+    } catch (e) {
+      toast("error", e?.message || "Error en envío de prueba");
+    } finally {
+      setBusyId(null);
+    }
   };
 
   const deleteSchedule = async (s) => {
-    if (!confirm(`¿Eliminar el horario "${s.name}"?`)) return;
+    if (!confirm(`¿Eliminar el horario "${s.name}"? Irreversible.`)) return;
+    setBusyId(s.id);
     try {
-      await apiDelete(`/api/guilds/${selectedGuild}/schedules/${encodeURIComponent(s.name)}`);
-      setSchedules(prev => prev.filter(x => x.name !== s.name));
-      showToast('Horario eliminado');
-    } catch (e) { showToast(e.message, 'error'); }
+      await apiDelete(`/api/guilds/${guildId}/schedules/${s.id}`);
+      toast("success", `Horario ${s.name} eliminado`);
+      await load();
+    } catch (e) {
+      toast("error", e?.message || "Error eliminando");
+    } finally {
+      setBusyId(null);
+    }
   };
 
-  if (loading) return <div className="dashboard-empty-state"><div className="loading-spinner" /><p>Cargando horarios…</p></div>;
+  const editSchedule = async (s) => {
+    const newContent = prompt(`Editar contenido de "${s.name}":`, s.content);
+    if (newContent == null || newContent.trim() === s.content) return;
+    setBusyId(s.id);
+    try {
+      await apiPatch(`/api/guilds/${guildId}/schedules/${s.id}`, { content: newContent.trim() });
+      toast("success", "Contenido actualizado");
+      await load();
+    } catch (e) {
+      toast("error", e?.message || "Error editando");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (loading) return <div className="loader">Cargando horarios…</div>;
+
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   return (
     <div className="ov-container animate-fade-in">
-      <Toast toast={toast} onDismiss={() => setToast(null)} />
-
-      <div className="automod-header" style={{marginBottom:0}}>
-        <div className="header-info">
-          <h2 style={{background:'linear-gradient(90deg,#c4b5fd,#818cf8)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',fontSize:'1.7rem',fontWeight:900,margin:0}}>
-            📅 Mensajes Programados
-          </h2>
-          <p className="subtitle" style={{marginTop:4}}>Mensajes automáticos que el bot enviará en los horarios configurados.</p>
-        </div>
-        <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'center'}}>
-          <span style={{
-            padding:'6px 14px',borderRadius:999,fontSize:'0.8rem',fontWeight:700,
-            background:'rgba(99,102,241,0.15)',border:'1px solid rgba(139,92,246,0.3)',
-            color:'#c4b5fd',
-          }}>
-            {schedules.filter(s=>s.enabled).length} activos · {schedules.length} total
-          </span>
-          <button className="btn-primary" onClick={()=>setShowCreate(v=>!v)} style={{padding:'10px 20px',borderRadius:12}}>
-            {showCreate ? '✕ Cancelar' : '+ Nuevo horario'}
-          </button>
+      <div className="section-header" style={{ marginBottom: 24 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <h2 className="glow-text" style={{ margin: 0 }}>Mensajes programados</h2>
+            <p className="subtitle" style={{ margin: "4px 0 0" }}>
+              Mensajes automáticos por intervalo. Las horas se muestran en tu zona horaria local: <code>{tz}</code>.
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <span
+              style={{
+                padding: "6px 14px", borderRadius: 999, fontSize: "0.8rem", fontWeight: 700,
+                background: "rgba(99,102,241,0.15)",
+                border: "1px solid rgba(139,92,246,0.3)",
+                color: "var(--accent)",
+              }}
+            >
+              {schedules.filter((s) => s.enabled).length} activos · {schedules.length} / {limits.max_schedules}
+            </span>
+            <button
+              className="btn-primary"
+              onClick={() => setShowCreate((v) => !v)}
+              disabled={schedules.length >= limits.max_schedules && !showCreate}
+            >
+              <Icon name={showCreate ? "close" : "add"} /> {showCreate ? "Cancelar" : "Nuevo horario"}
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Create form */}
       {showCreate && (
-        <div className="glass-panel mod-section animate-fade-in" style={{padding:22,borderRadius:22,display:'flex',flexDirection:'column',gap:14}}>
-          <div className="section-title"><h3 style={{margin:0}}>➕ Crear Horario</h3></div>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
-            <div className="config-item" style={{marginBottom:0}}>
+        <div className="glass-panel mod-section animate-fade-in" style={{ padding: 22, marginBottom: 24 }}>
+          <div className="section-title">
+            <Icon name="add" /> <h3>Crear horario</h3>
+          </div>
+          <div className="form-grid">
+            <div className="form-field">
               <label>Nombre único</label>
-              <input type="text" placeholder="bienvenida-diaria" value={form.name} onChange={e=>setF('name',e.target.value)}/>
+              <input
+                type="text"
+                placeholder="recordatorio-diario"
+                value={form.name}
+                onChange={(e) => setF("name", e.target.value)}
+              />
             </div>
-            <div className="config-item" style={{marginBottom:0}}>
+            <div className="form-field">
               <label>Canal destino</label>
-              <select value={form.channel_id} onChange={e=>setF('channel_id',e.target.value)} style={{padding:'10px 12px'}}>
-                <option value="">— Seleccionar canal —</option>
-                {channels.map(c=><option key={c.id} value={c.id}>#{c.name}</option>)}
-              </select>
+              <SearchableSelect
+                value={form.channel_id}
+                onChange={(v) => setF("channel_id", v ? Number(v) : null)}
+                endpoint={`/api/guilds/${guildId}/channels?type=text`}
+                itemsKey="channels"
+                placeholder="Seleccionar canal…"
+                renderOption={(o) => <span>#{o.name}</span>}
+                renderSelected={(o) => <span>#{o.name}</span>}
+              />
+            </div>
+            <div className="form-field full-width">
+              <label>Contenido del mensaje</label>
+              <textarea
+                rows={4}
+                placeholder="¡Buenos días! Recuerda revisar las reglas del servidor…"
+                value={form.content}
+                onChange={(e) => setF("content", e.target.value)}
+                style={{ width: "100%", resize: "vertical" }}
+              />
+              <span className="hint">Markdown soportado. Mentions @everyone/@role requieren permisos en el canal.</span>
+            </div>
+            <div className="form-field full-width">
+              <label>Intervalo</label>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {INTERVAL_PRESETS.map((p) => {
+                  const active = form.interval_seconds === p.seconds && !form.custom_interval_min;
+                  return (
+                    <button
+                      key={p.seconds}
+                      onClick={() => { setF("interval_seconds", p.seconds); setF("custom_interval_min", ""); }}
+                      className={`tab-btn ${active ? "active" : ""}`}
+                      type="button"
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+                <input
+                  type="number"
+                  min="10"
+                  placeholder="Personalizado"
+                  value={form.custom_interval_min}
+                  onChange={(e) => setF("custom_interval_min", e.target.value)}
+                  style={{ width: 220 }}
+                />
+                <span className="hint">minutos (mín {limits.min_interval / 60})</span>
+              </div>
             </div>
           </div>
-          <div className="config-item" style={{marginBottom:0}}>
-            <label>Contenido del mensaje</label>
-            <textarea rows={4} placeholder="¡Buenos días a todos! 🌅 Recuerda revisar las reglas del servidor..." value={form.content} onChange={e=>setF('content',e.target.value)}
-              style={{width:'100%',resize:'vertical',padding:'10px 12px',background:'linear-gradient(135deg,rgba(255,255,255,0.04),rgba(99,102,241,0.03))',border:'1px solid rgba(139,92,246,0.22)',borderRadius:10,color:'var(--text)',fontFamily:'var(--font-main)',fontSize:'0.9rem'}}/>
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+            <button className="btn-secondary" onClick={() => { setShowCreate(false); setForm(EMPTY_FORM); }}>
+              Cancelar
+            </button>
+            <button className="btn-primary btn-save" onClick={create} disabled={creating}>
+              {creating ? "Creando…" : <><Icon name="save" /> Crear horario</>}
+            </button>
           </div>
-          <div className="config-item" style={{marginBottom:0}}>
-            <label>Intervalo de envío</label>
-            <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-              {INTERVAL_PRESETS.map(p=>(
-                <button key={p.seconds}
-                  onClick={()=>{ setF('interval_seconds',p.seconds); setF('custom_interval',''); }}
-                  style={{
-                    padding:'8px 14px',borderRadius:10,fontSize:'0.82rem',cursor:'pointer',fontWeight:700,
-                    background:form.interval_seconds===p.seconds&&!form.custom_interval?'rgba(99,102,241,0.3)':'rgba(255,255,255,0.04)',
-                    border:`1px solid ${form.interval_seconds===p.seconds&&!form.custom_interval?'rgba(139,92,246,0.5)':'rgba(139,92,246,0.15)'}`,
-                    color:form.interval_seconds===p.seconds&&!form.custom_interval?'#c4b5fd':'var(--muted)',
-                  }}>{p.label}</button>
-              ))}
-            </div>
-            <div style={{display:'flex',alignItems:'center',gap:10,marginTop:10}}>
-              <input type="number" min="1" placeholder="Personalizado (minutos)" value={form.custom_interval} onChange={e=>setF('custom_interval',e.target.value)} style={{width:220}}/>
-              <span style={{fontSize:'0.8rem',color:'var(--muted)'}}>minutos</span>
-            </div>
-          </div>
-          <button className="btn-primary btn-save" onClick={create} disabled={creating} style={{alignSelf:'flex-start',padding:'11px 26px',borderRadius:12}}>
-            {creating?'Creando…':'📅 Crear horario'}
-          </button>
         </div>
       )}
 
-      {/* Schedules list */}
       {schedules.length === 0 && !showCreate && (
-        <div className="dashboard-empty-state" style={{marginTop:24}}>
-          <span style={{fontSize:'3rem',marginBottom:12}}>📅</span>
-          <h3>Sin horarios configurados</h3>
-          <p style={{color:'var(--muted)'}}>Haz clic en <strong>+ Nuevo horario</strong> para crear tu primer mensaje automático.</p>
+        <div className="glass-panel" style={{ padding: 48, textAlign: "center" }}>
+          <Icon name="schedules" />
+          <h3 style={{ margin: "12px 0 8px" }}>Sin horarios configurados</h3>
+          <p className="subtitle" style={{ margin: 0 }}>
+            Crea tu primer mensaje automático con el botón de arriba.
+          </p>
         </div>
       )}
 
-      <div style={{display:'flex',flexDirection:'column',gap:14}}>
-        {schedules.map(s => {
-          const ch = channels.find(c => parseInt(c.id) === parseInt(s.channel_id));
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {schedules.map((s) => {
+          const enabled = !!Number(s.enabled);
           return (
-            <div key={s.name} className="glass-panel mod-section" style={{
-              padding:'16px 20px',borderRadius:18,display:'flex',alignItems:'center',gap:16,flexWrap:'wrap',
-              borderLeft:`3px solid ${s.enabled?'rgba(139,92,246,0.7)':'rgba(139,92,246,0.2)'}`,
-            }}>
-              <div style={{flex:1,minWidth:200}}>
-                <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:4}}>
-                  <span style={{fontWeight:900,fontSize:'1rem'}}>{s.name}</span>
-                  <span style={{
-                    padding:'2px 10px',borderRadius:999,fontSize:'0.72rem',fontWeight:800,
-                    background:s.enabled?'rgba(16,185,129,0.15)':'rgba(255,255,255,0.05)',
-                    border:`1px solid ${s.enabled?'rgba(16,185,129,0.4)':'rgba(255,255,255,0.1)'}`,
-                    color:s.enabled?'#34d399':'var(--muted)',
-                  }}>{s.enabled?'Activo':'Pausado'}</span>
+            <div
+              key={s.id}
+              className="glass-panel mod-section"
+              style={{
+                padding: "16px 20px",
+                display: "flex",
+                alignItems: "center",
+                gap: 16,
+                flexWrap: "wrap",
+                borderLeft: `3px solid ${enabled ? "var(--accent)" : "rgba(139,92,246,0.2)"}`,
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 200 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                  <span style={{ fontWeight: 900, fontSize: "1rem" }}>{s.name}</span>
+                  <span
+                    style={{
+                      padding: "2px 10px",
+                      borderRadius: 999,
+                      fontSize: "0.72rem",
+                      fontWeight: 800,
+                      background: enabled ? "rgba(16,185,129,0.15)" : "rgba(255,255,255,0.05)",
+                      border: `1px solid ${enabled ? "rgba(16,185,129,0.4)" : "rgba(255,255,255,0.1)"}`,
+                      color: enabled ? "#34d399" : "var(--muted)",
+                    }}
+                  >
+                    {enabled ? "Activo" : "Pausado"}
+                  </span>
                 </div>
-                <div style={{fontSize:'0.82rem',color:'var(--muted)',display:'flex',gap:14,flexWrap:'wrap'}}>
-                  <span>📨 {ch?`#${ch.name}`:`Canal ${s.channel_id}`}</span>
-                  <span>⏱ cada {fmtInterval(s.interval_seconds)}</span>
-                  {s.last_sent && <span>🕐 último: {new Date(s.last_sent).toLocaleString()}</span>}
+                <div style={{ fontSize: "0.82rem", color: "var(--muted)", display: "flex", gap: 14, flexWrap: "wrap" }}>
+                  <span><Icon name="channel" /> Canal {s.channel_id}</span>
+                  <span><Icon name="settings" /> cada {fmtInterval(s.interval_seconds)}</span>
+                  <span><Icon name="loading" /> último: {fmtDate(s.last_sent)}</span>
                 </div>
-                <div style={{marginTop:8,fontSize:'0.85rem',color:'var(--text)',opacity:0.8,
-                  maxWidth:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                <div
+                  style={{
+                    marginTop: 8,
+                    fontSize: "0.85rem",
+                    color: "var(--text)",
+                    opacity: 0.8,
+                    maxWidth: 600,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                  title={s.content}
+                >
                   {s.content}
                 </div>
               </div>
-              <div style={{display:'flex',gap:10,flexShrink:0}}>
-                <label className="toggle-switch" title={s.enabled?'Pausar':'Activar'}>
-                  <input type="checkbox" checked={!!s.enabled} onChange={()=>toggleEnabled(s)}/>
-                  <span className="slider"/>
+              <div style={{ display: "flex", gap: 10, flexShrink: 0, alignItems: "center" }}>
+                <label className="toggle-switch" title={enabled ? "Pausar" : "Activar"}>
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    disabled={busyId === s.id}
+                    onChange={() => toggleEnabled(s)}
+                  />
+                  <span className="slider" />
                 </label>
-                <button onClick={()=>deleteSchedule(s)} style={{
-                  background:'rgba(244,63,94,0.12)',border:'1px solid rgba(244,63,94,0.25)',
-                  borderRadius:8,padding:'7px 13px',color:'#f43f5e',cursor:'pointer',fontWeight:700,fontSize:'0.85rem',
-                }}>✕</button>
+                <button
+                  className="btn-icon"
+                  title="Enviar prueba"
+                  disabled={busyId === s.id}
+                  onClick={() => testSchedule(s)}
+                  style={{ color: "var(--accent)" }}
+                >
+                  <Icon name="send" />
+                </button>
+                <button
+                  className="btn-icon"
+                  title="Editar contenido"
+                  disabled={busyId === s.id}
+                  onClick={() => editSchedule(s)}
+                >
+                  <Icon name="edit" />
+                </button>
+                <button
+                  className="btn-icon"
+                  title="Eliminar"
+                  disabled={busyId === s.id}
+                  onClick={() => deleteSchedule(s)}
+                  style={{ color: "#f43f5e" }}
+                >
+                  <Icon name="delete" />
+                </button>
               </div>
             </div>
           );

@@ -11,45 +11,64 @@ from discord import app_commands
 logger = logging.getLogger(__name__)
 
 class GiveawayJoinView(discord.ui.View):
-    def __init__(self, cog, message_id: int):
+    """
+    Vista persistente para sorteos.
+    El message_id se resuelve por interaction.message.id (no por estado en memoria),
+    así una sola instancia registrada con bot.add_view() sirve para todos los sorteos
+    activos tras reiniciar el bot.
+    """
+
+    def __init__(self, cog):
         super().__init__(timeout=None)
         self.cog = cog
-        self.message_id = message_id
 
-    @discord.ui.button(label="0", emoji="🎉", style=discord.ButtonStyle.primary, custom_id="gw_join")
+    @discord.ui.button(label="🎉 Participar", emoji="🎉", style=discord.ButtonStyle.primary, custom_id="gw_join")
     async def join_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        gw = self.cog.db.get_giveaway(self.message_id)
-        if not gw or gw["ended"]:
-            return await interaction.response.send_message("❌ Este sorteo ya ha finalizado.", ephemeral=True)
-            
-        parts = json.loads(gw["participants"])
+        msg_id = interaction.message.id if interaction.message else 0
+        gw = self.cog.db.get_giveaway(msg_id)
+        if not gw or gw.get("ended") or gw.get("cancelled"):
+            return await interaction.response.send_message(
+                "❌ Este sorteo ya ha finalizado.", ephemeral=True
+            )
+
+        try:
+            parts = json.loads(gw.get("participants") or "[]")
+        except Exception:
+            parts = []
+
         if interaction.user.id in parts:
             parts.remove(interaction.user.id)
-            msg = "Has abandonado el sorteo."
+            ack = "Has abandonado el sorteo."
         else:
-            # Check roles
-            req_roles = json.loads(gw["req_roles"]) if gw["req_roles"] else []
-            deny_roles = json.loads(gw["deny_roles"]) if gw["deny_roles"] else []
-            
+            try:
+                req_roles = json.loads(gw.get("req_roles") or "[]")
+                deny_roles = json.loads(gw.get("deny_roles") or "[]")
+            except Exception:
+                req_roles, deny_roles = [], []
+
             user_roles = [r.id for r in interaction.user.roles]
-            
-            # Si hay roles requeridos, DEBE tener AL MENOS uno de ellos (o todos? Normalmente es al menos uno)
+
             if req_roles and not any(r in user_roles for r in req_roles):
                 req_mentions = " o ".join([f"<@&{r}>" for r in req_roles])
-                return await interaction.response.send_message(f"❌ Necesitas tener al menos uno de estos roles: {req_mentions}", ephemeral=True)
-                
-            # Si hay roles denegados, NO DEBE tener NINGUNO de ellos
-            if deny_roles and any(r in user_roles for r in deny_roles):
-                return await interaction.response.send_message("❌ Tienes un rol que no tiene permitido participar en este sorteo.", ephemeral=True)
-                
-            parts.append(interaction.user.id)
-            msg = "🎉 ¡Te has unido al sorteo!"
+                return await interaction.response.send_message(
+                    f"❌ Necesitas tener al menos uno de estos roles: {req_mentions}",
+                    ephemeral=True,
+                )
 
-        self.cog.db.update_giveaway(self.message_id, participants=json.dumps(parts))
-        
-        button.label = str(len(parts))
+            if deny_roles and any(r in user_roles for r in deny_roles):
+                return await interaction.response.send_message(
+                    "❌ Tienes un rol que no tiene permitido participar en este sorteo.",
+                    ephemeral=True,
+                )
+
+            parts.append(interaction.user.id)
+            ack = "🎉 ¡Te has unido al sorteo!"
+
+        self.cog.db.update_giveaway(msg_id, participants=json.dumps(parts))
+
+        button.label = f"🎉 Participar ({len(parts)})"
         await interaction.response.edit_message(view=self)
-        await interaction.followup.send(msg, ephemeral=True)
+        await interaction.followup.send(ack, ephemeral=True)
 
 
 class Giveaways(commands.Cog):
@@ -77,43 +96,52 @@ class Giveaways(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def end_giveaway(self, gw: dict):
-        self.db.update_giveaway(gw["message_id"], ended=1)
+        try:
+            parts = json.loads(gw.get("participants") or "[]")
+        except Exception:
+            parts = []
+        winners_count = int(gw.get("winners_count") or 1)
+        winners_ids = random.sample(parts, min(len(parts), winners_count)) if parts else []
+
+        self.db.update_giveaway(
+            gw["message_id"],
+            ended=1,
+            winners=json.dumps(winners_ids),
+        )
+
         guild = self.bot.get_guild(gw["guild_id"])
-        if not guild: return
+        if not guild:
+            return
         channel = guild.get_channel(gw["channel_id"])
-        if not channel: return
-        
+        if not channel:
+            return
+
         try:
             msg = await channel.fetch_message(gw["message_id"])
-            parts = json.loads(gw["participants"])
-            winners_count = gw["winners_count"]
-            
-            if not parts:
-                await channel.send(f"Tristemente nadie participó en el sorteo de **{gw['prize']}**. 😢")
-                embed = msg.embeds[0]
-                embed.color = discord.Color.dark_grey()
-                embed.set_footer(text="Sorteo Finalizado - Sin participantes")
-                view = GiveawayJoinView(self, gw["message_id"])
-                view.children[0].disabled = True
-                await msg.edit(embed=embed, view=view)
-                return
-                
-            winners_ids = random.sample(parts, min(len(parts), winners_count))
-            winners_mentions = ", ".join(f"<@{w}>" for w in winners_ids)
-            plural = len(winners_ids) > 1
-            verb = "Han" if plural else "Has"
-            await channel.send(f"🎉 ¡Felicidades {winners_mentions}! ¡{verb} ganado **{gw['prize']}**!")            
-
-            
-            embed = msg.embeds[0]
+            embed = msg.embeds[0] if msg.embeds else discord.Embed(title=gw.get("prize", "Sorteo"))
             embed.color = discord.Color.dark_grey()
-            embed.set_footer(text=f"Finalizado | Ganadores: {len(winners_ids)}")
-            embed.description += f"\n\n🏆 **Ganadores:** {winners_mentions}"
-            
-            view = GiveawayJoinView(self, gw["message_id"])
-            view.children[0].disabled = True
-            await msg.edit(embed=embed, view=view)
-            
+
+            disabled_view = GiveawayJoinView(self)
+            disabled_view.children[0].disabled = True
+            disabled_view.children[0].label = f"Finalizado ({len(parts)})"
+
+            if not winners_ids:
+                await channel.send(f"Tristemente nadie participó en el sorteo de **{gw['prize']}**. 😢")
+                embed.set_footer(text="Sorteo finalizado · Sin participantes")
+            else:
+                winners_mentions = ", ".join(f"<@{w}>" for w in winners_ids)
+                verb = "Han" if len(winners_ids) > 1 else "Has"
+                await channel.send(f"🎉 ¡Felicidades {winners_mentions}! ¡{verb} ganado **{gw['prize']}**!")
+                embed.set_footer(text=f"Finalizado · Ganadores: {len(winners_ids)}")
+                if embed.description:
+                    embed.description = f"{embed.description}\n\n🏆 **Ganadores:** {winners_mentions}"
+                else:
+                    embed.description = f"🏆 **Ganadores:** {winners_mentions}"
+
+            await msg.edit(embed=embed, view=disabled_view)
+
+        except discord.NotFound:
+            logger.warning("Mensaje del sorteo %s no encontrado al finalizar", gw["message_id"])
         except Exception as e:
             logger.error(f"Error terminando sorteo: {e}")
 
@@ -168,7 +196,7 @@ class Giveaways(commands.Cog):
             json.dumps(req_roles), json.dumps(deny_roles)
         )
         
-        view = GiveawayJoinView(self, msg.id)
+        view = GiveawayJoinView(self)
         await msg.edit(view=view)
 
     # ── Comandos de gestión ──────────────────────────────────────────────────
@@ -193,6 +221,34 @@ class Giveaways(commands.Cog):
         await self.end_giveaway(gw)
         await interaction.followup.send("✅ Sorteo terminado y ganadores elegidos.", ephemeral=True)
 
+    async def reroll_giveaway(self, gw: dict) -> list[int]:
+        """
+        Re-elige ganadores de un sorteo terminado y los anuncia.
+        Retorna la lista de winner IDs nuevos. No re-edita el embed original.
+        """
+        try:
+            parts = json.loads(gw.get("participants") or "[]")
+        except Exception:
+            parts = []
+        if not parts:
+            return []
+        winners_count = int(gw.get("winners_count") or 1)
+        winners_ids = random.sample(parts, min(len(parts), winners_count))
+        self.db.update_giveaway(gw["message_id"], winners=json.dumps(winners_ids))
+
+        guild = self.bot.get_guild(int(gw["guild_id"]))
+        if guild:
+            channel = guild.get_channel(int(gw["channel_id"]))
+            if channel:
+                mentions = ", ".join(f"<@{w}>" for w in winners_ids)
+                try:
+                    await channel.send(
+                        f"🎉 **Reroll!** ¡Nuevos ganadores de **{gw['prize']}**: {mentions}!"
+                    )
+                except discord.HTTPException:
+                    pass
+        return winners_ids
+
     @app_commands.command(name="giveaway_cancel", description="Cancela un sorteo sin elegir ganadores")
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(id_mensaje="ID del mensaje del sorteo")
@@ -210,7 +266,7 @@ class Giveaways(commands.Cog):
         if gw["ended"]:
             return await interaction.followup.send("⚠️ Este sorteo ya ha finalizado o fue cancelado.", ephemeral=True)
 
-        self.db.update_giveaway(msg_id, ended=1)
+        self.db.update_giveaway(msg_id, ended=1, cancelled=1)
         guild = self.bot.get_guild(int(gw["guild_id"]))
         if guild:
             channel = guild.get_channel(int(gw["channel_id"]))
@@ -221,7 +277,7 @@ class Giveaways(commands.Cog):
                     embed.color = discord.Color.dark_grey()
                     embed.set_footer(text="Sorteo Cancelado")
                     embed.description = (embed.description or "") + "\n\n🚫 **Sorteo cancelado por un administrador.**"
-                    view = GiveawayJoinView(self, msg_id)
+                    view = GiveawayJoinView(self)
                     view.children[0].disabled = True
                     await msg.edit(embed=embed, view=view)
                 except Exception:
@@ -245,19 +301,9 @@ class Giveaways(commands.Cog):
         if not gw["ended"]:
             return await interaction.followup.send("⚠️ El sorteo aún está activo. Términalo primero con `/giveaway_end`.", ephemeral=True)
 
-        parts = json.loads(gw["participants"])
-        if not parts:
+        winners_ids = await self.reroll_giveaway(gw)
+        if not winners_ids:
             return await interaction.followup.send("❌ No hubo participantes en este sorteo.", ephemeral=True)
-
-        winners_count = int(gw["winners_count"])
-        winners_ids = random.sample(parts, min(len(parts), winners_count))
-        winners_mentions = ", ".join(f"<@{w}>" for w in winners_ids)
-
-        channel = interaction.guild.get_channel(int(gw["channel_id"]))
-        if channel:
-            await channel.send(
-                f"🎉 **Reroll!** ¡Nuevos ganadores de **{gw['prize']}**: {winners_mentions}!"
-            )
         await interaction.followup.send("✅ Nuevos ganadores elegidos y anunciados.", ephemeral=True)
 
     @app_commands.command(name="giveaway_list", description="Lista los sorteos activos en este servidor")
@@ -292,6 +338,7 @@ class Giveaways(commands.Cog):
 async def setup(bot: commands.Bot):
     cog = Giveaways(bot)
     await bot.add_cog(cog)
-    # Registrar vista persistente para que los botones de sorteos sobrevivan reinicios
-    bot.add_view(GiveawayJoinView(cog, 0))  # custom_id="gw_join", message_id se verifica en DB
+    # Vista persistente: una sola instancia. El handler resuelve message_id
+    # desde interaction.message.id, así que sirve para cualquier sorteo activo.
+    bot.add_view(GiveawayJoinView(cog))
 

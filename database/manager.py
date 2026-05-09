@@ -110,6 +110,8 @@ VALID_GIVEAWAY_COLUMNS = frozenset(
         "deny_roles",
         "participants",
         "ended",
+        "cancelled",
+        "winners",
     }
 )
 
@@ -120,6 +122,7 @@ VALID_SUGGESTION_COLUMNS = frozenset(
         "status",
         "upvotes",
         "downvotes",
+        "denial_reason",
     }
 )
 
@@ -199,6 +202,24 @@ CREATE TABLE IF NOT EXISTS ai_config (
     ai_webhook_icon     TEXT
 );
 
+-- Pool de API keys de IA. Cada key puede cubrir hasta 2 guilds.
+CREATE TABLE IF NOT EXISTS ai_api_keys (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    label       TEXT    NOT NULL,
+    api_key     TEXT    NOT NULL UNIQUE,
+    active      INTEGER DEFAULT 1,
+    notes       TEXT,
+    created_at  TEXT    NOT NULL
+);
+
+-- Asignación 1:1 guild → key. Restringido por aplicación a 2 guilds por key.
+CREATE TABLE IF NOT EXISTS ai_guild_keys (
+    guild_id    INTEGER PRIMARY KEY,
+    key_id      INTEGER NOT NULL,
+    assigned_at TEXT    NOT NULL,
+    FOREIGN KEY (key_id) REFERENCES ai_api_keys(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS appeals (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id     INTEGER NOT NULL,
@@ -238,19 +259,32 @@ CREATE TABLE IF NOT EXISTS suggestions_config (
     guild_id           INTEGER PRIMARY KEY,
     submit_channel_id  INTEGER,
     review_channel_id  INTEGER,
-    public_channel_id  INTEGER
+    public_channel_id  INTEGER,
+    enabled            INTEGER DEFAULT 1,
+    auto_publish       INTEGER DEFAULT 0,
+    min_length         INTEGER DEFAULT 10,
+    max_length         INTEGER DEFAULT 2000,
+    cooldown_seconds   INTEGER DEFAULT 300
 );
 
 CREATE TABLE IF NOT EXISTS suggestions (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id     INTEGER NOT NULL,
-    user_id      INTEGER NOT NULL,
-    message_id   INTEGER,
-    content      TEXT NOT NULL,
-    status       TEXT DEFAULT 'PENDING',
-    upvotes      INTEGER DEFAULT 0,
-    downvotes    INTEGER DEFAULT 0,
-    created_at   TEXT NOT NULL
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id      INTEGER NOT NULL,
+    user_id       INTEGER NOT NULL,
+    message_id    INTEGER,
+    content       TEXT NOT NULL,
+    status        TEXT DEFAULT 'PENDING',
+    upvotes       INTEGER DEFAULT 0,
+    downvotes     INTEGER DEFAULT 0,
+    denial_reason TEXT,
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS suggestion_votes (
+    suggestion_id INTEGER NOT NULL,
+    user_id       INTEGER NOT NULL,
+    vote          INTEGER NOT NULL,
+    PRIMARY KEY (suggestion_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS giveaways (
@@ -264,7 +298,9 @@ CREATE TABLE IF NOT EXISTS giveaways (
     req_roles      TEXT,
     deny_roles     TEXT,
     participants   TEXT,
-    ended          INTEGER DEFAULT 0
+    ended          INTEGER DEFAULT 0,
+    cancelled      INTEGER DEFAULT 0,
+    winners        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS autoroles (
@@ -274,13 +310,22 @@ CREATE TABLE IF NOT EXISTS autoroles (
     mapping_data TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS join_autoroles (
+    guild_id   INTEGER NOT NULL,
+    role_id    INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (guild_id, role_id)
+);
+
 CREATE TABLE IF NOT EXISTS lofi_config (
-    guild_id     INTEGER PRIMARY KEY,
-    channel_id   INTEGER,
-    volume       INTEGER DEFAULT 100,
-    enabled      INTEGER DEFAULT 0,
-    stream_url   TEXT,
-    station_name TEXT
+    guild_id        INTEGER PRIMARY KEY,
+    channel_id      INTEGER,
+    volume          INTEGER DEFAULT 100,
+    enabled         INTEGER DEFAULT 0,
+    stream_url      TEXT,
+    station_name    TEXT,
+    auto_reconnect  INTEGER DEFAULT 1,
+    pause_on_empty  INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -299,24 +344,45 @@ CREATE TABLE IF NOT EXISTS bot_stats (
 );
 
 CREATE TABLE IF NOT EXISTS ticket_config (
-    guild_id              INTEGER PRIMARY KEY,
-    panel_channel_id      INTEGER,
-    category_id           INTEGER,
-    log_channel_id        INTEGER,
-    allowed_roles         TEXT DEFAULT '[]',
-    immune_roles          TEXT DEFAULT '[]',
-    panel_embed_data      TEXT,
-    channel_name_template TEXT DEFAULT '⚒️{username}-{number}'
+    guild_id                INTEGER PRIMARY KEY,
+    panel_channel_id        INTEGER,
+    category_id             INTEGER,
+    log_channel_id          INTEGER,
+    allowed_roles           TEXT DEFAULT '[]',
+    immune_roles            TEXT DEFAULT '[]',
+    panel_embed_data        TEXT,
+    channel_name_template   TEXT DEFAULT '{username}-{number}',
+    max_tickets_per_user    INTEGER DEFAULT 0,
+    ticket_cooldown_seconds INTEGER DEFAULT 0,
+    -- Referencias opcionales a plantillas en ticket_template_embeds. NULL = inline.
+    panel_select_template   TEXT,
+    panel_inside_template   TEXT,
+    msg_open_template       TEXT,
+    msg_close_template      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS ticket_categories (
-    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id           INTEGER NOT NULL,
-    name               TEXT NOT NULL,
-    emoji              TEXT,
-    questions          TEXT DEFAULT '[]',
-    close_reasons      TEXT DEFAULT '[]',
-    welcome_embed_data TEXT
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id                    INTEGER NOT NULL,
+    name                        TEXT NOT NULL,
+    emoji                       TEXT,
+    description                 TEXT,
+    questions                   TEXT DEFAULT '[]',
+    close_reasons               TEXT DEFAULT '[]',
+    welcome_embed_data          TEXT,
+    welcome_embed_template_key  TEXT,
+    staff_role_id               INTEGER
+);
+
+-- Pool de plantillas reutilizables (panel_select, panel_inside, msg_open, msg_close, custom_*).
+CREATE TABLE IF NOT EXISTS ticket_template_embeds (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id    INTEGER NOT NULL,
+    template_key TEXT   NOT NULL,
+    name         TEXT,
+    embed_data   TEXT   NOT NULL,
+    created_at   TEXT   NOT NULL,
+    UNIQUE(guild_id, template_key)
 );
 
 CREATE TABLE IF NOT EXISTS tickets (
@@ -387,16 +453,21 @@ CREATE TABLE IF NOT EXISTS user_levels (
 );
 
 CREATE TABLE IF NOT EXISTS xp_config (
-    guild_id                INTEGER PRIMARY KEY,
-    enabled                 INTEGER DEFAULT 0,
-    xp_min                  INTEGER DEFAULT 15,
-    xp_max                  INTEGER DEFAULT 25,
-    cooldown_seconds        INTEGER DEFAULT 60,
-    ignored_channels        TEXT DEFAULT '[]',
-    channel_multipliers     TEXT DEFAULT '{}',
-    announcement_channel_id INTEGER,
-    announcement_message    TEXT,
-    stack_rewards           INTEGER DEFAULT 1
+    guild_id                     INTEGER PRIMARY KEY,
+    enabled                      INTEGER DEFAULT 0,
+    xp_min                       INTEGER DEFAULT 15,
+    xp_max                       INTEGER DEFAULT 25,
+    cooldown_seconds             INTEGER DEFAULT 60,
+    ignored_channels             TEXT    DEFAULT '[]',
+    channel_multipliers          TEXT    DEFAULT '{}',
+    announcement_channel_id      INTEGER,
+    announcement_message         TEXT,
+    stack_rewards                INTEGER DEFAULT 1,
+    -- Comportamiento del mensaje de subida de nivel.
+    levelup_persist              INTEGER DEFAULT 1,   -- 0: se elimina; 1: queda en el canal
+    levelup_autodelete           INTEGER DEFAULT 0,   -- 0: nunca; 1: aplica delete_after
+    levelup_delete_after_seconds INTEGER DEFAULT 30,
+    levelup_embed_config         TEXT                 -- JSON embed; NULL = texto plano
 );
 
 CREATE TABLE IF NOT EXISTS level_rewards (
@@ -516,6 +587,23 @@ CREATE TABLE IF NOT EXISTS ai_config (
     ai_webhook_icon     TEXT
 );
 
+-- Pool de API keys de IA. Cada key puede cubrir hasta 2 guilds.
+CREATE TABLE IF NOT EXISTS ai_api_keys (
+    id          BIGSERIAL PRIMARY KEY,
+    label       TEXT     NOT NULL,
+    api_key     TEXT     NOT NULL UNIQUE,
+    active      SMALLINT DEFAULT 1,
+    notes       TEXT,
+    created_at  TEXT     NOT NULL
+);
+
+-- Asignación 1:1 guild → key. Restringido por aplicación a 2 guilds por key.
+CREATE TABLE IF NOT EXISTS ai_guild_keys (
+    guild_id    BIGINT PRIMARY KEY,
+    key_id      BIGINT NOT NULL REFERENCES ai_api_keys(id) ON DELETE CASCADE,
+    assigned_at TEXT   NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS appeals (
     id           BIGSERIAL PRIMARY KEY,
     guild_id     BIGINT NOT NULL,
@@ -555,19 +643,32 @@ CREATE TABLE IF NOT EXISTS suggestions_config (
     guild_id           BIGINT PRIMARY KEY,
     submit_channel_id  BIGINT,
     review_channel_id  BIGINT,
-    public_channel_id  BIGINT
+    public_channel_id  BIGINT,
+    enabled            SMALLINT DEFAULT 1,
+    auto_publish       SMALLINT DEFAULT 0,
+    min_length         INTEGER  DEFAULT 10,
+    max_length         INTEGER  DEFAULT 2000,
+    cooldown_seconds   INTEGER  DEFAULT 300
 );
 
 CREATE TABLE IF NOT EXISTS suggestions (
-    id           BIGSERIAL PRIMARY KEY,
-    guild_id     BIGINT NOT NULL,
-    user_id      BIGINT NOT NULL,
-    message_id   BIGINT,
-    content      TEXT NOT NULL,
-    status       TEXT DEFAULT 'PENDING',
-    upvotes      INTEGER DEFAULT 0,
-    downvotes    INTEGER DEFAULT 0,
-    created_at   TEXT NOT NULL
+    id            BIGSERIAL PRIMARY KEY,
+    guild_id      BIGINT NOT NULL,
+    user_id       BIGINT NOT NULL,
+    message_id    BIGINT,
+    content       TEXT NOT NULL,
+    status        TEXT DEFAULT 'PENDING',
+    upvotes       INTEGER DEFAULT 0,
+    downvotes     INTEGER DEFAULT 0,
+    denial_reason TEXT,
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS suggestion_votes (
+    suggestion_id BIGINT  NOT NULL,
+    user_id       BIGINT  NOT NULL,
+    vote          INTEGER NOT NULL,
+    PRIMARY KEY (suggestion_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS giveaways (
@@ -581,7 +682,9 @@ CREATE TABLE IF NOT EXISTS giveaways (
     req_roles      TEXT,
     deny_roles     TEXT,
     participants   TEXT,
-    ended          SMALLINT DEFAULT 0
+    ended          SMALLINT DEFAULT 0,
+    cancelled      SMALLINT DEFAULT 0,
+    winners        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS autoroles (
@@ -591,13 +694,22 @@ CREATE TABLE IF NOT EXISTS autoroles (
     mapping_data TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS join_autoroles (
+    guild_id   BIGINT    NOT NULL,
+    role_id    BIGINT    NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (guild_id, role_id)
+);
+
 CREATE TABLE IF NOT EXISTS lofi_config (
-    guild_id     BIGINT PRIMARY KEY,
-    channel_id   BIGINT,
-    volume       INTEGER DEFAULT 100,
-    enabled      SMALLINT DEFAULT 0,
-    stream_url   TEXT,
-    station_name TEXT
+    guild_id        BIGINT PRIMARY KEY,
+    channel_id      BIGINT,
+    volume          INTEGER  DEFAULT 100,
+    enabled         SMALLINT DEFAULT 0,
+    stream_url      TEXT,
+    station_name    TEXT,
+    auto_reconnect  SMALLINT DEFAULT 1,
+    pause_on_empty  SMALLINT DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -616,24 +728,43 @@ CREATE TABLE IF NOT EXISTS bot_stats (
 );
 
 CREATE TABLE IF NOT EXISTS ticket_config (
-    guild_id              BIGINT PRIMARY KEY,
-    panel_channel_id      BIGINT,
-    category_id           BIGINT,
-    log_channel_id        BIGINT,
-    allowed_roles         TEXT DEFAULT '[]',
-    immune_roles          TEXT DEFAULT '[]',
-    panel_embed_data      TEXT,
-    channel_name_template TEXT DEFAULT '⚒️{username}-{number}'
+    guild_id                BIGINT PRIMARY KEY,
+    panel_channel_id        BIGINT,
+    category_id             BIGINT,
+    log_channel_id          BIGINT,
+    allowed_roles           TEXT DEFAULT '[]',
+    immune_roles            TEXT DEFAULT '[]',
+    panel_embed_data        TEXT,
+    channel_name_template   TEXT    DEFAULT '{username}-{number}',
+    max_tickets_per_user    INTEGER DEFAULT 0,
+    ticket_cooldown_seconds INTEGER DEFAULT 0,
+    panel_select_template   TEXT,
+    panel_inside_template   TEXT,
+    msg_open_template       TEXT,
+    msg_close_template      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS ticket_categories (
-    id                 BIGSERIAL PRIMARY KEY,
-    guild_id           BIGINT NOT NULL,
-    name               TEXT NOT NULL,
-    emoji              TEXT,
-    questions          TEXT DEFAULT '[]',
-    close_reasons      TEXT DEFAULT '[]',
-    welcome_embed_data TEXT
+    id                          BIGSERIAL PRIMARY KEY,
+    guild_id                    BIGINT NOT NULL,
+    name                        TEXT NOT NULL,
+    emoji                       TEXT,
+    description                 TEXT,
+    questions                   TEXT DEFAULT '[]',
+    close_reasons               TEXT DEFAULT '[]',
+    welcome_embed_data          TEXT,
+    welcome_embed_template_key  TEXT,
+    staff_role_id               BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS ticket_template_embeds (
+    id           BIGSERIAL PRIMARY KEY,
+    guild_id     BIGINT NOT NULL,
+    template_key TEXT   NOT NULL,
+    name         TEXT,
+    embed_data   TEXT   NOT NULL,
+    created_at   TEXT   NOT NULL,
+    UNIQUE(guild_id, template_key)
 );
 
 CREATE TABLE IF NOT EXISTS tickets (
@@ -702,16 +833,20 @@ CREATE TABLE IF NOT EXISTS user_levels (
 );
 
 CREATE TABLE IF NOT EXISTS xp_config (
-    guild_id                BIGINT PRIMARY KEY,
-    enabled                 SMALLINT DEFAULT 0,
-    xp_min                  INTEGER DEFAULT 15,
-    xp_max                  INTEGER DEFAULT 25,
-    cooldown_seconds        INTEGER DEFAULT 60,
-    ignored_channels        TEXT DEFAULT '[]',
-    channel_multipliers     TEXT DEFAULT '{}',
-    announcement_channel_id BIGINT,
-    announcement_message    TEXT,
-    stack_rewards           SMALLINT DEFAULT 1
+    guild_id                     BIGINT PRIMARY KEY,
+    enabled                      SMALLINT DEFAULT 0,
+    xp_min                       INTEGER  DEFAULT 15,
+    xp_max                       INTEGER  DEFAULT 25,
+    cooldown_seconds             INTEGER  DEFAULT 60,
+    ignored_channels             TEXT     DEFAULT '[]',
+    channel_multipliers          TEXT     DEFAULT '{}',
+    announcement_channel_id      BIGINT,
+    announcement_message         TEXT,
+    stack_rewards                SMALLINT DEFAULT 1,
+    levelup_persist              SMALLINT DEFAULT 1,
+    levelup_autodelete           SMALLINT DEFAULT 0,
+    levelup_delete_after_seconds INTEGER  DEFAULT 30,
+    levelup_embed_config         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS level_rewards (
@@ -835,6 +970,25 @@ CREATE TABLE IF NOT EXISTS ai_config (
     ai_webhook_icon     TEXT
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
+-- Pool de API keys de IA. Cada key puede cubrir hasta 2 guilds.
+CREATE TABLE IF NOT EXISTS ai_api_keys (
+    id          BIGINT       NOT NULL AUTO_INCREMENT,
+    label       VARCHAR(100) NOT NULL,
+    api_key     VARCHAR(255) NOT NULL UNIQUE,
+    active      TINYINT      DEFAULT 1,
+    notes       TEXT,
+    created_at  VARCHAR(50)  NOT NULL,
+    PRIMARY KEY (id)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- Asignación 1:1 guild → key. Restringido por aplicación a 2 guilds por key.
+CREATE TABLE IF NOT EXISTS ai_guild_keys (
+    guild_id    BIGINT      PRIMARY KEY,
+    key_id      BIGINT      NOT NULL,
+    assigned_at VARCHAR(50) NOT NULL,
+    CONSTRAINT fk_ai_guild_key FOREIGN KEY (key_id) REFERENCES ai_api_keys(id) ON DELETE CASCADE
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS appeals (
     id           BIGINT NOT NULL AUTO_INCREMENT,
     guild_id     BIGINT NOT NULL,
@@ -876,20 +1030,33 @@ CREATE TABLE IF NOT EXISTS suggestions_config (
     guild_id           BIGINT PRIMARY KEY,
     submit_channel_id  BIGINT,
     review_channel_id  BIGINT,
-    public_channel_id  BIGINT
+    public_channel_id  BIGINT,
+    enabled            TINYINT DEFAULT 1,
+    auto_publish       TINYINT DEFAULT 0,
+    min_length         INT     DEFAULT 10,
+    max_length         INT     DEFAULT 2000,
+    cooldown_seconds   INT     DEFAULT 300
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS suggestions (
     id           BIGINT NOT NULL AUTO_INCREMENT,
     guild_id     BIGINT NOT NULL,
-    user_id      BIGINT NOT NULL,
-    message_id   BIGINT,
-    content      TEXT NOT NULL,
-    status       VARCHAR(20) DEFAULT 'PENDING',
-    upvotes      INT DEFAULT 0,
-    downvotes    INT DEFAULT 0,
-    created_at   VARCHAR(50) NOT NULL,
+    user_id       BIGINT NOT NULL,
+    message_id    BIGINT,
+    content       TEXT NOT NULL,
+    status        VARCHAR(20) DEFAULT 'PENDING',
+    upvotes       INT DEFAULT 0,
+    downvotes     INT DEFAULT 0,
+    denial_reason TEXT,
+    created_at    VARCHAR(50) NOT NULL,
     PRIMARY KEY (id)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS suggestion_votes (
+    suggestion_id BIGINT NOT NULL,
+    user_id       BIGINT NOT NULL,
+    vote          INT    NOT NULL,
+    PRIMARY KEY (suggestion_id, user_id)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS giveaways (
@@ -904,6 +1071,8 @@ CREATE TABLE IF NOT EXISTS giveaways (
     deny_roles     TEXT,
     participants   TEXT,
     ended          TINYINT DEFAULT 0,
+    cancelled      TINYINT DEFAULT 0,
+    winners        TEXT,
     PRIMARY KEY (id)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
@@ -914,13 +1083,22 @@ CREATE TABLE IF NOT EXISTS autoroles (
     mapping_data TEXT NOT NULL
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS join_autoroles (
+    guild_id   BIGINT    NOT NULL,
+    role_id    BIGINT    NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (guild_id, role_id)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS lofi_config (
-    guild_id     BIGINT PRIMARY KEY,
-    channel_id   BIGINT,
-    volume       INT DEFAULT 100,
-    enabled      TINYINT DEFAULT 0,
-    stream_url   TEXT,
-    station_name TEXT
+    guild_id        BIGINT  PRIMARY KEY,
+    channel_id      BIGINT,
+    volume          INT     DEFAULT 100,
+    enabled         TINYINT DEFAULT 0,
+    stream_url      TEXT,
+    station_name    TEXT,
+    auto_reconnect  TINYINT DEFAULT 1,
+    pause_on_empty  TINYINT DEFAULT 0
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -939,25 +1117,45 @@ CREATE TABLE IF NOT EXISTS bot_stats (
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS ticket_config (
-    guild_id              BIGINT PRIMARY KEY,
-    panel_channel_id      BIGINT,
-    category_id           BIGINT,
-    log_channel_id        BIGINT,
-    allowed_roles         TEXT,
-    immune_roles          TEXT,
-    panel_embed_data      TEXT,
-    channel_name_template VARCHAR(100) DEFAULT '⚒️{username}-{number}'
+    guild_id                BIGINT PRIMARY KEY,
+    panel_channel_id        BIGINT,
+    category_id             BIGINT,
+    log_channel_id          BIGINT,
+    allowed_roles           TEXT,
+    immune_roles            TEXT,
+    panel_embed_data        TEXT,
+    channel_name_template   VARCHAR(100) DEFAULT '{username}-{number}',
+    max_tickets_per_user    INT DEFAULT 0,
+    ticket_cooldown_seconds INT DEFAULT 0,
+    panel_select_template   VARCHAR(100),
+    panel_inside_template   VARCHAR(100),
+    msg_open_template       VARCHAR(100),
+    msg_close_template      VARCHAR(100)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS ticket_categories (
-    id                 BIGINT NOT NULL AUTO_INCREMENT,
-    guild_id           BIGINT NOT NULL,
-    name               VARCHAR(100) NOT NULL,
-    emoji              VARCHAR(50),
-    questions          TEXT,
-    close_reasons      TEXT,
-    welcome_embed_data TEXT,
+    id                          BIGINT NOT NULL AUTO_INCREMENT,
+    guild_id                    BIGINT NOT NULL,
+    name                        VARCHAR(100) NOT NULL,
+    emoji                       VARCHAR(50),
+    description                 TEXT,
+    questions                   TEXT,
+    close_reasons               TEXT,
+    welcome_embed_data          TEXT,
+    welcome_embed_template_key  VARCHAR(100),
+    staff_role_id               BIGINT,
     PRIMARY KEY (id)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS ticket_template_embeds (
+    id           BIGINT NOT NULL AUTO_INCREMENT,
+    guild_id     BIGINT NOT NULL,
+    template_key VARCHAR(100) NOT NULL,
+    name         VARCHAR(150),
+    embed_data   TEXT NOT NULL,
+    created_at   VARCHAR(50) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY ux_tpl_guild_key (guild_id, template_key)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS tickets (
@@ -1024,16 +1222,20 @@ CREATE TABLE IF NOT EXISTS user_levels (
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS xp_config (
-    guild_id                BIGINT PRIMARY KEY,
-    enabled                 TINYINT DEFAULT 0,
-    xp_min                  INT DEFAULT 15,
-    xp_max                  INT DEFAULT 25,
-    cooldown_seconds        INT DEFAULT 60,
-    ignored_channels        TEXT,
-    channel_multipliers     TEXT,
-    announcement_channel_id BIGINT,
-    announcement_message    TEXT,
-    stack_rewards           TINYINT DEFAULT 1
+    guild_id                     BIGINT PRIMARY KEY,
+    enabled                      TINYINT DEFAULT 0,
+    xp_min                       INT     DEFAULT 15,
+    xp_max                       INT     DEFAULT 25,
+    cooldown_seconds             INT     DEFAULT 60,
+    ignored_channels             TEXT,
+    channel_multipliers          TEXT,
+    announcement_channel_id      BIGINT,
+    announcement_message         TEXT,
+    stack_rewards                TINYINT DEFAULT 1,
+    levelup_persist              TINYINT DEFAULT 1,
+    levelup_autodelete           TINYINT DEFAULT 0,
+    levelup_delete_after_seconds INT     DEFAULT 30,
+    levelup_embed_config         TEXT
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS level_rewards (
@@ -1304,7 +1506,93 @@ class DatabaseManager:
 
         logger.info("Schema de base de datos inicializado correctamente.")
         self._migrate_ai_config()
+        self._migrate_tickets()
         self._run_migrations()
+
+    def _migrate_tickets(self) -> None:
+        """
+        Migración no destructiva de tablas de tickets para BBDDs creadas
+        antes de Fase 7 del refactor.
+        """
+        cfg_cols = [
+            ("max_tickets_per_user", "INTEGER DEFAULT 0"),
+            ("ticket_cooldown_seconds", "INTEGER DEFAULT 0"),
+            ("panel_select_template", "TEXT"),
+            ("panel_inside_template", "TEXT"),
+            ("msg_open_template", "TEXT"),
+            ("msg_close_template", "TEXT"),
+        ]
+        for col, col_def in cfg_cols:
+            try:
+                self.ensure_column("ticket_config", col, col_def)
+            except Exception as e:
+                logger.warning("ensure_column ticket_config.%s: %s", col, e)
+
+        cat_cols = [
+            ("description", "TEXT"),
+            ("welcome_embed_template_key", "TEXT"),
+            ("staff_role_id", "INTEGER"),
+        ]
+        for col, col_def in cat_cols:
+            try:
+                self.ensure_column("ticket_categories", col, col_def)
+            except Exception as e:
+                logger.warning("ensure_column ticket_categories.%s: %s", col, e)
+
+        # Niveles (Fase 9): comportamiento del mensaje de subida.
+        xp_cols = [
+            ("levelup_persist", "INTEGER DEFAULT 1"),
+            ("levelup_autodelete", "INTEGER DEFAULT 0"),
+            ("levelup_delete_after_seconds", "INTEGER DEFAULT 30"),
+            ("levelup_embed_config", "TEXT"),
+        ]
+        for col, col_def in xp_cols:
+            try:
+                self.ensure_column("xp_config", col, col_def)
+            except Exception as e:
+                logger.warning("ensure_column xp_config.%s: %s", col, e)
+
+        # Sorteos (Fase 11): cancelled flag + winners persistidos.
+        gw_cols = [
+            ("cancelled", "INTEGER DEFAULT 0"),
+            ("winners", "TEXT"),
+        ]
+        for col, col_def in gw_cols:
+            try:
+                self.ensure_column("giveaways", col, col_def)
+            except Exception as e:
+                logger.warning("ensure_column giveaways.%s: %s", col, e)
+
+        # Sugerencias (Fase 15): flexibilidad de config + razón de denegación.
+        sug_cfg_cols = [
+            ("enabled", "INTEGER DEFAULT 1"),
+            ("auto_publish", "INTEGER DEFAULT 0"),
+            ("min_length", "INTEGER DEFAULT 10"),
+            ("max_length", "INTEGER DEFAULT 2000"),
+            ("cooldown_seconds", "INTEGER DEFAULT 300"),
+        ]
+        for col, col_def in sug_cfg_cols:
+            try:
+                self.ensure_column("suggestions_config", col, col_def)
+            except Exception as e:
+                logger.warning("ensure_column suggestions_config.%s: %s", col, e)
+        try:
+            self.ensure_column("suggestions", "denial_reason", "TEXT")
+        except Exception as e:
+            logger.warning("ensure_column suggestions.denial_reason: %s", e)
+
+        # Radio (Fase 5): flags auto_reconnect / pause_on_empty.
+        lofi_cols = [
+            ("auto_reconnect", "INTEGER DEFAULT 1"),
+            ("pause_on_empty", "INTEGER DEFAULT 0"),
+        ]
+        for col, col_def in lofi_cols:
+            try:
+                self.ensure_column("lofi_config", col, col_def)
+            except Exception as e:
+                logger.warning("ensure_column lofi_config.%s: %s", col, e)
+        # Nota: voice_gen_config ya tiene su propia migración idempotente
+        # en _ensure_voice_gen_tables (Fase 6).
 
     def _migrate_ai_config(self) -> None:
         """
@@ -1865,6 +2153,171 @@ class DatabaseManager:
 
         self._executemany(ops)
 
+    # ── AI API Keys (multi-tenant pool) ───────────────────────────────────────
+    #
+    # Reglas de negocio:
+    #   • Cada guild tiene asignada como máximo una key (PK en ai_guild_keys).
+    #   • Cada key cubre como máximo 2 guilds (validado al asignar).
+    #   • Soft-disable vía `active` en lugar de borrar (preserva auditoría).
+
+    AI_KEY_MAX_GUILDS_PER_KEY = 2
+
+    def list_ai_keys(self) -> List[Dict]:
+        """
+        Lista todas las API keys del pool con su uso (cuántos guilds tienen
+        cada key asignada). No expone la api_key completa al caller — eso queda
+        a cargo de la capa API; aquí devolvemos el campo crudo.
+        """
+        rows = self._fetchall(
+            """
+            SELECT k.id, k.label, k.api_key, k.active, k.notes, k.created_at,
+                   COUNT(g.guild_id) AS guilds_assigned
+              FROM ai_api_keys k
+              LEFT JOIN ai_guild_keys g ON g.key_id = k.id
+             GROUP BY k.id
+             ORDER BY k.created_at DESC
+            """,
+            (),
+        )
+        return [dict(r) for r in rows]
+
+    def get_ai_key(self, key_id: int) -> Optional[Dict]:
+        row = self._fetchone(
+            "SELECT * FROM ai_api_keys WHERE id = ?", (key_id,)
+        )
+        return dict(row) if row else None
+
+    def add_ai_key(self, label: str, api_key: str, notes: Optional[str] = None) -> int:
+        """Inserta una nueva key. Devuelve el id insertado."""
+        now = datetime.now(timezone.utc).isoformat()
+        if self.db_type == "postgresql":
+            row = self._fetchone(
+                "INSERT INTO ai_api_keys (label, api_key, notes, created_at) "
+                "VALUES (?, ?, ?, ?) RETURNING id",
+                (label, api_key, notes, now),
+            )
+            return int(row["id"]) if row else 0
+        # sqlite + mariadb: insertar y leer last_insert_rowid / LAST_INSERT_ID()
+        self._execute(
+            "INSERT INTO ai_api_keys (label, api_key, notes, created_at) VALUES (?, ?, ?, ?)",
+            (label, api_key, notes, now),
+        )
+        if self.db_type == "sqlite":
+            row = self._fetchone("SELECT last_insert_rowid() AS id", ())
+        else:  # mariadb
+            row = self._fetchone("SELECT LAST_INSERT_ID() AS id", ())
+        return int(row["id"]) if row else 0
+
+    def update_ai_key(self, key_id: int, **kwargs) -> None:
+        """Actualiza label, active, notes. api_key se actualiza por separado por seguridad."""
+        allowed = {"label", "active", "notes", "api_key"}
+        invalid = set(kwargs) - allowed
+        if invalid:
+            raise ValueError(f"Campos inválidos en update_ai_key: {invalid}")
+        if not kwargs:
+            return
+        ops = [
+            (f"UPDATE ai_api_keys SET {col} = ? WHERE id = ?", (val, key_id))
+            for col, val in kwargs.items()
+        ]
+        self._executemany(ops)
+
+    def delete_ai_key(self, key_id: int) -> None:
+        """Borra una key. ON DELETE CASCADE limpia ai_guild_keys."""
+        self._execute("DELETE FROM ai_api_keys WHERE id = ?", (key_id,))
+
+    def get_ai_key_for_guild(self, guild_id: int) -> Optional[Dict]:
+        """Devuelve la key asignada al guild (o None)."""
+        row = self._fetchone(
+            """
+            SELECT k.id, k.label, k.api_key, k.active, g.assigned_at
+              FROM ai_guild_keys g
+              JOIN ai_api_keys k ON k.id = g.key_id
+             WHERE g.guild_id = ?
+            """,
+            (guild_id,),
+        )
+        return dict(row) if row else None
+
+    def count_guilds_for_key(self, key_id: int) -> int:
+        row = self._fetchone(
+            "SELECT COUNT(*) AS n FROM ai_guild_keys WHERE key_id = ?", (key_id,)
+        )
+        return int(row["n"]) if row else 0
+
+    def assign_ai_key_to_guild(self, guild_id: int, key_id: int) -> None:
+        """
+        Asigna una key a un guild. Aplica las reglas:
+          • Si el guild ya tiene una key, se reemplaza (PK garantiza unicidad).
+          • Antes de asignar, valida que la key tenga capacidad (< 2 guilds).
+        """
+        key = self.get_ai_key(key_id)
+        if not key:
+            raise ValueError(f"Key {key_id} no existe")
+        if not int(key.get("active", 0)):
+            raise ValueError(f"Key {key_id} está inactiva")
+
+        # Si el guild ya tenía la misma key, no contamos doble.
+        existing = self.get_ai_key_for_guild(guild_id)
+        if existing and int(existing["id"]) == int(key_id):
+            return  # idempotente
+
+        # Cuenta cuántos guilds usan esta key actualmente.
+        current = self.count_guilds_for_key(key_id)
+        if current >= self.AI_KEY_MAX_GUILDS_PER_KEY:
+            raise ValueError(
+                f"La key '{key['label']}' ya cubre el máximo de "
+                f"{self.AI_KEY_MAX_GUILDS_PER_KEY} servidores"
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        if self.db_type == "sqlite":
+            sql = (
+                "INSERT OR REPLACE INTO ai_guild_keys (guild_id, key_id, assigned_at) "
+                "VALUES (?, ?, ?)"
+            )
+        elif self.db_type == "postgresql":
+            sql = (
+                "INSERT INTO ai_guild_keys (guild_id, key_id, assigned_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT (guild_id) DO UPDATE SET "
+                "key_id = EXCLUDED.key_id, assigned_at = EXCLUDED.assigned_at"
+            )
+        else:  # mariadb
+            sql = (
+                "INSERT INTO ai_guild_keys (guild_id, key_id, assigned_at) "
+                "VALUES (?, ?, ?) "
+                "ON DUPLICATE KEY UPDATE key_id = VALUES(key_id), "
+                "assigned_at = VALUES(assigned_at)"
+            )
+        self._execute(sql, (guild_id, key_id, now))
+
+    def unassign_ai_key_from_guild(self, guild_id: int) -> None:
+        self._execute("DELETE FROM ai_guild_keys WHERE guild_id = ?", (guild_id,))
+
+    def list_guilds_for_key(self, key_id: int) -> List[int]:
+        rows = self._fetchall(
+            "SELECT guild_id FROM ai_guild_keys WHERE key_id = ?", (key_id,)
+        )
+        return [int(r["guild_id"]) for r in rows]
+
+    def ai_key_pool_health(self) -> Dict:
+        """
+        Reporte rápido del pool. Útil para alertar al admin si:
+          • hay más guilds que (keys * 2) → faltan keys.
+        """
+        keys = self._fetchall("SELECT COUNT(*) AS n FROM ai_api_keys WHERE active = 1", ())
+        active_keys = int(keys[0]["n"]) if keys else 0
+        guilds = self._fetchall("SELECT COUNT(*) AS n FROM ai_guild_keys", ())
+        assigned_guilds = int(guilds[0]["n"]) if guilds else 0
+        capacity = active_keys * self.AI_KEY_MAX_GUILDS_PER_KEY
+        return {
+            "active_keys": active_keys,
+            "assigned_guilds": assigned_guilds,
+            "capacity": capacity,
+            "deficit": max(0, assigned_guilds - capacity),
+        }
+
     # ── Appeals ───────────────────────────────────────────────────────────────
 
     def create_appeal(
@@ -2006,6 +2459,74 @@ class DatabaseManager:
         ]
         self._executemany(ops)
 
+    # ── Suggestion votes (tracking por usuario, idempotente) ──────────────────
+    def get_user_vote(self, suggestion_id: int, user_id: int) -> int:
+        """Retorna 1, -1 o 0 según el voto del usuario."""
+        row = self._fetchone(
+            "SELECT vote FROM suggestion_votes WHERE suggestion_id = ? AND user_id = ?",
+            (suggestion_id, user_id),
+        )
+        return int(row["vote"]) if row else 0
+
+    def cast_vote(self, suggestion_id: int, user_id: int, vote: int) -> Dict:
+        """
+        Aplica un voto (vote ∈ {-1, +1}). Si el usuario re-vota igual → quita.
+        Devuelve los nuevos counts {upvotes, downvotes}.
+        """
+        if vote not in (-1, 1):
+            raise ValueError("vote debe ser 1 o -1")
+
+        prev = self.get_user_vote(suggestion_id, user_id)
+        if prev == vote:
+            self._execute(
+                "DELETE FROM suggestion_votes WHERE suggestion_id = ? AND user_id = ?",
+                (suggestion_id, user_id),
+            )
+        elif prev == 0:
+            if self.db_type == "sqlite":
+                sql = "INSERT OR REPLACE INTO suggestion_votes (suggestion_id, user_id, vote) VALUES (?, ?, ?)"
+            elif self.db_type == "postgresql":
+                sql = (
+                    "INSERT INTO suggestion_votes (suggestion_id, user_id, vote) VALUES (?, ?, ?) "
+                    "ON CONFLICT (suggestion_id, user_id) DO UPDATE SET vote = EXCLUDED.vote"
+                )
+            else:
+                sql = (
+                    "INSERT INTO suggestion_votes (suggestion_id, user_id, vote) VALUES (?, ?, ?) "
+                    "ON DUPLICATE KEY UPDATE vote = VALUES(vote)"
+                )
+            self._execute(sql, (suggestion_id, user_id, vote))
+        else:
+            self._execute(
+                "UPDATE suggestion_votes SET vote = ? WHERE suggestion_id = ? AND user_id = ?",
+                (vote, suggestion_id, user_id),
+            )
+
+        ups = self._fetchone(
+            "SELECT COUNT(*) AS c FROM suggestion_votes WHERE suggestion_id = ? AND vote = 1",
+            (suggestion_id,),
+        )
+        downs = self._fetchone(
+            "SELECT COUNT(*) AS c FROM suggestion_votes WHERE suggestion_id = ? AND vote = -1",
+            (suggestion_id,),
+        )
+        upvotes = int(ups["c"]) if ups else 0
+        downvotes = int(downs["c"]) if downs else 0
+        self._executemany([
+            ("UPDATE suggestions SET upvotes = ? WHERE id = ?", (upvotes, suggestion_id)),
+            ("UPDATE suggestions SET downvotes = ? WHERE id = ?", (downvotes, suggestion_id)),
+        ])
+        return {"upvotes": upvotes, "downvotes": downvotes}
+
+    def get_last_user_suggestion_ts(self, guild_id: int, user_id: int) -> Optional[str]:
+        """Timestamp ISO de la última sugerencia del usuario (para cooldown)."""
+        row = self._fetchone(
+            "SELECT created_at FROM suggestions WHERE guild_id = ? AND user_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (guild_id, user_id),
+        )
+        return row["created_at"] if row else None
+
     # ── Giveaways ─────────────────────────────────────────────────────────────
     def create_giveaway(
         self,
@@ -2092,16 +2613,50 @@ class DatabaseManager:
     def delete_autorole(self, message_id: int) -> None:
         self._execute("DELETE FROM autoroles WHERE message_id = ?", (message_id,))
 
+    # ── Join Autoroles (rol al unirse al servidor) ────────────────────────────
+    def get_join_autoroles(self, guild_id: int) -> List[Dict]:
+        """Lista de roles que se asignan automáticamente cuando un usuario entra."""
+        return self._fetchall(
+            "SELECT role_id, created_at FROM join_autoroles WHERE guild_id = ? ORDER BY created_at",
+            (guild_id,),
+        )
+
+    def add_join_autorole(self, guild_id: int, role_id: int) -> None:
+        """Agrega un rol a la lista de auto-asignación al unirse. Idempotente."""
+        if self.db_type == "sqlite":
+            sql = "INSERT OR IGNORE INTO join_autoroles (guild_id, role_id) VALUES (?, ?)"
+        elif self.db_type == "postgresql":
+            sql = "INSERT INTO join_autoroles (guild_id, role_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+        else:
+            sql = "INSERT IGNORE INTO join_autoroles (guild_id, role_id) VALUES (?, ?)"
+        self._execute(sql, (guild_id, role_id))
+
+    def remove_join_autorole(self, guild_id: int, role_id: int) -> None:
+        """Quita un rol de la lista de auto-asignación al unirse."""
+        self._execute(
+            "DELETE FROM join_autoroles WHERE guild_id = ? AND role_id = ?",
+            (guild_id, role_id),
+        )
+
     # ── Lofi Config ───────────────────────────────────────────────────────────
     def get_lofi_config(self, guild_id: int) -> Dict:
         row = self._fetchone(
             "SELECT * FROM lofi_config WHERE guild_id = ?", (guild_id,)
         )
-        return row or {
+        if row:
+            # Defaults para columnas añadidas en migraciones (BBDDs viejas pueden no tenerlas).
+            row.setdefault("auto_reconnect", 1)
+            row.setdefault("pause_on_empty", 0)
+            return row
+        return {
             "guild_id": guild_id,
             "channel_id": None,
             "volume": 100,
             "enabled": 0,
+            "stream_url": None,
+            "station_name": "Lofi Radio 24/7",
+            "auto_reconnect": 1,
+            "pause_on_empty": 0,
         }
 
     def set_lofi_config(self, guild_id: int, **kwargs) -> None:
@@ -2176,15 +2731,103 @@ class DatabaseManager:
         emoji: str,
         questions: str,
         close_reasons: str,
-        welcome_embed_data: str = None,
+        welcome_embed_data: Optional[str] = None,
+        description: Optional[str] = None,
+        welcome_embed_template_key: Optional[str] = None,
+        staff_role_id: Optional[int] = None,
     ) -> None:
         self._execute(
-            "INSERT INTO ticket_categories (guild_id, name, emoji, questions, close_reasons, welcome_embed_data) VALUES (?, ?, ?, ?, ?, ?)",
-            (guild_id, name, emoji, questions, close_reasons, welcome_embed_data),
+            "INSERT INTO ticket_categories (guild_id, name, emoji, description, "
+            "questions, close_reasons, welcome_embed_data, welcome_embed_template_key, "
+            "staff_role_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                guild_id, name, emoji, description,
+                questions, close_reasons, welcome_embed_data,
+                welcome_embed_template_key, staff_role_id,
+            ),
         )
+
+    def update_ticket_category(self, category_id: int, **kwargs) -> None:
+        """Actualiza campos de una categoría. Allowlist por seguridad."""
+        allowed = {
+            "name", "emoji", "description", "questions", "close_reasons",
+            "welcome_embed_data", "welcome_embed_template_key", "staff_role_id",
+        }
+        invalid = set(kwargs) - allowed
+        if invalid:
+            raise ValueError(f"Campos inválidos en update_ticket_category: {invalid}")
+        if not kwargs:
+            return
+        ops = [
+            (f"UPDATE ticket_categories SET {col} = ? WHERE id = ?", (val, category_id))
+            for col, val in kwargs.items()
+        ]
+        self._executemany(ops)
 
     def delete_ticket_category(self, category_id: int) -> None:
         self._execute("DELETE FROM ticket_categories WHERE id = ?", (category_id,))
+
+    # ── Ticket Template Embeds (pool reutilizable) ────────────────────────────
+    #
+    # `template_key` agrupa plantillas por uso (panel_select, panel_inside,
+    # msg_open, msg_close, custom_<x>). UNIQUE(guild_id, template_key) → upsert
+    # por key. Usar `name` para distinguir plantillas custom.
+
+    def list_ticket_templates(self, guild_id: int) -> List[Dict]:
+        return self._fetchall(
+            "SELECT * FROM ticket_template_embeds WHERE guild_id = ? ORDER BY created_at DESC",
+            (guild_id,),
+        )
+
+    def get_ticket_template(self, guild_id: int, template_key: str) -> Optional[Dict]:
+        row = self._fetchone(
+            "SELECT * FROM ticket_template_embeds WHERE guild_id = ? AND template_key = ?",
+            (guild_id, template_key),
+        )
+        return dict(row) if row else None
+
+    def upsert_ticket_template(
+        self,
+        guild_id: int,
+        template_key: str,
+        embed_data: str,
+        name: Optional[str] = None,
+    ) -> None:
+        """Crea o reemplaza la plantilla identificada por (guild_id, template_key)."""
+        now = datetime.now(timezone.utc).isoformat()
+        if self.db_type == "sqlite":
+            self._execute(
+                "INSERT INTO ticket_template_embeds "
+                "(guild_id, template_key, name, embed_data, created_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(guild_id, template_key) DO UPDATE SET "
+                "embed_data = excluded.embed_data, name = excluded.name",
+                (guild_id, template_key, name, embed_data, now),
+            )
+        elif self.db_type == "postgresql":
+            self._execute(
+                "INSERT INTO ticket_template_embeds "
+                "(guild_id, template_key, name, embed_data, created_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (guild_id, template_key) DO UPDATE SET "
+                "embed_data = EXCLUDED.embed_data, name = EXCLUDED.name",
+                (guild_id, template_key, name, embed_data, now),
+            )
+        else:  # mariadb
+            self._execute(
+                "INSERT INTO ticket_template_embeds "
+                "(guild_id, template_key, name, embed_data, created_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON DUPLICATE KEY UPDATE "
+                "embed_data = VALUES(embed_data), name = VALUES(name)",
+                (guild_id, template_key, name, embed_data, now),
+            )
+
+    def delete_ticket_template(self, guild_id: int, template_key: str) -> None:
+        self._execute(
+            "DELETE FROM ticket_template_embeds WHERE guild_id = ? AND template_key = ?",
+            (guild_id, template_key),
+        )
 
     def create_ticket(self, guild_id: int, user_id: int, category_name: str) -> Dict:
         # Generate global number
@@ -2768,18 +3411,33 @@ class DatabaseManager:
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _ensure_voice_gen_tables(self) -> None:
-        """Crea las tablas de VoiceGen si no existen."""
+        """
+        Crea las tablas del Generador de VCs si no existen y añade columnas
+        nuevas a tablas viejas vía ensure_column (idempotente).
+        """
         self._execute("""
             CREATE TABLE IF NOT EXISTS voice_gen_config (
-                guild_id            INTEGER PRIMARY KEY,
+                guild_id             INTEGER PRIMARY KEY,
                 generator_channel_id INTEGER,
-                category_id         INTEGER,
-                panel_channel_id    INTEGER,
-                name_template       TEXT    DEFAULT '{username}''s VC',
-                default_limit       INTEGER DEFAULT 0,
-                enabled             INTEGER DEFAULT 0
+                category_id          INTEGER,
+                panel_channel_id     INTEGER,
+                name_template        TEXT    DEFAULT '{username}''s VC',
+                default_limit        INTEGER DEFAULT 0,
+                enabled              INTEGER DEFAULT 0,
+                panel_title          TEXT,
+                panel_description    TEXT,
+                panel_color          TEXT,
+                auto_send_panel      INTEGER DEFAULT 1
             )
         """)
+        # Migración no destructiva para BBDDs creadas antes de Fase 6.
+        try:
+            self.ensure_column("voice_gen_config", "panel_title", "TEXT")
+            self.ensure_column("voice_gen_config", "panel_description", "TEXT")
+            self.ensure_column("voice_gen_config", "panel_color", "TEXT")
+            self.ensure_column("voice_gen_config", "auto_send_panel", "INTEGER DEFAULT 1")
+        except Exception as e:
+            logger.warning("ensure_column en voice_gen_config falló: %s", e)
         self._execute("""
             CREATE TABLE IF NOT EXISTS voice_gen_channels (
                 channel_id   INTEGER PRIMARY KEY,

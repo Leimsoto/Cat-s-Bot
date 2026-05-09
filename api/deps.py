@@ -120,3 +120,14 @@ async def require_guild_admin(
         raise HTTPException(403, "Necesitas ser administrador o dueño del servidor")
 
     return user
+
+
+async def require_master_admin(user: dict = Depends(get_current_user)) -> dict:
+    """
+    Restringe a operaciones globales del bot (gestión del pool de API keys, etc).
+    En dev mode (sin JWT_SECRET configurado) se permite. En prod sólo si el
+    token coincide con MASTER_ADMIN_KEY.
+    """
+    if user.get("is_dev_mode") or user.get("is_master_admin"):
+        return user
+    raise HTTPException(403, "Operación restringida al administrador del bot")

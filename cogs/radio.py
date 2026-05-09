@@ -141,8 +141,16 @@ class Radio(commands.Cog):
         return url
 
     async def reconnect_stream(self, vc, channel, cfg):
+        # Respetar la opción auto_reconnect del dashboard. Default 1 (activo).
+        if not cfg.get("auto_reconnect", 1):
+            return
         await asyncio.sleep(2)
         if vc and vc.is_connected() and not vc.is_playing() and cfg.get("enabled"):
+            # Pausar si el canal está vacío y el admin lo configuró así.
+            if cfg.get("pause_on_empty"):
+                non_bot_members = [m for m in channel.members if not m.bot]
+                if not non_bot_members:
+                    return
             self.start_playing(vc, channel, cfg)
 
     radio_group = app_commands.Group(
@@ -192,7 +200,7 @@ class Radio(commands.Cog):
         status_text = "🟢 Reproduciendo" if (vc and vc.is_playing()) else "🔴 Detenido / Conectando..."
         station = cfg.get("station_name", "Lofi Radio 24/7")
 
-        embed = discord.Embed(title="📻 Estado de la Radio", color=discord.Color.blue())
+        embed = discord.Embed(title="Estado de la Radio", color=discord.Color.blue())
         embed.add_field(name="Estación", value=f"**{station}**", inline=False)
         embed.add_field(name="Canal", value=canal.mention if canal else "No encontrado", inline=True)
         embed.add_field(name="Estado", value=status_text, inline=True)

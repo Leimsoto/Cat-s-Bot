@@ -1,72 +1,130 @@
 """
 api/routes/autoroles.py
 ───────────────────────
-Endpoints para configuración de autoroles y reaction roles.
+Endpoints para Autoroles.
 
-GET    /api/guild/{guild_id}/autoroles             → Lista de autoroles
-POST   /api/guild/{guild_id}/autoroles             → Crear/Actualizar autorol (mapping_data)
-DELETE /api/guild/{guild_id}/autoroles/{msg_id}    → Eliminar autorol
+Dos modos:
+  • Join autoroles: roles que se asignan al entrar al servidor.
+  • Reaction roles: paneles donde el usuario reacciona para obtener un rol.
+
+Endpoints:
+  GET    /api/guilds/{guild_id}/autoroles/join              → Lista de roles join
+  POST   /api/guilds/{guild_id}/autoroles/join              → Agrega rol join
+  DELETE /api/guilds/{guild_id}/autoroles/join/{role_id}    → Quita rol join
+
+  GET    /api/guilds/{guild_id}/autoroles/reactions                  → Paneles
+  POST   /api/guilds/{guild_id}/autoroles/reactions                  → Crear/actualizar panel
+  DELETE /api/guilds/{guild_id}/autoroles/reactions/{message_id}     → Eliminar panel
 """
 
-from fastapi import APIRouter, Depends, HTTPException
-from api.deps import get_db, require_guild_admin
-from pydantic import BaseModel
 import json
 
-router = APIRouter(prefix="/api/guild/{guild_id}/autoroles", tags=["autoroles"])
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
-class AutoroleCreate(BaseModel):
+from api.deps import get_db, require_guild_admin
+
+router = APIRouter(
+    prefix="/api/guilds/{guild_id}/autoroles",
+    tags=["autoroles"],
+)
+
+
+# ── Join Autoroles ───────────────────────────────────────────────────────────
+
+class JoinRoleBody(BaseModel):
+    role_id: int = Field(..., description="ID del rol a asignar al unirse")
+
+
+@router.get("/join")
+async def list_join_roles(
+    guild_id: int,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
+):
+    """Lista los roles configurados para asignación al unirse."""
+    rows = db.get_join_autoroles(guild_id)
+    return {"guild_id": guild_id, "join_roles": rows}
+
+
+@router.post("/join")
+async def add_join_role(
+    guild_id: int,
+    body: JoinRoleBody,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
+):
+    """Agrega un rol a la lista de auto-asignación."""
+    db.add_join_autorole(guild_id, body.role_id)
+    return {"status": "ok", "role_id": body.role_id}
+
+
+@router.delete("/join/{role_id}")
+async def remove_join_role(
+    guild_id: int,
+    role_id: int,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
+):
+    """Quita un rol de la lista de auto-asignación."""
+    db.remove_join_autorole(guild_id, role_id)
+    return {"status": "ok", "role_id": role_id}
+
+
+# ── Reaction Roles ───────────────────────────────────────────────────────────
+
+class ReactionPanelBody(BaseModel):
     message_id: int
     channel_id: int
-    mapping_data: str
+    mapping_data: str = Field(..., description="JSON: {emoji: role_id}")
 
-@router.get("")
-async def get_autoroles(
+
+@router.get("/reactions")
+async def list_reaction_panels(
     guild_id: int,
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
 ):
-    """Lista todos los paneles de autorol configurados para el servidor."""
-    autoroles = db.get_guild_autoroles(guild_id)
-    return {
-        "guild_id": guild_id,
-        "autoroles": autoroles
-    }
+    """Lista todos los paneles de reaction-role configurados."""
+    panels = db.get_guild_autoroles(guild_id)
+    return {"guild_id": guild_id, "panels": panels}
 
-@router.post("")
-async def create_or_update_autorole(
+
+@router.post("/reactions")
+async def upsert_reaction_panel(
     guild_id: int,
-    body: AutoroleCreate,
+    body: ReactionPanelBody,
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
 ):
-    """Crea o actualiza la configuración de autorol/reacción de un mensaje."""
-    # Validate JSON mapping data
+    """Crea o actualiza un panel de reaction-role."""
     try:
         json.loads(body.mapping_data)
     except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="El campo mapping_data debe ser un JSON válido.")
+        raise HTTPException(
+            status_code=400,
+            detail="El campo mapping_data debe ser un JSON válido.",
+        )
 
     db.set_autorole(
         message_id=body.message_id,
         guild_id=guild_id,
         channel_id=body.channel_id,
-        mapping_data=body.mapping_data
+        mapping_data=body.mapping_data,
     )
-    return {"status": "ok", "message": "Autorol actualizado correctamente."}
+    return {"status": "ok", "message_id": body.message_id}
 
-@router.delete("/{message_id}")
-async def delete_autorole(
+
+@router.delete("/reactions/{message_id}")
+async def delete_reaction_panel(
     guild_id: int,
     message_id: int,
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
 ):
-    """Elimina la configuración de autorol de un mensaje."""
-    # Verify the autorole belongs to the guild
-    autorole = db.get_autorole(message_id)
-    if not autorole or autorole.get("guild_id") != guild_id:
-        raise HTTPException(status_code=404, detail="Autorol no encontrado en este servidor.")
-
+    """Elimina un panel de reaction-role."""
+    panel = db.get_autorole(message_id)
+    if not panel or int(panel.get("guild_id", 0)) != guild_id:
+        raise HTTPException(status_code=404, detail="Panel no encontrado en este servidor.")
     db.delete_autorole(message_id)
-    return {"status": "ok", "message": "Autorol eliminado."}
+    return {"status": "ok", "message_id": message_id}

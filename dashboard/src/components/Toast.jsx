@@ -1,4 +1,5 @@
-import { useEffect } from 'react';
+import { useEffect } from "react";
+import { Icon } from "../lib/icons";
 
 export default function Toast({ toast, onDismiss }) {
   useEffect(() => {
@@ -9,10 +10,16 @@ export default function Toast({ toast, onDismiss }) {
 
   if (!toast) return null;
 
+  const isError = toast.type === "error";
+
   return (
-    <div className={`toast-notification toast--${toast.type || 'success'}`} role="alert" aria-live="polite">
+    <div
+      className={`toast-notification toast--${toast.type || "success"}`}
+      role="alert"
+      aria-live="polite"
+    >
       <span className="toast-icon">
-        {toast.type === 'error' ? '✕' : '✓'}
+        <Icon name={isError ? "error" : "success"} />
       </span>
       <span className="toast-msg">{toast.msg}</span>
     </div>
