@@ -1,17 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Cats Bots">
   <defs>
-    <linearGradient id="b" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="paw-bg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#a855f7"/>
       <stop offset="55%" stop-color="#7c3aed"/>
       <stop offset="100%" stop-color="#d946ef"/>
     </linearGradient>
-    <linearGradient id="s" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="rgba(255,255,255,0.5)"/>
+    <linearGradient id="paw-shine" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="rgba(255,255,255,0.55)"/>
       <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
     </linearGradient>
+    <radialGradient id="paw-glow" cx="50%" cy="55%" r="55%">
+      <stop offset="0%" stop-color="rgba(255,255,255,0.32)"/>
+      <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+    </radialGradient>
   </defs>
-  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#b)"/>
-  <rect x="2" y="2" width="60" height="30" rx="16" fill="url(#s)" opacity="0.5"/>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#paw-bg)"/>
+  <rect x="2" y="2" width="60" height="30" rx="16" fill="url(#paw-shine)" opacity="0.5"/>
+  <circle cx="32" cy="36" r="22" fill="url(#paw-glow)"/>
   <g fill="#ffffff">
     <ellipse cx="32" cy="42" rx="11" ry="9.5"/>
     <ellipse cx="20" cy="29" rx="4.6" ry="6"/>

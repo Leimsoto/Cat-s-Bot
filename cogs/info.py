@@ -11,9 +11,15 @@ import platform
 from datetime import datetime, timezone
 
 import discord
-import psutil
 from discord import app_commands
 from discord.ext import commands
+
+try:
+    import psutil  # type: ignore
+    if not hasattr(psutil, "cpu_percent"):
+        psutil = None  # broken namespace package
+except Exception:
+    psutil = None
 
 
 class Info(commands.Cog):
@@ -63,10 +69,19 @@ class Info(commands.Cog):
         uptime_str = f"{h}h {m}m {s}s"
 
         # Sistema (sin bloquear el event loop con interval breve)
-        cpu_pct = psutil.cpu_percent(interval=None)
-        ram = psutil.virtual_memory()
-        ram_used = ram.used // 1024 ** 2
-        ram_total = ram.total // 1024 ** 2
+        if psutil is not None:
+            try:
+                cpu_pct = psutil.cpu_percent(interval=None)
+                ram = psutil.virtual_memory()
+                ram_used = ram.used // 1024 ** 2
+                ram_total = ram.total // 1024 ** 2
+                ram_pct = ram.percent
+            except Exception:
+                cpu_pct = None
+                ram_used = ram_total = ram_pct = None
+        else:
+            cpu_pct = None
+            ram_used = ram_total = ram_pct = None
 
         embed = discord.Embed(
             title=self.bot.user.name,
@@ -86,10 +101,18 @@ class Info(commands.Cog):
             value=f"`{len(self.bot.guilds)}`",
             inline=True,
         )
-        embed.add_field(name="CPU", value=f"`{cpu_pct:.1f}%`", inline=True)
+        embed.add_field(
+            name="CPU",
+            value=f"`{cpu_pct:.1f}%`" if cpu_pct is not None else "`n/d`",
+            inline=True,
+        )
         embed.add_field(
             name="RAM",
-            value=f"`{ram_used} MB / {ram_total} MB ({ram.percent:.1f}%)`",
+            value=(
+                f"`{ram_used} MB / {ram_total} MB ({ram_pct:.1f}%)`"
+                if ram_used is not None
+                else "`n/d`"
+            ),
             inline=True,
         )
         embed.add_field(

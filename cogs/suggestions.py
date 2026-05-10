@@ -12,9 +12,9 @@ Flujo:
   3. Staff aprueba → public_channel
      o deniega (con razón) → status=DENIED guardado en DB
 
-Comandos slash:
-  /sugerencias setup         (configura canales + flags)
-  /sugerencias config        (ajusta min/max/cooldown desde Discord)
+Configuración (canales, min/max, cooldown, auto_publish): se gestiona desde
+el panel web (página "Sugerencias"). Este cog solo expone listeners e
+interacciones.
 """
 
 import json
@@ -22,7 +22,6 @@ import logging
 from datetime import datetime, timezone
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 logger = logging.getLogger(__name__)
@@ -192,35 +191,6 @@ class Suggestions(commands.Cog):
             await interaction.response.edit_message(embed=old, view=None)
         else:
             await interaction.response.send_message("✅ Sugerencia publicada.", ephemeral=True)
-
-    # ── Setup slash ──────────────────────────────────────────────────────────
-
-    setup_group = app_commands.Group(name="sugerencias", description="Gestión de sugerencias")
-
-    @setup_group.command(name="setup", description="Configura los canales del sistema de sugerencias")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def setup_suggestions(
-        self,
-        interaction: discord.Interaction,
-        envio: discord.TextChannel,
-        revision: discord.TextChannel,
-        publico: discord.TextChannel,
-    ):
-        self.db.set_suggestions_config(
-            interaction.guild_id,
-            submit_channel_id=envio.id,
-            review_channel_id=revision.id,
-            public_channel_id=publico.id,
-            enabled=1,
-        )
-        await interaction.response.send_message(
-            f"✅ **Sugerencias Configuradas**\n"
-            f"📥 Envío: {envio.mention}\n"
-            f"🛡️ Revisión (Staff): {revision.mention}\n"
-            f"📢 Público: {publico.mention}\n\n"
-            f"Ajusta min/max/cooldown y `auto_publish` desde el panel web.",
-            ephemeral=True,
-        )
 
     # ── Listener: capta sugerencias del canal de envío ───────────────────────
 

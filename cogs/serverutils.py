@@ -1,12 +1,14 @@
 """
 cogs/serverutils.py
 ───────────────────
-Utilidades de servidor: información, configuración global y logs en tiempo real.
+Utilidades de servidor: información y logs en tiempo real.
 
 Comandos slash:
   /serverinfo  – Información detallada del servidor
-  /config      – Panel de configuración global del bot (roles por módulo)
   /serverlogs  – Configuración de captura de logs en tiempo real
+
+Nota: la configuración global de roles/canales (antes /config) vive en el
+panel web (Moderación + páginas por módulo).
 """
 
 import json
@@ -139,74 +141,6 @@ class ServerUtils(commands.Cog):
 
         embed.set_footer(text=f"Servidor ID: {g.id}")
         await interaction.followup.send(embed=embed)
-
-    # ─────────────────────────────────────────────────────────────────────
-    # /config — Panel de configuración global
-    # ─────────────────────────────────────────────────────────────────────
-
-    @app_commands.command(name="config", description="Panel de configuración global del bot")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def config(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            return await interaction.response.send_message("❌ Este comando solo puede usarse en servidores.", ephemeral=True)
-
-        srv = self.db.get_server_config(interaction.guild_id)
-        embed = self._build_config_embed(interaction.guild, srv)
-        view = GlobalConfigView(self, interaction.user.id)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-    def _build_config_embed(self, guild: discord.Guild, srv: dict) -> discord.Embed:
-        def role_or_none(rid):
-            if not rid:
-                return "❌ No configurado"
-            r = guild.get_role(rid)
-            return r.mention if r else "❌ Rol eliminado"
-
-        def ch_or_none(cid, enabled):
-            status = "✅ ON" if enabled else "❌ OFF"
-            if not cid:
-                return f"❌ No configurado ({status})"
-            c = guild.get_channel(cid)
-            return f"{c.mention if c else '❌ Canal eliminado'} ({status})"
-
-        embed = discord.Embed(
-            title="🤖 Configuración Global del Bot",
-            description=f"Servidor: **{guild.name}**",
-            color=discord.Color.dark_teal(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        embed.add_field(name="👮 Rol Staff (global)", value=role_or_none(srv.get("staff_role_id")), inline=True)
-        embed.add_field(name="🔨 Rol Moderador", value=role_or_none(srv.get("mod_role_id")), inline=True)
-        embed.add_field(name="🎨 Rol Embeds", value=role_or_none(srv.get("embed_role_id")), inline=True)
-        embed.add_field(name="📺 Rol Canales", value=role_or_none(srv.get("channels_role_id")), inline=True)
-        embed.add_field(name="👥 Rol Usuarios", value=role_or_none(srv.get("users_role_id")), inline=True)
-        embed.add_field(
-            name="📋 Canal Mod-Logs",
-            value=ch_or_none(srv.get("modlog_channel"), srv.get("modlog_enabled", 1)),
-            inline=True,
-        )
-        embed.add_field(
-            name="📡 Canal Server-Logs",
-            value=ch_or_none(srv.get("serverlog_channel"), srv.get("serverlog_enabled", 1)),
-            inline=True,
-        )
-        embed.set_footer(text="Usa los botones para modificar")
-        return embed
-
-    @config.error
-    async def config_error(self, interaction: discord.Interaction, error):
-        if isinstance(error, app_commands.MissingPermissions):
-            msg = "❌ Solo administradores."
-        elif isinstance(error, app_commands.BotMissingPermissions):
-            msg = f"❌ Al bot le faltan permisos: `{', '.join(error.missing_permissions)}`"
-        else:
-            logger.error("Error en /config: %s", error, exc_info=True)
-            msg = "❌ Error inesperado. Revisa los logs del bot."
-
-        if not interaction.response.is_done():
-            await interaction.response.send_message(msg, ephemeral=True)
-        else:
-            await interaction.followup.send(msg, ephemeral=True)
 
     # ─────────────────────────────────────────────────────────────────────
     # /serverlogs — Configuración de eventos
@@ -495,109 +429,6 @@ class ServerUtils(commands.Cog):
                 embed.add_field(name="Cambios", value="\n".join(changes[:10]), inline=False)
             embed.set_footer(text=f"ID Canal: {after.id}")
             await self._send_server_log(before.guild, embed)
-
-
-# ── Views para /config ────────────────────────────────────────────────────────
-
-class GlobalConfigView(discord.ui.View):
-    def __init__(self, cog: ServerUtils, author_id: int):
-        super().__init__(timeout=300)
-        self.cog = cog
-        self.author_id = author_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Solo quien abrió el panel.", ephemeral=True)
-            return False
-        return True
-
-    async def _refresh(self, interaction: discord.Interaction):
-        srv = self.cog.db.get_server_config(interaction.guild_id)
-        embed = self.cog._build_config_embed(interaction.guild, srv)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="Rol Staff", emoji="👮", style=discord.ButtonStyle.primary, row=0)
-    async def staff_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=RoleSelectView(self, "staff_role_id", "Rol Staff global"))
-
-    @discord.ui.button(label="Rol Moderador", emoji="🔨", style=discord.ButtonStyle.primary, row=0)
-    async def mod_role_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=RoleSelectView(self, "mod_role_id", "Rol Moderador"))
-
-    @discord.ui.button(label="Rol Embeds", emoji="🎨", style=discord.ButtonStyle.primary, row=0)
-    async def embed_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=RoleSelectView(self, "embed_role_id", "Rol Embeds"))
-
-    @discord.ui.button(label="Rol Canales", emoji="📺", style=discord.ButtonStyle.secondary, row=1)
-    async def channels_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=RoleSelectView(self, "channels_role_id", "Rol Canales"))
-
-    @discord.ui.button(label="Rol Usuarios", emoji="👥", style=discord.ButtonStyle.secondary, row=1)
-    async def users_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=RoleSelectView(self, "users_role_id", "Rol Usuarios"))
-
-    @discord.ui.button(label="Canal Mod-Logs", emoji="📋", style=discord.ButtonStyle.secondary, row=2)
-    async def modlog_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=ChannelSelectConfigView(self, "modlog_channel"))
-
-    @discord.ui.button(label="Toggle Mod-Logs", emoji="🎚️", style=discord.ButtonStyle.primary, row=2)
-    async def toggle_modlog_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        srv = self.cog.db.get_server_config(interaction.guild_id)
-        current = bool(srv.get("modlog_enabled", 1))
-        self.cog.db.set_server_config(interaction.guild_id, modlog_enabled=int(not current))
-        await self._refresh(interaction)
-
-    @discord.ui.button(label="Canal Server-Logs", emoji="📡", style=discord.ButtonStyle.secondary, row=3)
-    async def serverlog_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=ChannelSelectConfigView(self, "serverlog_channel"))
-
-    @discord.ui.button(label="Toggle Server-Logs", emoji="🎚️", style=discord.ButtonStyle.primary, row=3)
-    async def toggle_serverlog_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        srv = self.cog.db.get_server_config(interaction.guild_id)
-        current = bool(srv.get("serverlog_enabled", 1))
-        self.cog.db.set_server_config(interaction.guild_id, serverlog_enabled=int(not current))
-        await self._refresh(interaction)
-
-    @discord.ui.button(label="Cerrar", emoji="❌", style=discord.ButtonStyle.danger, row=4)
-    async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="✅ Panel cerrado.", embed=None, view=None)
-        self.stop()
-
-
-class RoleSelectView(discord.ui.View):
-    def __init__(self, parent: GlobalConfigView, config_key: str, label: str):
-        super().__init__(timeout=60)
-        self.parent = parent
-        self.config_key = config_key
-        self.label = label
-
-    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Selecciona un rol", min_values=1, max_values=1)
-    async def select_role(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
-        role = select.values[0]
-        self.parent.cog.db.set_server_config(interaction.guild_id, **{self.config_key: role.id})
-        await self.parent._refresh(interaction)
-
-    @discord.ui.button(label="Volver", emoji="◀️", style=discord.ButtonStyle.secondary)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.parent._refresh(interaction)
-
-
-class ChannelSelectConfigView(discord.ui.View):
-    def __init__(self, parent: GlobalConfigView, config_key: str):
-        super().__init__(timeout=60)
-        self.parent = parent
-        self.config_key = config_key
-
-    @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="Selecciona un canal",
-                       channel_types=[discord.ChannelType.text], min_values=1, max_values=1)
-    async def select_ch(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        ch = select.values[0]
-        self.parent.cog.db.set_server_config(interaction.guild_id, **{self.config_key: ch.id})
-        await self.parent._refresh(interaction)
-
-    @discord.ui.button(label="Volver", emoji="◀️", style=discord.ButtonStyle.secondary)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.parent._refresh(interaction)
 
 
 # ── View para /serverlogs ─────────────────────────────────────────────────────

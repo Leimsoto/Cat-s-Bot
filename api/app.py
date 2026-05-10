@@ -86,6 +86,7 @@ def create_app(db=None, bot=None) -> FastAPI:
     app.include_router(router_legacy)  # /api/guild/{id} — compatibilidad
     app.include_router(embeds_send_router)  # /api/guilds/{id}/embeds/send
     app.include_router(moderation.router)
+    app.include_router(moderation.cases_router)  # /api/moderation/{id}/cases
     app.include_router(tickets.router)
     app.include_router(tags.router)
     app.include_router(reports.router)

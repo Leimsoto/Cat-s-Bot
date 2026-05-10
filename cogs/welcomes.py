@@ -309,78 +309,8 @@ class Welcomes(commands.Cog):
         except Exception as exc:
             logger.error("Error respondiendo DM de %s: %s", message.author, exc)
 
-    # ── Slash: configurar ────────────────────────────────────────────────────
-
-    setup_group = app_commands.Group(
-        name="configurar",
-        description="Configuraciones de módulos especiales",
-    )
-
-    @setup_group.command(name="bienvenidas", description="Configura el sistema de bienvenidas y tracker")
-    @app_commands.describe(canal="Canal donde se enviarán", nombre_embed_guardado="Nombre del embed guardado en /embed list")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def setup_welcome(
-        self,
-        interaction: discord.Interaction,
-        canal: discord.TextChannel,
-        nombre_embed_guardado: str,
-    ):
-        embed_row = self.db.get_saved_embed_by_name(interaction.guild_id, nombre_embed_guardado)
-        if not embed_row:
-            return await interaction.response.send_message(
-                f"❌ No se encontró ningún embed guardado con el nombre `{nombre_embed_guardado}`. "
-                "Usa `/embed create` primero.",
-                ephemeral=True,
-            )
-        self.db.set_welcome_config(
-            interaction.guild_id,
-            channel_id=canal.id,
-            embed_data=embed_row["embed_data"],
-            enabled=1,
-        )
-        await interaction.response.send_message(
-            f"✅ Bienvenidas activadas en {canal.mention} usando el diseño "
-            f"`{nombre_embed_guardado}`.\n*Variables: `{{user}}`, `{{server}}`, `{{count}}`.*",
-            ephemeral=True,
-        )
-
-    @setup_group.command(name="boosters", description="Configura el mensaje de agradecimiento a Boosters")
-    @app_commands.describe(
-        canal="Canal donde se enviarán",
-        gif_url="URL directa de un GIF animado",
-        nombre_embed_guardado="Nombre del embed guardado en /embed list",
-    )
-    @app_commands.checks.has_permissions(administrator=True)
-    async def setup_boosts(
-        self,
-        interaction: discord.Interaction,
-        canal: discord.TextChannel,
-        nombre_embed_guardado: str,
-        gif_url: str,
-    ):
-        embed_row = self.db.get_saved_embed_by_name(interaction.guild_id, nombre_embed_guardado)
-        if not embed_row:
-            return await interaction.response.send_message(
-                f"❌ No se encontró ningún embed guardado con el nombre `{nombre_embed_guardado}`.",
-                ephemeral=True,
-            )
-        if not gif_url.startswith("http"):
-            return await interaction.response.send_message(
-                "❌ La URL del GIF debe comenzar con http/https.", ephemeral=True
-            )
-        self.db.set_boost_config(
-            interaction.guild_id,
-            channel_id=canal.id,
-            embed_data=embed_row["embed_data"],
-            gif_url=gif_url,
-            enabled=1,
-        )
-        await interaction.response.send_message(
-            f"✅ Agradecimiento a boosters activado en {canal.mention} con el GIF proporcionado.",
-            ephemeral=True,
-        )
-
     # ── Slash: invites ───────────────────────────────────────────────────────
+    # (la configuración de welcome/boost/invites se gestiona desde el panel web)
 
     invite_group = app_commands.Group(
         name="invites",
@@ -433,17 +363,6 @@ class Welcomes(commands.Cog):
                 lines.append(f"{prefix} {name} — **{total}** invitaciones")
             embed.description = "\n".join(lines)
         await interaction.followup.send(embed=embed)
-
-    @invite_group.command(name="setup", description="Configurar el canal de log de invitaciones")
-    @app_commands.describe(canal="Canal donde se enviarán los logs de invitaciones")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def invite_setup(self, interaction: discord.Interaction, canal: discord.TextChannel):
-        self.db.set_invite_config(interaction.guild_id, channel_id=canal.id, enabled=1)
-        await interaction.response.send_message(
-            f"✅ Canal de log de invitaciones configurado en {canal.mention}.",
-            ephemeral=True,
-        )
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Welcomes(bot))

@@ -432,23 +432,6 @@ class VoiceGen(commands.Cog):
         description="Gestiona tu canal de voz generado",
     )
 
-    @vc_group.command(name="panel", description="Reenvía el panel de control al canal configurado")
-    async def vc_panel(self, interaction: discord.Interaction):
-        """Reenvía manualmente el panel del VC actual del usuario."""
-        if not await _assert_owner(interaction, self.db):
-            return
-        vc = interaction.user.voice.channel
-        sent = await self.send_panel(interaction.guild, vc, force=True)
-        if sent:
-            await interaction.response.send_message(
-                "Panel reenviado al canal configurado.", ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                "No se pudo enviar el panel. Revisa que haya un canal de panel configurado y permisos.",
-                ephemeral=True,
-            )
-
     @vc_group.command(name="lock", description="Bloquear el canal a nuevas conexiones")
     async def vc_lock(self, interaction: discord.Interaction):
         if not await _assert_owner(interaction, self.db): return

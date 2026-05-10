@@ -159,34 +159,6 @@ class Radio(commands.Cog):
         default_permissions=discord.Permissions(administrator=True),
     )
 
-    @radio_group.command(name="setup", description="Configura una estación de radio 24/7 en un canal de voz")
-    @app_commands.describe(
-        canal="Canal de voz donde vivirá el bot",
-        estado="Encender (True) o Apagar (False) la radio",
-    )
-    @app_commands.checks.has_permissions(administrator=True)
-    async def setup_radio(self, interaction: discord.Interaction, canal: discord.VoiceChannel, estado: bool):
-        await interaction.response.defer(ephemeral=True)
-        self.db.set_lofi_config(
-            interaction.guild_id,
-            channel_id=canal.id,
-            enabled=1 if estado else 0
-        )
-
-        if estado:
-            await interaction.followup.send(f"📻 **Radio** activada en {canal.mention}. El bot se conectará en breve.", ephemeral=True)
-            vc = interaction.guild.voice_client
-            if vc and vc.channel.id != canal.id:
-                await vc.move_to(canal)
-        else:
-            await interaction.followup.send("📻 **Radio** desactivada.", ephemeral=True)
-            vc = interaction.guild.voice_client
-            if vc:
-                try:
-                    await vc.disconnect()
-                except Exception:
-                    pass
-
     @radio_group.command(name="status", description="Consulta el estado y configuración actual de la radio")
     async def radio_status(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -213,12 +185,12 @@ class Radio(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         cfg = self.db.get_lofi_config(interaction.guild_id)
         if not cfg.get("enabled"):
-            return await interaction.followup.send("❌ La radio no está activada. Usa /radio setup primero.", ephemeral=True)
+            return await interaction.followup.send("❌ La radio no está activada. Actívala desde el panel web.", ephemeral=True)
 
         channel_id = cfg.get("channel_id")
         channel = interaction.guild.get_channel(channel_id) if channel_id else None
         if not channel or not isinstance(channel, discord.VoiceChannel):
-            return await interaction.followup.send("❌ Canal de voz no encontrado. Reconfigura con /radio setup.", ephemeral=True)
+            return await interaction.followup.send("❌ Canal de voz no encontrado. Reconfigura desde el panel web.", ephemeral=True)
 
         vc = interaction.guild.voice_client
         try:
@@ -317,7 +289,7 @@ class Radio(commands.Cog):
                     vc = inter.guild.voice_client
 
                     if not channel:
-                        await inter.followup.send("❌ Canal configurado no encontrado. Usa /radio setup primero.", ephemeral=True)
+                        await inter.followup.send("❌ Canal configurado no encontrado. Configúralo desde el panel web.", ephemeral=True)
                         try:
                             await inter.message.edit(view=None)
                         except Exception:
