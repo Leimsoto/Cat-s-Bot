@@ -87,16 +87,18 @@ export default function Radio({ selectedGuild }) {
   useEffect(() => { load(); }, [load]);
 
   const set = (k, v) => { setCfg(p => ({ ...p, [k]: v })); setDirty(true); };
-  const setId = (k) => (v) => set(k, v ? parseInt(v, 10) : null);
+  // IMPORTANTE: los IDs de Discord son de 64 bits y superan Number.MAX_SAFE_INTEGER.
+  // Deben mantenerse como strings para evitar pérdida de precisión en JS.
+  const setId = (k) => (v) => set(k, v ? String(v) : null);
 
   const save = async () => {
     setSaving(true);
     try {
-      // Solo enviamos columnas válidas de lofi_config para evitar errores
-      // silenciosos con campos espurios.
+      // channel_id se envía como string para preservar precisión de 64 bits;
+      // el backend lo convierte a int en Python donde no hay overflow.
       const payload = {
         enabled: cfg?.enabled ? 1 : 0,
-        channel_id: cfg?.channel_id ?? null,
+        channel_id: cfg?.channel_id ? String(cfg.channel_id) : null,
         stream_url: cfg?.stream_url ?? null,
         station_name: cfg?.station_name ?? null,
         volume: cfg?.volume ?? 50,

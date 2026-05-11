@@ -26,45 +26,74 @@ class Radio(commands.Cog):
     @tasks.loop(seconds=60)
     async def radio_manager(self):
         for guild in self.bot.guilds:
-            cfg = self.db.get_lofi_config(guild.id)
-            if not cfg.get("enabled"):
-                vc = guild.voice_client
-                if vc:
-                    try:
-                        await vc.disconnect()
-                    except Exception:
-                        pass
-                continue
-
-            channel_id = cfg.get("channel_id")
-            if not channel_id:
-                continue
-
-            channel = guild.get_channel(channel_id)
-            if not channel or not isinstance(channel, discord.VoiceChannel):
-                continue
-
-            vc = guild.voice_client
-
-            if not vc or not vc.is_connected():
-                try:
-                    vc = await channel.connect(reconnect=True)
-                except Exception:
-                    logger.exception(f"No se pudo conectar al canal de radio en {guild.name}")
-                    continue
-
-            if vc.channel.id != channel_id:
-                try:
-                    await vc.move_to(channel)
-                except Exception:
-                    continue
-
-            if not vc.is_playing():
-                self.start_playing(vc, channel, cfg)
+            await self._check_and_connect_guild(guild)
 
     @radio_manager.before_loop
     async def before_radio_manager(self):
         await self.bot.wait_until_ready()
+
+    async def _check_and_connect_guild(self, guild: discord.Guild):
+        """Lógica de conexión/reproducción para un guild específico.
+
+        Puede llamarse directamente desde el API (vía run_coroutine_threadsafe)
+        para aplicar cambios inmediatamente sin esperar el tick de 60 s.
+        """
+        cfg = self.db.get_lofi_config(guild.id)
+        logger.debug(
+            f"[radio] guild={guild.name} enabled={cfg.get('enabled')} "
+            f"channel_id={cfg.get('channel_id')}"
+        )
+
+        if not cfg.get("enabled"):
+            vc = guild.voice_client
+            if vc:
+                try:
+                    await vc.disconnect()
+                except Exception:
+                    pass
+            return
+
+        channel_id = cfg.get("channel_id")
+        if not channel_id:
+            logger.warning(f"[radio] {guild.name}: radio habilitada pero sin channel_id")
+            return
+
+        channel = guild.get_channel(int(channel_id))
+        if not channel or not isinstance(channel, discord.VoiceChannel):
+            logger.warning(
+                f"[radio] {guild.name}: channel {channel_id} no encontrado o no es VoiceChannel"
+            )
+            return
+
+        vc = guild.voice_client
+
+        if not vc or not vc.is_connected():
+            try:
+                logger.info(f"[radio] Conectando a {channel.name} en {guild.name}")
+                vc = await channel.connect(reconnect=True)
+            except Exception:
+                logger.exception(f"[radio] No se pudo conectar al canal en {guild.name}")
+                return
+
+        if vc.channel.id != channel.id:
+            try:
+                logger.info(f"[radio] Moviendo al canal {channel.name} en {guild.name}")
+                await vc.move_to(channel)
+            except Exception:
+                logger.exception(f"[radio] No se pudo mover al canal en {guild.name}")
+                return
+
+        if not vc.is_playing():
+            logger.info(f"[radio] Iniciando reproducción en {guild.name}")
+            self.start_playing(vc, channel, cfg)
+
+    async def connect_guild(self, guild_id: int):
+        """Punto de entrada para el API: conecta/actualiza radio en un guild concreto."""
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            logger.warning(f"[radio] connect_guild: guild {guild_id} no encontrado en cache")
+            return
+        await self._check_and_connect_guild(guild)
 
     def start_playing(self, vc, channel, cfg):
         stream_url = cfg.get("stream_url") or LOFI_STREAM_URL
