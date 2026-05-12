@@ -66,7 +66,9 @@ def create_app(db=None, bot=None) -> FastAPI:
     from api.auth import router as auth_router
     from api.routes import (
         autoroles,
+        autoresponses,
         channels,
+        custom_commands,
         embeds,
         giveaways,
         moderation,
@@ -97,6 +99,8 @@ def create_app(db=None, bot=None) -> FastAPI:
     app.include_router(embeds.router)
     app.include_router(channels.router)
     app.include_router(voice_gen.router)
+    app.include_router(autoresponses.router)
+    app.include_router(custom_commands.router)
 
     from api.routes.invites_route import router as invites_router
     from api.routes.suggestions_route import router as suggestions_router

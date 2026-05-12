@@ -139,6 +139,9 @@ class BotES(commands.Bot):
             "cogs.rolemenu",
             "cogs.translate",
             "cogs.autoresponses",
+            "cogs.custom_commands",
+            "cogs.logging",
+            "cogs.utilities",
         ]
         for cog in cogs:
             try:

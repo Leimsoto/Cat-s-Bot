@@ -18,6 +18,9 @@ import Logs from "../components/Logs";
 import VoiceGen from "../components/VoiceGen";
 import Welcome from "../components/Welcome";
 import Suggestions from "../components/Suggestions";
+import AutoMod from "../components/AutoMod";
+import AutoResponses from "../components/AutoResponses";
+import CustomCommands from "../components/CustomCommands";
 import { apiGet, apiPreload } from "../lib/api";
 import CatLogo from "../components/CatLogo";
 import { SaveBarProvider, useSaveBarState } from "../lib/SaveBarContext";
@@ -40,6 +43,9 @@ const PAGE_TITLES = {
   welcome: "Bienvenidas & Boosters",
   suggestions: "Sugerencias",
   invites: "Invitaciones",
+  automod: "Automoderación",
+  autoresponses: "Auto-Respuestas",
+  "custom-commands": "Comandos Personalizados",
 };
 
 const GUILD_KEY = "botES_guild_id";
@@ -316,6 +322,15 @@ export default function Dashboard() {
               )}
               {activePage === "suggestions" && (
                 <Suggestions selectedGuild={selectedGuild} />
+              )}
+              {activePage === "automod" && (
+                <AutoMod selectedGuild={selectedGuild} />
+              )}
+              {activePage === "autoresponses" && (
+                <AutoResponses selectedGuild={selectedGuild} />
+              )}
+              {activePage === "custom-commands" && (
+                <CustomCommands selectedGuild={selectedGuild} />
               )}
             </>
           )}

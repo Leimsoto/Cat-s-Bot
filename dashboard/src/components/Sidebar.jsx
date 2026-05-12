@@ -8,6 +8,7 @@ const NAV_SECTIONS = [
     items: [
       { id: "overview", icon: ICONS.overview, label: "Resumen" },
       { id: "moderation", icon: ICONS.moderation, label: "Moderación" },
+      { id: "automod", icon: ICONS.automod, label: "Automod" },
       { id: "logs", icon: ICONS.logs, label: "Registros" },
     ],
   },
@@ -20,6 +21,8 @@ const NAV_SECTIONS = [
       { id: "tickets", icon: ICONS.tickets, label: "Tickets" },
       { id: "levels", icon: ICONS.levels, label: "Niveles" },
       { id: "autoroles", icon: ICONS.autoroles, label: "Autoroles" },
+      { id: "autoresponses", icon: ICONS.autoresponses, label: "Auto-Respuestas" },
+      { id: "custom-commands", icon: ICONS.customCommands, label: "Comandos Custom" },
       { id: "giveaways", icon: ICONS.giveaways, label: "Sorteos" },
       { id: "tags", icon: ICONS.tags, label: "Tags" },
     ],

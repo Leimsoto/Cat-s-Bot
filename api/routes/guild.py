@@ -1013,3 +1013,82 @@ async def delete_schedule(
 ):
     db.delete_schedule(guild_id, name)
     return {"status": "ok"}
+
+
+# ── Server Logging ────────────────────────────────────────────────────────────
+
+@router.get("/{guild_id}/logging")
+async def get_logging_config(
+    guild_id: int,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
+):
+    """Configuración de server event logging."""
+    cfg = db.get_server_config(guild_id)
+    return {
+        "serverlog_channel": cfg.get("serverlog_channel"),
+        "serverlog_enabled": cfg.get("serverlog_enabled", 1),
+        "log_events": cfg.get("log_events"),
+    }
+
+
+@router.patch("/{guild_id}/logging")
+async def patch_logging_config(
+    guild_id: int,
+    request: Request,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
+):
+    """Actualizar configuración de server event logging."""
+    body = await request.json()
+    allowed = {"serverlog_channel", "serverlog_enabled", "log_events"}
+    filtered = {k: v for k, v in body.items() if k in allowed}
+    if not filtered:
+        return {"status": "noop", "detail": "Sin campos válidos"}
+    db.set_server_config(guild_id, **filtered)
+    return {"status": "ok", "updated": list(filtered.keys())}
+
+
+# ── Utilities (anti-raid, anti-alt, starboard) ────────────────────────────────
+
+@router.get("/{guild_id}/utilities")
+async def get_utilities_config(
+    guild_id: int,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
+):
+    """Configuración de utilidades: anti-raid, anti-alt y starboard."""
+    cfg = db.get_server_config(guild_id)
+    return {
+        "anti_raid_enabled": cfg.get("anti_raid_enabled", 0),
+        "anti_raid_threshold": cfg.get("anti_raid_threshold", 10),
+        "anti_raid_window": cfg.get("anti_raid_window", 30),
+        "anti_raid_lockdown_duration": cfg.get("anti_raid_lockdown_duration", 300),
+        "anti_alt_min_age": cfg.get("anti_alt_min_age", 7),
+        "anti_alt_action": cfg.get("anti_alt_action", "log"),
+        "anti_alt_role_id": cfg.get("anti_alt_role_id"),
+        "starboard_channel_id": cfg.get("starboard_channel_id"),
+        "starboard_threshold": cfg.get("starboard_threshold", 3),
+    }
+
+
+@router.patch("/{guild_id}/utilities")
+async def patch_utilities_config(
+    guild_id: int,
+    request: Request,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
+):
+    """Actualizar configuración de utilidades."""
+    body = await request.json()
+    allowed = {
+        "anti_raid_enabled", "anti_raid_threshold", "anti_raid_window",
+        "anti_raid_lockdown_duration", "anti_alt_min_age", "anti_alt_action",
+        "anti_alt_role_id", "starboard_channel_id", "starboard_threshold",
+    }
+    filtered = {k: v for k, v in body.items() if k in allowed}
+    if not filtered:
+        return {"status": "noop", "detail": "Sin campos válidos"}
+    db.set_server_config(guild_id, **filtered)
+    return {"status": "ok", "updated": list(filtered.keys())}
+

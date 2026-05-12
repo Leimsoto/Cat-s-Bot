@@ -75,6 +75,9 @@ export const ICONS = {
   schedules: "fa-clock",
   welcome: "fa-door-open",
   suggestions: "fa-lightbulb",
+  automod: "fa-shield-halved",
+  autoresponses: "fa-comments",
+  customCommands: "fa-terminal",
 
   // Otros
   lock: "fa-lock",

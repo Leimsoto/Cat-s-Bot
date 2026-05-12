@@ -75,6 +75,13 @@ VALID_SERVER_CONFIG_COLUMNS = frozenset(
         "serverlog_enabled",
         "starboard_channel_id",
         "starboard_threshold",
+        "anti_raid_enabled",
+        "anti_raid_threshold",
+        "anti_raid_window",
+        "anti_raid_lockdown_duration",
+        "anti_alt_min_age",
+        "anti_alt_action",
+        "anti_alt_role_id",
     }
 )
 
@@ -190,7 +197,14 @@ CREATE TABLE IF NOT EXISTS server_config (
     serverlog_enabled   INTEGER DEFAULT 1,
     mod_role_id         INTEGER,
     starboard_channel_id INTEGER,
-    starboard_threshold  INTEGER DEFAULT 3
+    starboard_threshold  INTEGER DEFAULT 3,
+    anti_raid_enabled    INTEGER DEFAULT 0,
+    anti_raid_threshold  INTEGER DEFAULT 10,
+    anti_raid_window     INTEGER DEFAULT 30,
+    anti_raid_lockdown_duration INTEGER DEFAULT 300,
+    anti_alt_min_age     INTEGER DEFAULT 7,
+    anti_alt_action      TEXT    DEFAULT 'log',
+    anti_alt_role_id     INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS ai_config (
@@ -615,7 +629,14 @@ CREATE TABLE IF NOT EXISTS server_config (
     serverlog_enabled   SMALLINT DEFAULT 1,
     mod_role_id         BIGINT,
     starboard_channel_id BIGINT,
-    starboard_threshold  INTEGER DEFAULT 3
+    starboard_threshold  INTEGER DEFAULT 3,
+    anti_raid_enabled    SMALLINT DEFAULT 0,
+    anti_raid_threshold  INTEGER DEFAULT 10,
+    anti_raid_window     INTEGER DEFAULT 30,
+    anti_raid_lockdown_duration INTEGER DEFAULT 300,
+    anti_alt_min_age     INTEGER DEFAULT 7,
+    anti_alt_action      TEXT    DEFAULT 'log',
+    anti_alt_role_id     BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS ai_config (
@@ -1038,7 +1059,14 @@ CREATE TABLE IF NOT EXISTS server_config (
     serverlog_enabled   TINYINT DEFAULT 1,
     mod_role_id         BIGINT,
     starboard_channel_id BIGINT,
-    starboard_threshold  INT DEFAULT 3
+    starboard_threshold  INT DEFAULT 3,
+    anti_raid_enabled    TINYINT DEFAULT 0,
+    anti_raid_threshold  INT DEFAULT 10,
+    anti_raid_window     INT DEFAULT 30,
+    anti_raid_lockdown_duration INT DEFAULT 300,
+    anti_alt_min_age     INT DEFAULT 7,
+    anti_alt_action      VARCHAR(16) DEFAULT 'log',
+    anti_alt_role_id     BIGINT
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS ai_config (
@@ -1808,6 +1836,41 @@ class DatabaseManager:
             11,
             "autoresponses: tabla de autorespuestas",
             "CREATE TABLE IF NOT EXISTS autoresponses (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER, trigger TEXT NOT NULL, response TEXT NOT NULL, created_at TEXT NOT NULL)",
+        ),
+        (
+            12,
+            "server_config: anti_raid_enabled",
+            "ALTER TABLE server_config ADD COLUMN anti_raid_enabled INTEGER DEFAULT 0",
+        ),
+        (
+            13,
+            "server_config: anti_raid_threshold",
+            "ALTER TABLE server_config ADD COLUMN anti_raid_threshold INTEGER DEFAULT 10",
+        ),
+        (
+            14,
+            "server_config: anti_raid_window",
+            "ALTER TABLE server_config ADD COLUMN anti_raid_window INTEGER DEFAULT 30",
+        ),
+        (
+            15,
+            "server_config: anti_raid_lockdown_duration",
+            "ALTER TABLE server_config ADD COLUMN anti_raid_lockdown_duration INTEGER DEFAULT 300",
+        ),
+        (
+            16,
+            "server_config: anti_alt_min_age",
+            "ALTER TABLE server_config ADD COLUMN anti_alt_min_age INTEGER DEFAULT 7",
+        ),
+        (
+            17,
+            "server_config: anti_alt_action",
+            "ALTER TABLE server_config ADD COLUMN anti_alt_action TEXT DEFAULT 'log'",
+        ),
+        (
+            18,
+            "server_config: anti_alt_role_id",
+            "ALTER TABLE server_config ADD COLUMN anti_alt_role_id INTEGER",
         ),
     ]
 
