@@ -563,6 +563,42 @@ async def patch_moderation_config(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# /api/guilds/{id}/automod — config automoderación
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/{guild_id}/automod")
+async def get_automod_config(
+    guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
+):
+    """Devuelve la configuración completa de automoderación."""
+    return db.get_automod_config(guild_id)
+
+
+@router.patch("/{guild_id}/automod")
+async def patch_automod_config(
+    guild_id: int,
+    body: dict,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
+):
+    enabled = body.get("enabled")
+    rules = body.get("rules")
+    db.set_automod_config(guild_id, enabled=enabled, rules=rules)
+    return {"status": "ok"}
+
+
+@router.get("/{guild_id}/automod/log")
+async def get_automod_log(
+    guild_id: int,
+    limit: int = 50,
+    db=Depends(get_db),
+    _user=Depends(require_guild_admin),
+):
+    return db.get_automod_log(guild_id, limit=min(limit, 200))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # /api/guilds/{id}/levels — config XP/niveles
 # ─────────────────────────────────────────────────────────────────────────────
 

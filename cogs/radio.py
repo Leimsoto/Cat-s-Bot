@@ -132,8 +132,7 @@ class Radio(commands.Cog):
                         name=f"🎶 {station_name} | Chill & Relax",
                     )
                 )
-                fut = asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
-                fut.result(timeout=5)
+                asyncio.create_task(coro)
             except Exception:
                 pass
         except Exception:

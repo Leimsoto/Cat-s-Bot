@@ -168,7 +168,7 @@ class TicketCloseReasonView(discord.ui.View):
 
 class TicketModal(discord.ui.Modal):
     def __init__(self, cog, category):
-        super().__init__(title="Ticket: {category['name']}")
+        super().__init__(title=f"Ticket: {category['name']}")
         self.cog = cog
         self.category = category
         self.questions = json.loads(category.get("questions", "[]"))
@@ -341,9 +341,9 @@ class Tickets(commands.Cog):
                     if embed.title: embed.title = embed.title.replace("{username}", interaction.user.name).replace("{number}", str(global_num))
                     if embed.description: embed.description = embed.description.replace("{username}", interaction.user.name).replace("{number}", str(global_num))
                 except Exception:
-                    embed = discord.Embed(title="Ticket #{global_num} - {category['name']}", color=discord.Color.blurple())
+                    embed = discord.Embed(title=f"Ticket #{global_num} - {category['name']}", color=discord.Color.blurple())
             else:
-                embed = discord.Embed(title="Ticket #{global_num} - {category['name']}", color=discord.Color.blurple())
+                embed = discord.Embed(title=f"Ticket #{global_num} - {category['name']}", color=discord.Color.blurple())
                 embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
             
             # Siempre añadir las respuestas como campos
