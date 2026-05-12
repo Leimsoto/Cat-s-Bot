@@ -3,6 +3,7 @@ import { apiGet, apiPatch, apiPost } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
+import { useSaveBar } from "../lib/SaveBarContext";
 
 export default function VoiceGen({ selectedGuild: guildId }) {
   const [cfg, setCfg] = useState(null);
@@ -18,6 +19,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
   const load = useCallback(async () => {
     if (!guildId) return;
     setLoading(true);
+    setDirty(false);
     try {
       const [cfgData, vcData] = await Promise.all([
         apiGet(`/api/guilds/${guildId}/voice-gen/config`),
@@ -81,6 +83,8 @@ export default function VoiceGen({ selectedGuild: guildId }) {
       showToast(e.message || "Error reenviando panel", "error");
     }
   };
+
+  useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
   if (loading)
     return (
@@ -509,22 +513,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
         </div>
       )}
 
-      {/* Save Bar */}
-      <div className={`save-bar-container ${dirty ? "visible" : ""}`}>
-        <div className="save-bar">
-          <span style={{ color: "var(--muted)", fontSize: "0.88rem" }}>
-            Cambios sin guardar
-          </span>
-          <div className="save-bar-actions">
-            <button className="btn-secondary" onClick={load} disabled={saving}>
-              Descartar
-            </button>
-            <button className="btn-primary btn-save" onClick={save} disabled={saving}>
-              {saving ? "Guardando…" : "Guardar"}
-            </button>
-          </div>
-        </div>
-      </div>
+
     </div>
   );
 }

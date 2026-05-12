@@ -3,6 +3,7 @@ import { apiGet, apiPatch } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
+import { useSaveBar } from "../lib/SaveBarContext";
 
 // Modelos válidos. Debe mantenerse sincronizado con CHAT_MODELS en cogs/ia.py.
 // Si añades/quitas modelos del cog, actualizar también esta lista.
@@ -27,6 +28,7 @@ export default function IAConfig({ selectedGuild: guildId }) {
   const load = useCallback(async () => {
     if (!guildId) return;
     setLoading(true);
+    setDirty(false);
     try {
       const [iaCfg, keyData] = await Promise.all([
         apiGet(`/api/guilds/${guildId}/ia`),
@@ -78,6 +80,8 @@ export default function IAConfig({ selectedGuild: guildId }) {
       setSaving(false);
     }
   };
+
+  useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
   if (loading)
     return (
@@ -365,21 +369,7 @@ export default function IAConfig({ selectedGuild: guildId }) {
         </div>
       </div>
 
-      <div className={`save-bar-container ${dirty ? "visible" : ""}`}>
-        <div className="save-bar">
-          <span style={{ color: "var(--muted)", fontSize: "0.88rem" }}>
-            Cambios sin guardar
-          </span>
-          <div className="save-bar-actions">
-            <button className="btn-secondary" onClick={load} disabled={saving}>
-              Descartar
-            </button>
-            <button className="btn-primary btn-save" onClick={save} disabled={saving}>
-              {saving ? "Guardando…" : "Guardar"}
-            </button>
-          </div>
-        </div>
-      </div>
+
     </div>
   );
 }

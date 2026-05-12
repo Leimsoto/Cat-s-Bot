@@ -73,7 +73,7 @@ export const ICONS = {
   embeds: "fa-palette",
   reports: "fa-flag",
   schedules: "fa-clock",
-  welcome: "fa-hand-wave",
+  welcome: "fa-door-open",
   suggestions: "fa-lightbulb",
 
   // Otros

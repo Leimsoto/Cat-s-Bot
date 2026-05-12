@@ -3,6 +3,7 @@ import { apiGet, apiPatch, apiPost, apiDelete, apiPut } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
+import { useSaveBar } from "../lib/SaveBarContext";
 
 const TEMPLATE_PRESETS = [
   { key: "panel_select", name: "Panel de selección", desc: "Embed mostrado en el canal del panel para elegir categoría" },
@@ -43,6 +44,7 @@ export default function Tickets({ selectedGuild: guildId }) {
   const load = useCallback(async () => {
     if (!guildId) return;
     setLoading(true);
+    setDirty(false);
     try {
       const [tData, tplData] = await Promise.all([
         apiGet(`/api/guilds/${guildId}/tickets`),
@@ -212,6 +214,8 @@ export default function Tickets({ selectedGuild: guildId }) {
       setSendingPanel(false);
     }
   };
+
+  useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
   if (loading)
     return (
@@ -440,21 +444,7 @@ export default function Tickets({ selectedGuild: guildId }) {
             </div>
           </div>
 
-          <div className={`save-bar-container ${dirty ? "visible" : ""}`}>
-            <div className="save-bar">
-              <span style={{ color: "var(--muted)", fontSize: "0.88rem" }}>
-                Cambios sin guardar
-              </span>
-              <div className="save-bar-actions">
-                <button className="btn-secondary" onClick={load} disabled={saving}>
-                  Descartar
-                </button>
-                <button className="btn-primary btn-save" onClick={save} disabled={saving}>
-                  {saving ? "Guardando…" : "Guardar"}
-                </button>
-              </div>
-            </div>
-          </div>
+
         </>
       )}
 

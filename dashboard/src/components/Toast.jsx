@@ -6,7 +6,8 @@ export default function Toast({ toast, onDismiss }) {
     if (!toast) return;
     const t = setTimeout(onDismiss, 3500);
     return () => clearTimeout(t);
-  }, [toast, onDismiss]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toast]);
 
   if (!toast) return null;
 

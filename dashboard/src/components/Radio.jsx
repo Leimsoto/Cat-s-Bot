@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiGet, apiPatch } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { SearchableSelect } from './ui';
+import { useSaveBar } from '../lib/SaveBarContext';
 
 // ─── Cassette decorativo ────────────────────────────────────────────────────
 function CassetteArt({ spinning = false, stationName = 'Lofi Radio 24/7' }) {
@@ -77,6 +78,7 @@ export default function Radio({ selectedGuild }) {
   const load = useCallback(async () => {
     if (!guildId) return;
     setLoading(true);
+    setDirty(false);
     try {
       const rData = await apiGet(`/api/guilds/${guildId}/radio/config`);
       setCfg(rData?.radio_config || {});
@@ -146,6 +148,8 @@ export default function Radio({ selectedGuild }) {
 
   const isPlaying = cfg?.enabled && cfg?.channel_id;
   const stationName = cfg?.station_name || 'Lofi Radio 24/7';
+
+  useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
   if (loading) return (
     <div className="dashboard-empty-state">
@@ -457,18 +461,7 @@ export default function Radio({ selectedGuild }) {
         )}
       </div>
 
-      {/* ── Save bar ── */}
-      <div className={`save-bar-container ${dirty ? 'visible' : ''}`}>
-        <div className="save-bar">
-          <span style={{color:'var(--muted)',fontSize:'0.88rem'}}>Cambios sin guardar</span>
-          <div className="save-bar-actions">
-            <button className="btn-secondary" onClick={load} disabled={saving}>Descartar</button>
-            <button className="btn-primary btn-save" onClick={save} disabled={saving}>
-              {saving ? 'Guardando…' : 'Guardar'}
-            </button>
-          </div>
-        </div>
-      </div>
+
     </div>
   );
 }

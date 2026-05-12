@@ -20,6 +20,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPatch } from "../lib/api";
 import SearchableSelect from "./ui/SearchableSelect";
 import { Icon } from "../lib/icons";
+import { useSaveBar } from "../lib/SaveBarContext";
 
 const TABS = [
   { id: "welcome", label: "Bienvenidas", icon: "welcome" },
@@ -40,6 +41,7 @@ export default function Welcome({ selectedGuild: guildId, onToast }) {
   const load = useCallback(async () => {
     if (!guildId) return;
     setLoading(true);
+    setDirty(false);
     try {
       const wData = await apiGet(`/api/guilds/${guildId}/welcome`);
       setData(wData);
@@ -79,6 +81,8 @@ export default function Welcome({ selectedGuild: guildId, onToast }) {
   const setW = (k, v) => { setData((p) => ({ ...p, welcome: { ...(p?.welcome || {}), [k]: v } })); setDirty(true); };
   const setB = (k, v) => { setData((p) => ({ ...p, boost: { ...(p?.boost || {}), [k]: v } })); setDirty(true); };
   const setI = (k, v) => { setData((p) => ({ ...p, invites: { ...(p?.invites || {}), [k]: v } })); setDirty(true); };
+
+  useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
   if (loading) return <div className="loader">Cargando bienvenidas…</div>;
 
@@ -288,17 +292,7 @@ export default function Welcome({ selectedGuild: guildId, onToast }) {
         </>
       )}
 
-      <div className={`save-bar-container ${dirty ? "visible" : ""}`}>
-        <div className="save-bar">
-          <span style={{ color: "var(--muted)", fontSize: "0.88rem" }}>Cambios sin guardar</span>
-          <div className="save-bar-actions">
-            <button className="btn-secondary" onClick={load} disabled={saving}>Descartar</button>
-            <button className="btn-primary btn-save" onClick={save} disabled={saving}>
-              {saving ? "Guardando…" : <><Icon name="save" /> Guardar</>}
-            </button>
-          </div>
-        </div>
-      </div>
+
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { apiGet, apiPatch } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
+import { useSaveBar } from "../lib/SaveBarContext";
 
 export default function Moderation({ selectedGuild: guildId }) {
   const [tab, setTab] = useState("config");
@@ -20,6 +21,7 @@ export default function Moderation({ selectedGuild: guildId }) {
   const load = useCallback(async () => {
     if (!guildId) return;
     setLoading(true);
+    setDirty(false);
     try {
       const modCfg = await apiGet(`/api/guilds/${guildId}/moderation`);
       setCfg(modCfg || {});
@@ -89,6 +91,8 @@ export default function Moderation({ selectedGuild: guildId }) {
     UNMUTE: "#10b981",
     UNBAN: "#10b981",
   };
+
+  useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
   if (loading)
     return (
@@ -338,29 +342,7 @@ export default function Moderation({ selectedGuild: guildId }) {
             </div>
           </div>
 
-          <div className={`save-bar-container ${dirty ? "visible" : ""}`}>
-            <div className="save-bar">
-              <span style={{ color: "var(--muted)", fontSize: "0.88rem" }}>
-                Cambios sin guardar
-              </span>
-              <div className="save-bar-actions">
-                <button
-                  className="btn-secondary"
-                  onClick={load}
-                  disabled={saving}
-                >
-                  Descartar
-                </button>
-                <button
-                  className="btn-primary btn-save"
-                  onClick={save}
-                  disabled={saving}
-                >
-                  {saving ? "Guardando…" : "Guardar"}
-                </button>
-              </div>
-            </div>
-          </div>
+
         </>
       )}
 

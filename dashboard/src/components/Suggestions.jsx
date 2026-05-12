@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPatch, apiDelete } from "../lib/api";
 import SearchableSelect from "./ui/SearchableSelect";
 import { Icon } from "../lib/icons";
+import { useSaveBar } from "../lib/SaveBarContext";
 
 const STATUS_LABEL = { PENDING: "Pendiente", ACCEPTED: "Aprobada", DENIED: "Denegada" };
 const STATUS_COLOR = { PENDING: "#f59e0b", ACCEPTED: "#10b981", DENIED: "#f43f5e" };
@@ -47,6 +48,7 @@ export default function Suggestions({ selectedGuild: guildId, onToast }) {
   const load = useCallback(async () => {
     if (!guildId) return;
     setLoading(true);
+    setDirty(false);
     try {
       const data = await apiGet(`/api/guilds/${guildId}/suggestions`);
       setCfg(data?.config || {});
@@ -153,6 +155,8 @@ export default function Suggestions({ selectedGuild: guildId, onToast }) {
       setBusyId(null);
     }
   };
+
+  useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
   if (loading) return <div className="loader">Cargando sugerencias…</div>;
 
@@ -302,17 +306,7 @@ export default function Suggestions({ selectedGuild: guildId, onToast }) {
             </div>
           </div>
 
-          <div className={`save-bar-container ${dirty ? "visible" : ""}`}>
-            <div className="save-bar">
-              <span style={{ color: "var(--muted)", fontSize: "0.88rem" }}>Cambios sin guardar</span>
-              <div className="save-bar-actions">
-                <button className="btn-secondary" onClick={load} disabled={saving}>Descartar</button>
-                <button className="btn-primary btn-save" onClick={save} disabled={saving}>
-                  {saving ? "Guardando…" : <><Icon name="save" /> Guardar</>}
-                </button>
-              </div>
-            </div>
-          </div>
+
         </>
       )}
 

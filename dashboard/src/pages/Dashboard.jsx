@@ -20,6 +20,7 @@ import Welcome from "../components/Welcome";
 import Suggestions from "../components/Suggestions";
 import { apiGet, apiPreload } from "../lib/api";
 import CatLogo from "../components/CatLogo";
+import { SaveBarProvider, useSaveBarState } from "../lib/SaveBarContext";
 
 const PAGE_TITLES = {
   overview: "Resumen del Servidor",
@@ -70,6 +71,101 @@ function LoadingScreen() {
         <span>Módulos</span>
       </div>
     </div>
+  );
+}
+
+const GUILD_KEY_TB = "botES_guild_id";
+
+function TopBar({
+  activePage,
+  mobileMenuOpen,
+  setMobileMenuOpen,
+  selectedGuild,
+  user,
+  requiresGuild,
+  setShowLanding,
+}) {
+  const { dirty, saving, onSave, onRevert } = useSaveBarState();
+
+  return (
+    <header className="topbar">
+      <div className="topbar-left">
+        <button
+          className="mobile-only"
+          onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+          style={{
+            background: "none",
+            border: "none",
+            color: "#DBDEE1",
+            fontSize: "1.4rem",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
+          <i className="fa-solid fa-bars" />
+        </button>
+        <div className="topbar-title-wrap">
+          <p className="topbar-eyebrow">Cats Bots — Panel</p>
+          <h1 style={{ margin: 0 }}>
+            {PAGE_TITLES[activePage] || "Panel"}
+          </h1>
+        </div>
+      </div>
+      <div className="topbar-actions">
+        {dirty && (
+          <div className="topbar-save-group">
+            <button
+              className="btn-secondary btn-topbar-revert"
+              onClick={onRevert}
+              disabled={saving}
+            >
+              <i className="fa-solid fa-rotate-left" />
+              <span>Descartar</span>
+            </button>
+            <button
+              className="btn-primary btn-topbar-save"
+              onClick={onSave}
+              disabled={saving}
+            >
+              <i className="fa-solid fa-floppy-disk" />
+              <span>{saving ? "Guardando…" : "Guardar"}</span>
+            </button>
+          </div>
+        )}
+        {selectedGuild && user && (
+          <div
+            className="mobile-guild-selector mobile-only"
+            onClick={() => {
+              localStorage.removeItem(GUILD_KEY_TB);
+              setShowLanding(true);
+            }}
+          >
+            <img
+              src={
+                user.allowedGuilds.find((g) => g.id === selectedGuild)
+                  ?.icon || "https://cdn.discordapp.com/embed/avatars/0.png"
+              }
+              alt=""
+            />
+            <span>
+              {user.allowedGuilds.find((g) => g.id === selectedGuild)
+                ?.name || "Servidor"}
+            </span>
+          </div>
+        )}
+        {requiresGuild && (
+          <button
+            className="btn-icon"
+            onClick={() => window.location.reload()}
+            title="Recargar datos"
+            aria-label="Recargar datos"
+          >
+            <i className="fa-solid fa-rotate-right" />
+          </button>
+        )}
+      </div>
+    </header>
   );
 }
 
@@ -144,6 +240,7 @@ export default function Dashboard() {
   if (loading) return <LoadingScreen />;
 
   return (
+    <SaveBarProvider>
     <div className="app-container">
       {showLanding && (
         <LandingOverlay
@@ -163,64 +260,15 @@ export default function Dashboard() {
       />
 
       <div className="main-content">
-        <header className="topbar">
-          <div className="topbar-left">
-            <button
-              className="mobile-only"
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              style={{
-                background: "none",
-                border: "none",
-                color: "#DBDEE1",
-                fontSize: "1.4rem",
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-              }}
-            >
-              <i className="fa-solid fa-bars" />
-            </button>
-            <div className="topbar-title-wrap">
-              <p className="topbar-eyebrow">Cats Bots — Panel</p>
-              <h1 style={{ margin: 0 }}>
-                {PAGE_TITLES[activePage] || "Panel"}
-              </h1>
-            </div>
-          </div>
-          <div className="topbar-actions">
-            {selectedGuild && user && (
-              <div
-                className="mobile-guild-selector mobile-only"
-                onClick={() => {
-                  localStorage.removeItem(GUILD_KEY);
-                  setShowLanding(true);
-                }}
-              >
-                <img
-                  src={
-                    user.allowedGuilds.find((g) => g.id === selectedGuild)
-                      ?.icon || "https://cdn.discordapp.com/embed/avatars/0.png"
-                  }
-                  alt=""
-                />
-                <span>
-                  {user.allowedGuilds.find((g) => g.id === selectedGuild)
-                    ?.name || "Servidor"}
-                </span>
-              </div>
-            )}
-            {requiresGuild && (
-              <button
-                className="btn-icon"
-                onClick={() => window.location.reload()}
-                title="Recargar datos"
-                aria-label="Recargar datos"
-              >
-                <i className="fa-solid fa-rotate-right" />
-              </button>
-            )}
-          </div>
-        </header>
+        <TopBar
+          activePage={activePage}
+          mobileMenuOpen={mobileMenuOpen}
+          setMobileMenuOpen={setMobileMenuOpen}
+          selectedGuild={selectedGuild}
+          user={user}
+          requiresGuild={requiresGuild}
+          setShowLanding={setShowLanding}
+        />
 
         <div className="content-area">
           {!showLanding && (!requiresGuild || selectedGuild) && (
@@ -296,5 +344,6 @@ export default function Dashboard() {
         </div>
       </div>
     </div>
+    </SaveBarProvider>
   );
 }

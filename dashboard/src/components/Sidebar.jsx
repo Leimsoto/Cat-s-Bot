@@ -30,7 +30,7 @@ const NAV_SECTIONS = [
       { id: "embeds", icon: ICONS.embeds, label: "Creador de Embeds" },
       { id: "reports", icon: ICONS.reports, label: "Reportes" },
       { id: "schedules", icon: ICONS.schedules, label: "Horarios" },
-      { id: "welcome", icon: ICONS.welcome, label: "Bienvenidas e Invitaciones" },
+      { id: "welcome", icon: ICONS.welcome, label: "Bienvenidas" },
       { id: "suggestions", icon: ICONS.suggestions, label: "Sugerencias" },
     ],
   },

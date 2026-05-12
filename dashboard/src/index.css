@@ -213,7 +213,8 @@ body {
 
 .app-container {
     display: flex;
-    min-height: 100vh;
+    height: 100vh;
+    overflow: hidden;
     gap: 0;
     padding: 0;
     margin: 0;
@@ -222,6 +223,7 @@ body {
 .main-content {
     flex: 1;
     min-width: 0;
+    height: 100vh;
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -260,8 +262,9 @@ body {
 
 .sidebar-brand-block {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
     min-width: 0;
 }
 
@@ -557,6 +560,46 @@ body {
     display: flex;
     align-items: center;
     gap: 8px;
+}
+
+/* Save/Discard group inside topbar */
+.topbar-save-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    animation: topbar-save-in 0.25s ease both;
+}
+
+@keyframes topbar-save-in {
+    from { opacity: 0; transform: translateX(12px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+
+.btn-topbar-save,
+.btn-topbar-revert {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    font-size: 0.82rem;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+}
+
+.btn-topbar-save {
+    box-shadow: 0 2px 8px rgba(168, 85, 247, 0.3);
+}
+
+.btn-topbar-revert span,
+.btn-topbar-save span {
+    display: inline;
+}
+
+@media (max-width: 600px) {
+    .btn-topbar-revert span,
+    .btn-topbar-save span {
+        display: none;
+    }
 }
 
 .topbar-eyebrow {
@@ -1418,25 +1461,22 @@ input:checked + .slider::before {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   13. SAVE BAR
+   13. SAVE BAR — integrated into topbar area
    ═══════════════════════════════════════════════════════════════════ */
 .save-bar-container {
-    position: fixed;
-    bottom: 24px;
-    left: calc(var(--sidebar-width) + 24px);
-    right: 24px;
-    z-index: 200;
+    position: sticky;
+    top: 0;
+    z-index: 60;
     pointer-events: none;
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.25s ease, opacity 0.2s ease;
     opacity: 0;
-    transform: translateY(12px);
-    transition:
-        opacity 0.2s ease,
-        transform 0.2s ease;
 }
 
 .save-bar-container.visible {
+    max-height: 56px;
     opacity: 1;
-    transform: translateY(0);
     pointer-events: auto;
 }
 
@@ -1445,20 +1485,31 @@ input:checked + .slider::before {
     align-items: center;
     justify-content: space-between;
     gap: 14px;
-    padding: 14px 20px;
-    background: var(--surface);
-    border: 1px solid var(--border-accent);
-    border-radius: var(--radius-xl);
-    box-shadow: var(--shadow-lg), var(--shadow-accent);
-    max-width: 600px;
-    margin: 0 auto;
+    padding: 10px 22px;
+    background: rgba(168, 85, 247, 0.08);
+    border-bottom: 1px solid var(--border-accent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
 }
 
 .save-bar-text,
 .save-bar-actions {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
+}
+
+.save-bar-actions .btn-primary,
+.save-bar-actions .btn-save {
+    padding: 6px 16px;
+    font-size: 0.82rem;
+    border-radius: var(--radius-sm);
+}
+
+.save-bar-actions .btn-secondary {
+    padding: 6px 14px;
+    font-size: 0.82rem;
+    border-radius: var(--radius-sm);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -3523,22 +3574,19 @@ pre.mono {
     }
 
     .save-bar-container {
-        left: 16px;
-        right: 16px;
-        bottom: 16px;
+        /* sticky top already set in base */
     }
 
     .save-bar {
-        flex-direction: column;
-        align-items: stretch;
-        max-width: none;
+        flex-direction: row;
+        padding: 8px 16px;
     }
 
     .save-bar-actions {
-        justify-content: stretch;
+        gap: 6px;
     }
     .save-bar-actions button {
-        flex: 1;
+        flex: none;
     }
 
     .landing-guild-grid {
