@@ -309,8 +309,61 @@ class Welcomes(commands.Cog):
         except Exception as exc:
             logger.error("Error respondiendo DM de %s: %s", message.author, exc)
 
+    # ── Slash: welcome config ────────────────────────────────────────────────
+
+    welcome_group = app_commands.Group(
+        name="welcome", description="Configurar el sistema de bienvenidas"
+    )
+
+    @welcome_group.command(name="channel", description="Establece el canal de bienvenidas")
+    @app_commands.describe(canal="Canal de texto para las bienvenidas")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def welcome_channel(self, interaction: discord.Interaction, canal: discord.TextChannel):
+        self.db.set_welcome_config(interaction.guild_id, channel_id=canal.id)
+        await interaction.response.send_message(
+            f"✅ Canal de bienvenidas establecido a {canal.mention}.", ephemeral=True
+        )
+
+    @welcome_group.command(name="toggle", description="Activa o desactiva las bienvenidas")
+    @app_commands.describe(activado="True para activar, False para desactivar")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def welcome_toggle(self, interaction: discord.Interaction, activado: bool):
+        self.db.set_welcome_config(interaction.guild_id, enabled=1 if activado else 0)
+        estado = "✅ Activadas" if activado else "❌ Desactivadas"
+        await interaction.response.send_message(f"{estado} las bienvenidas.", ephemeral=True)
+
+    @welcome_group.command(name="test", description="Envía un mensaje de prueba de bienvenida")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def welcome_test(self, interaction: discord.Interaction):
+        await self._send_welcome(interaction.user, None)
+        await interaction.response.send_message(
+            "✅ Mensaje de bienvenida de prueba enviado.", ephemeral=True
+        )
+
+    # ── Slash: boost config ──────────────────────────────────────────────────
+
+    boost_group = app_commands.Group(
+        name="boost", description="Configurar el agradecimiento a boosters"
+    )
+
+    @boost_group.command(name="channel", description="Establece el canal de agradecimiento a boosters")
+    @app_commands.describe(canal="Canal de texto para los boosteos")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def boost_channel(self, interaction: discord.Interaction, canal: discord.TextChannel):
+        self.db.set_boost_config(interaction.guild_id, channel_id=canal.id)
+        await interaction.response.send_message(
+            f"✅ Canal de boosters establecido a {canal.mention}.", ephemeral=True
+        )
+
+    @boost_group.command(name="toggle", description="Activa o desactiva los mensajes de boost")
+    @app_commands.describe(activado="True para activar, False para desactivar")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def boost_toggle(self, interaction: discord.Interaction, activado: bool):
+        self.db.set_boost_config(interaction.guild_id, enabled=1 if activado else 0)
+        estado = "✅ Activados" if activado else "❌ Desactivados"
+        await interaction.response.send_message(f"{estado} los mensajes de boost.", ephemeral=True)
+
     # ── Slash: invites ───────────────────────────────────────────────────────
-    # (la configuración de welcome/boost/invites se gestiona desde el panel web)
 
     invite_group = app_commands.Group(
         name="invites",

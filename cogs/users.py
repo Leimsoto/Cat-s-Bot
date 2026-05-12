@@ -356,6 +356,66 @@ class Users(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     # ─────────────────────────────────────────────────────────────────────────
+    # /nick
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="nick", description="Cambia el apodo/nickname de un usuario")
+    @app_commands.describe(
+        usuario="Usuario al que cambiar el apodo",
+        nickname="Nuevo apodo (déjalo vacío para resetear)",
+    )
+    async def nick(
+        self,
+        interaction: discord.Interaction,
+        usuario: discord.Member,
+        nickname: Optional[str] = None,
+    ):
+        if not await self._check_user_perms(interaction, need_roles=True):
+            return
+
+        if not interaction.guild.me.guild_permissions.manage_nicknames:
+            return await interaction.response.send_message(
+                "❌ No tengo permisos para gestionar apodos.", ephemeral=True
+            )
+
+        if usuario.top_role >= interaction.guild.me.top_role:
+            return await interaction.response.send_message(
+                "❌ No puedo cambiar el apodo a alguien con un rol igual o superior al mío.",
+                ephemeral=True,
+            )
+
+        if usuario.id != interaction.guild.owner_id and usuario.top_role >= interaction.user.top_role:
+            return await interaction.response.send_message(
+                "❌ No puedes cambiar el apodo a alguien con un rol igual o superior al tuyo.",
+                ephemeral=True,
+            )
+
+        try:
+            await usuario.edit(nick=nickname, reason=f"Nick cambiado por {interaction.user}")
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "❌ No tengo permisos para cambiar ese apodo.", ephemeral=True
+            )
+        except discord.HTTPException as exc:
+            return await interaction.response.send_message(
+                f"❌ Error cambiando el apodo: {exc}", ephemeral=True
+            )
+
+        if nickname:
+            embed = discord.Embed(
+                title="✅ Apodo cambiado",
+                description=f"El apodo de {usuario.mention} ahora es **{nickname}**.",
+                color=discord.Color.green(),
+            )
+        else:
+            embed = discord.Embed(
+                title="✅ Apodo reseteado",
+                description=f"El apodo de {usuario.mention} ha sido reseteado.",
+                color=discord.Color.green(),
+            )
+        await interaction.response.send_message(embed=embed)
+
+    # ─────────────────────────────────────────────────────────────────────────
     # /usermessage
     # ─────────────────────────────────────────────────────────────────────────
 

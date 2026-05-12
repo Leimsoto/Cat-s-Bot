@@ -5,6 +5,7 @@ Cog de moderación completo.
 
 Comandos slash:
   /ban         – Banear usuario
+  /tempban     – Banear temporalmente
   /unban       – Desbanear por ID
   /mute        – Silenciar con rol
   /unmute      – Dessilenciar
@@ -12,20 +13,15 @@ Comandos slash:
   /warn        – Advertir (con consecuencias automáticas)
   /warns       – Ver warns de un usuario
   /clearwarns  – Limpiar warns (admin)
+  /appeals list – Listar apelaciones
 
-  /modconfig view          – Ver configuración actual
-  /modconfig mute_role     – Configurar rol de mute
-  /modconfig log_channel   – Configurar canal de logs
-  /modconfig thresholds    – Umbrales de warns
-  /modconfig consequences  – Activar/desactivar consecuencias
-  /modconfig mute_duration – Duración del auto-mute
-  /modconfig warn_embed    – Personalizar embed de warn (modal)
+  La configuración se gestiona desde el Dashboard Web.
 """
 
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Dict, List, Optional
 
 import discord
 from discord import app_commands
@@ -364,6 +360,62 @@ class Moderation(commands.Cog):
     async def _before_check_mutes(self):
         await self.bot.wait_until_ready()
 
+    # ── Tarea: expiración de tempbans ──────────────────────────────────────────
+
+    @tasks.loop(minutes=1)
+    async def _check_tempbans(self):
+        """Revisa cada minuto si algún tempban ha expirado."""
+        try:
+            for record in self.db.get_active_tempbans():
+                try:
+                    guild = self.bot.get_guild(record["guild_id"])
+                    if not guild:
+                        self.db.clear_tempban(record["id"])
+                        continue
+
+                    start = datetime.fromisoformat(record["ban_start"])
+                    expiry = start + timedelta(seconds=record["ban_duration"])
+
+                    if datetime.now(timezone.utc) >= expiry:
+                        try:
+                            await guild.unban(
+                                discord.Object(id=record["user_id"]),
+                                reason="Tempban expirado automáticamente",
+                            )
+                        except discord.NotFound:
+                            pass
+                        except discord.Forbidden:
+                            logger.warning("Sin permisos para desbanear tempban expirado de %s en %s", record["user_id"], guild.name)
+                            continue
+                        except discord.HTTPException as exc:
+                            logger.warning("Error desbaneando tempban expirado %s en %s: %s", record["user_id"], guild.name, exc)
+                            continue
+
+                        self.db.clear_tempban(record["id"])
+                        self.db.log_action(
+                            guild.id, record["user_id"], self.bot.user.id,
+                            "AUTO_UNBAN", "Tempban expirado",
+                        )
+
+                        log_embed = discord.Embed(
+                            title="Tempban expirado",
+                            description=f"<@{record['user_id']}> fue desbaneado automáticamente.",
+                            color=discord.Color.green(),
+                            timestamp=datetime.now(timezone.utc),
+                        )
+                        log_embed.set_footer(text=f"ID: {record['user_id']}")
+                        await self._send_log(guild, log_embed)
+                        logger.info("Tempban expirado: %s en %s", record["user_id"], guild.name)
+
+                except Exception as exc:
+                    logger.error("Error al expirar tempban individual: %s", exc, exc_info=True)
+        except Exception as exc:
+            logger.error("Error en _check_tempbans: %s", exc, exc_info=True)
+
+    @_check_tempbans.before_loop
+    async def _before_check_tempbans(self):
+        await self.bot.wait_until_ready()
+
     # ─────────────────────────────────────────────────────────────────────────
     # /ban
     # ─────────────────────────────────────────────────────────────────────────
@@ -443,6 +495,104 @@ class Moderation(commands.Cog):
 
     @ban.error
     async def ban_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        await self._handle_perm_error(interaction, error)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # /tempban
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="tempban", description="Banea temporalmente a un usuario del servidor")
+    @app_commands.describe(
+        usuario="Usuario a banear temporalmente",
+        duracion="Duración: 30m, 2h, 1d, 1w",
+        razon="Razón del tempban",
+        eliminar_mensajes="Días de mensajes a eliminar (0-7, por defecto 0)",
+    )
+    async def tempban(
+        self,
+        interaction: discord.Interaction,
+        usuario: discord.Member,
+        duracion: str,
+        razon: str = "Sin razón especificada",
+        eliminar_mensajes: app_commands.Range[int, 0, 7] = 0,
+    ):
+        if not self._has_mod_perms(interaction, "ban_members"):
+            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+
+        err = self._can_moderate(interaction.user, usuario)
+        if err:
+            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+
+        secs = parse_duration(duracion)
+        if secs is None:
+            return await interaction.response.send_message(
+                "❌ Formato inválido. Ejemplos: `30m` · `2h` · `1d` · `1w`",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer()
+
+        self.db.set_tempban(
+            interaction.guild_id, usuario.id, interaction.user.id,
+            razon, secs,
+        )
+
+        view = AppealUserView(self.bot, interaction.guild_id, "TEMPBAN", razon)
+        await self._dm(
+            usuario,
+            discord.Embed(
+                title="Has sido baneado temporalmente",
+                description=f"Has sido baneado temporalmente de **{interaction.guild.name}**.",
+                color=discord.Color.dark_red(),
+            ).add_field(name="Duración", value=fmt_duration(secs))
+             .add_field(name="Razón", value=razon)
+             .add_field(name="Moderador", value=interaction.user.display_name),
+            view=view
+        )
+
+        try:
+            await usuario.ban(
+                reason=f"Tempban {fmt_duration(secs)} | {razon} | Mod: {interaction.user}",
+                delete_message_days=eliminar_mensajes,
+            )
+        except discord.Forbidden:
+            logger.warning("Sin permisos para tempbanear a %s en %s", usuario, interaction.guild)
+            return await interaction.followup.send(
+                "❌ No tengo permisos suficientes para banear a ese usuario.",
+                ephemeral=True,
+            )
+        except discord.HTTPException as exc:
+            logger.warning("Error tempbaneando a %s en %s: %s", usuario, interaction.guild, exc)
+            return await interaction.followup.send(
+                "❌ No se pudo completar el tempban. Inténtalo de nuevo.",
+                ephemeral=True,
+            )
+
+        self.db.log_action(
+            interaction.guild_id, usuario.id, interaction.user.id,
+            "TEMPBAN", razon, {"duration_secs": secs, "delete_days": eliminar_mensajes},
+        )
+
+        embed = discord.Embed(
+            title="Usuario baneado temporalmente",
+            description=f"**{usuario}** ha sido baneado por **{fmt_duration(secs)}**.",
+            color=discord.Color.dark_red(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_thumbnail(url=usuario.display_avatar.url)
+        embed.add_field(name="Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
+        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="⏱️ Duración", value=fmt_duration(secs), inline=True)
+        embed.add_field(name="Msgs eliminados", value=f"{eliminar_mensajes} día(s)", inline=True)
+        embed.add_field(name="Razón", value=razon, inline=False)
+        expiry = datetime.now(timezone.utc) + timedelta(seconds=secs)
+        embed.add_field(name="Expira", value=f"<t:{int(expiry.timestamp())}:R>", inline=False)
+
+        await interaction.followup.send(embed=embed)
+        await self._send_log(interaction.guild, embed)
+
+    @tempban.error
+    async def tempban_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         await self._handle_perm_error(interaction, error)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -965,6 +1115,100 @@ class Moderation(commands.Cog):
         await self._handle_perm_error(interaction, error)
 
     # ─────────────────────────────────────────────────────────────────────────
+    # /purge
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="purge", description="Elimina mensajes en masa del canal actual")
+    @app_commands.describe(
+        cantidad="Número de mensajes a eliminar (1-1000)",
+        usuario="Eliminar solo mensajes de este usuario (opcional)",
+    )
+    async def purge(
+        self,
+        interaction: discord.Interaction,
+        cantidad: app_commands.Range[int, 1, 1000],
+        usuario: Optional[discord.Member] = None,
+    ):
+        if not self._has_mod_perms(interaction, "manage_messages"):
+            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            if usuario:
+                def check(msg):
+                    return msg.author.id == usuario.id
+                deleted = await interaction.channel.purge(limit=cantidad, check=check, bulk=True)
+            else:
+                deleted = await interaction.channel.purge(limit=cantidad, bulk=True)
+        except discord.Forbidden:
+            return await interaction.followup.send("❌ No tengo permisos para eliminar mensajes.", ephemeral=True)
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(f"❌ Error al purgar: {exc}", ephemeral=True)
+
+        await interaction.followup.send(
+            f"✅ Eliminados **{len(deleted)}** mensajes.", ephemeral=True
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # /appeals
+    # ─────────────────────────────────────────────────────────────────────────
+
+    appeals_group = app_commands.Group(name="appeals", description="Gestión de apelaciones")
+
+    @appeals_group.command(name="list", description="Lista las apelaciones pendientes del servidor")
+    @app_commands.describe(
+        estado="Filtrar por estado: PENDING (por defecto), ACCEPTED, DENIED",
+    )
+    async def appeals_list(
+        self,
+        interaction: discord.Interaction,
+        estado: Optional[str] = None,
+    ):
+        if not self._has_mod_perms(interaction, "moderate_members"):
+            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+
+        status_filter = (estado or "PENDING").upper()
+        if status_filter not in ("PENDING", "ACCEPTED", "DENIED"):
+            return await interaction.response.send_message(
+                "❌ Estado inválido. Usa: `PENDING`, `ACCEPTED` o `DENIED`.",
+                ephemeral=True,
+            )
+
+        appeals = self.db.get_appeals_by_guild(interaction.guild_id, status_filter)
+
+        if not appeals:
+            return await interaction.response.send_message(
+                f"📭 No hay apelaciones con estado **{status_filter}**.",
+                ephemeral=True,
+            )
+
+        embed = discord.Embed(
+            title=f"Apelaciones • {status_filter}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text=f"Total: {len(appeals)}")
+
+        for a in appeals[:10]:
+            user = self.bot.get_user(a["user_id"])
+            user_name = f"{user}" if user else f"`{a['user_id']}`"
+            embed.add_field(
+                name=f"#{a['id']} — {user_name}",
+                value=(
+                    f"**Sanción:** {a['action_type']}\n"
+                    f"**Estado:** {a['status']}\n"
+                    f"**Razón:** {a['reason'][:100]}\n"
+                    f"**Creada:** <t:{int(datetime.fromisoformat(a['created_at']).timestamp())}:R>"
+                ),
+                inline=False,
+            )
+
+        if len(appeals) > 10:
+            embed.description = f"Mostrando las 10 más recientes de {len(appeals)} totales."
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ─────────────────────────────────────────────────────────────────────────
     # /modconfig  — ELIMINADO
     # La configuración de moderación se gestiona desde el Dashboard Web.
     # ─────────────────────────────────────────────────────────────────────────
@@ -1105,8 +1349,9 @@ class AppealAcceptModal(discord.ui.Modal, title="Aceptar Apelación"):
         auto_text = self.auto_remove.value.strip().upper()
         if auto_text == "SI" and guild:
             try:
-                if self.action_type == "BAN":
+                if self.action_type in ("BAN", "TEMPBAN"):
                     await guild.unban(discord.Object(id=self.user_id), reason=f"Apelación Aceptada por {interaction.user}")
+                    db.clear_tempbans_for_user(self.user_id, guild.id)
                 elif self.action_type == "MUTE":
                     mem = guild.get_member(self.user_id)
                     cfg = db.get_config(guild.id)

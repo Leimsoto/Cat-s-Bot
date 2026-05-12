@@ -57,7 +57,7 @@ class BotES(commands.Bot):
 
     def __init__(self):
         super().__init__(
-            command_prefix=[],  # Sin uso real; sólo slash commands
+            command_prefix="!",  # Solo para !help
             intents=intents,
             help_command=None,
         )
@@ -128,12 +128,17 @@ class BotES(commands.Bot):
             "cogs.autoroles",
             "cogs.radio",
             "cogs.tickets",
-            # ── Nuevos módulos ──
             "cogs.tags",
             "cogs.reports",
             "cogs.scheduler",
             "cogs.levels",
             "cogs.voice_gen",
+            "cogs.help",
+            "cogs.automod",
+            "cogs.admin",
+            "cogs.rolemenu",
+            "cogs.translate",
+            "cogs.autoresponses",
         ]
         for cog in cogs:
             try:
@@ -150,7 +155,7 @@ class BotES(commands.Bot):
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
-                name="el servidor 🇪🇸",
+                name="Testing With ArielTeen and Yessid",
             )
         )
 

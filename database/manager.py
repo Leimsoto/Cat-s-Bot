@@ -73,6 +73,8 @@ VALID_SERVER_CONFIG_COLUMNS = frozenset(
         "users_role_id",
         "modlog_enabled",
         "serverlog_enabled",
+        "starboard_channel_id",
+        "starboard_threshold",
     }
 )
 
@@ -176,17 +178,19 @@ CREATE TABLE IF NOT EXISTS channel_config (
 );
 
 CREATE TABLE IF NOT EXISTS server_config (
-    guild_id          INTEGER PRIMARY KEY,
-    staff_role_id     INTEGER,
-    modlog_channel    INTEGER,
-    serverlog_channel INTEGER,
-    log_events        TEXT,
-    embed_role_id     INTEGER,
-    channels_role_id  INTEGER,
-    users_role_id     INTEGER,
-    modlog_enabled    INTEGER DEFAULT 1,
-    serverlog_enabled INTEGER DEFAULT 1,
-    mod_role_id       INTEGER
+    guild_id            INTEGER PRIMARY KEY,
+    staff_role_id       INTEGER,
+    modlog_channel      INTEGER,
+    serverlog_channel   INTEGER,
+    log_events          TEXT,
+    embed_role_id       INTEGER,
+    channels_role_id    INTEGER,
+    users_role_id       INTEGER,
+    modlog_enabled      INTEGER DEFAULT 1,
+    serverlog_enabled   INTEGER DEFAULT 1,
+    mod_role_id         INTEGER,
+    starboard_channel_id INTEGER,
+    starboard_threshold  INTEGER DEFAULT 3
 );
 
 CREATE TABLE IF NOT EXISTS ai_config (
@@ -229,6 +233,26 @@ CREATE TABLE IF NOT EXISTS appeals (
     appeal_text  TEXT,
     status       TEXT DEFAULT 'PENDING',
     created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS autoresponses (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id      INTEGER NOT NULL,
+    channel_id    INTEGER,
+    trigger       TEXT NOT NULL,
+    response      TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tempbans (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id      INTEGER NOT NULL,
+    user_id       INTEGER NOT NULL,
+    moderator_id  INTEGER NOT NULL,
+    reason        TEXT DEFAULT 'Sin razón especificada',
+    ban_start     TEXT NOT NULL,
+    ban_duration  INTEGER NOT NULL,
+    created_at    TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS saved_embeds (
@@ -512,6 +536,24 @@ CREATE TABLE IF NOT EXISTS cc_variables (
 CREATE INDEX IF NOT EXISTS idx_cc_guild  ON custom_commands(guild_id);
 CREATE INDEX IF NOT EXISTS idx_cc_trigger ON custom_commands(guild_id, trigger_type, enabled);
 CREATE INDEX IF NOT EXISTS idx_ccv_guild ON cc_variables(guild_id);
+
+CREATE TABLE IF NOT EXISTS automod_config (
+    guild_id     INTEGER PRIMARY KEY,
+    enabled      INTEGER DEFAULT 1,
+    rules        TEXT    DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS automod_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id     INTEGER NOT NULL,
+    rule         TEXT    NOT NULL,
+    user_id      INTEGER NOT NULL,
+    content      TEXT,
+    action_taken TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_aml_guild ON automod_log(guild_id, created_at);
 """
 
 _SCHEMA_POSTGRESQL = """
@@ -561,17 +603,19 @@ CREATE TABLE IF NOT EXISTS channel_config (
 );
 
 CREATE TABLE IF NOT EXISTS server_config (
-    guild_id          BIGINT PRIMARY KEY,
-    staff_role_id     BIGINT,
-    modlog_channel    BIGINT,
-    serverlog_channel BIGINT,
-    log_events        TEXT,
-    embed_role_id     BIGINT,
-    channels_role_id  BIGINT,
-    users_role_id     BIGINT,
-    modlog_enabled    SMALLINT DEFAULT 1,
-    serverlog_enabled SMALLINT DEFAULT 1,
-    mod_role_id       BIGINT
+    guild_id            BIGINT PRIMARY KEY,
+    staff_role_id       BIGINT,
+    modlog_channel      BIGINT,
+    serverlog_channel   BIGINT,
+    log_events          TEXT,
+    embed_role_id       BIGINT,
+    channels_role_id    BIGINT,
+    users_role_id       BIGINT,
+    modlog_enabled      SMALLINT DEFAULT 1,
+    serverlog_enabled   SMALLINT DEFAULT 1,
+    mod_role_id         BIGINT,
+    starboard_channel_id BIGINT,
+    starboard_threshold  INTEGER DEFAULT 3
 );
 
 CREATE TABLE IF NOT EXISTS ai_config (
@@ -613,6 +657,26 @@ CREATE TABLE IF NOT EXISTS appeals (
     appeal_text  TEXT,
     status       TEXT DEFAULT 'PENDING',
     created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS autoresponses (
+    id            BIGSERIAL PRIMARY KEY,
+    guild_id      BIGINT NOT NULL,
+    channel_id    BIGINT,
+    trigger       TEXT NOT NULL,
+    response      TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tempbans (
+    id            BIGSERIAL PRIMARY KEY,
+    guild_id      BIGINT NOT NULL,
+    user_id       BIGINT NOT NULL,
+    moderator_id  BIGINT NOT NULL,
+    reason        TEXT DEFAULT 'Sin razón especificada',
+    ban_start     TEXT NOT NULL,
+    ban_duration  INTEGER NOT NULL,
+    created_at    TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS saved_embeds (
@@ -891,6 +955,24 @@ CREATE TABLE IF NOT EXISTS cc_variables (
 CREATE INDEX IF NOT EXISTS idx_cc_guild  ON custom_commands(guild_id);
 CREATE INDEX IF NOT EXISTS idx_cc_trigger ON custom_commands(guild_id, trigger_type, enabled);
 CREATE INDEX IF NOT EXISTS idx_ccv_guild ON cc_variables(guild_id);
+
+CREATE TABLE IF NOT EXISTS automod_config (
+    guild_id     BIGINT PRIMARY KEY,
+    enabled      SMALLINT DEFAULT 1,
+    rules        TEXT    DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS automod_log (
+    id           BIGSERIAL PRIMARY KEY,
+    guild_id     BIGINT NOT NULL,
+    rule         TEXT    NOT NULL,
+    user_id      BIGINT NOT NULL,
+    content      TEXT,
+    action_taken TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_aml_guild ON automod_log(guild_id, created_at);
 """
 
 _SCHEMA_MARIADB = """
@@ -944,17 +1026,19 @@ CREATE TABLE IF NOT EXISTS channel_config (
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS server_config (
-    guild_id          BIGINT PRIMARY KEY,
-    staff_role_id     BIGINT,
-    modlog_channel    BIGINT,
-    serverlog_channel BIGINT,
-    log_events        TEXT,
-    embed_role_id     BIGINT,
-    channels_role_id  BIGINT,
-    users_role_id     BIGINT,
-    modlog_enabled    TINYINT DEFAULT 1,
-    serverlog_enabled TINYINT DEFAULT 1,
-    mod_role_id       BIGINT
+    guild_id            BIGINT PRIMARY KEY,
+    staff_role_id       BIGINT,
+    modlog_channel      BIGINT,
+    serverlog_channel   BIGINT,
+    log_events          TEXT,
+    embed_role_id       BIGINT,
+    channels_role_id    BIGINT,
+    users_role_id       BIGINT,
+    modlog_enabled      TINYINT DEFAULT 1,
+    serverlog_enabled   TINYINT DEFAULT 1,
+    mod_role_id         BIGINT,
+    starboard_channel_id BIGINT,
+    starboard_threshold  INT DEFAULT 3
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS ai_config (
@@ -998,6 +1082,28 @@ CREATE TABLE IF NOT EXISTS appeals (
     appeal_text  TEXT,
     status       VARCHAR(20) DEFAULT 'PENDING',
     created_at   VARCHAR(50) NOT NULL,
+    PRIMARY KEY (id)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS autoresponses (
+    id            BIGINT NOT NULL AUTO_INCREMENT,
+    guild_id      BIGINT NOT NULL,
+    channel_id    BIGINT,
+    trigger       TEXT NOT NULL,
+    response      TEXT NOT NULL,
+    created_at    VARCHAR(50) NOT NULL,
+    PRIMARY KEY (id)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS tempbans (
+    id            BIGINT NOT NULL AUTO_INCREMENT,
+    guild_id      BIGINT NOT NULL,
+    user_id       BIGINT NOT NULL,
+    moderator_id  BIGINT NOT NULL,
+    reason        TEXT DEFAULT 'Sin razón especificada',
+    ban_start     VARCHAR(50) NOT NULL,
+    ban_duration  INT NOT NULL,
+    created_at    VARCHAR(50) NOT NULL,
     PRIMARY KEY (id)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
@@ -1272,6 +1378,24 @@ CREATE TABLE IF NOT EXISTS cc_variables (
     scope     VARCHAR(100) DEFAULT 'guild',
     PRIMARY KEY (id),
     UNIQUE KEY unique_ccv (guild_id, `key`, scope)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS automod_config (
+    guild_id     BIGINT PRIMARY KEY,
+    enabled      TINYINT DEFAULT 1,
+    rules        TEXT
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS automod_log (
+    id           BIGINT NOT NULL AUTO_INCREMENT,
+    guild_id     BIGINT NOT NULL,
+    rule         VARCHAR(50) NOT NULL,
+    user_id      BIGINT NOT NULL,
+    content      TEXT,
+    action_taken VARCHAR(50) NOT NULL,
+    created_at   VARCHAR(50) NOT NULL,
+    PRIMARY KEY (id),
+    INDEX idx_aml_guild (guild_id, created_at)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 """
 
@@ -1669,6 +1793,21 @@ class DatabaseManager:
             8,
             "server_config: server_log_enabled",
             "ALTER TABLE server_config ADD COLUMN server_log_enabled INTEGER DEFAULT 0",
+        ),
+        (
+            9,
+            "server_config: starboard_channel_id",
+            "ALTER TABLE server_config ADD COLUMN starboard_channel_id INTEGER",
+        ),
+        (
+            10,
+            "server_config: starboard_threshold",
+            "ALTER TABLE server_config ADD COLUMN starboard_threshold INTEGER DEFAULT 3",
+        ),
+        (
+            11,
+            "autoresponses: tabla de autorespuestas",
+            "CREATE TABLE IF NOT EXISTS autoresponses (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER, trigger TEXT NOT NULL, response TEXT NOT NULL, created_at TEXT NOT NULL)",
         ),
     ]
 
@@ -2356,6 +2495,80 @@ class DatabaseManager:
 
     def update_appeal_status(self, appeal_id: int, status: str) -> None:
         self._execute("UPDATE appeals SET status = ? WHERE id = ?", (status, appeal_id))
+
+    def get_appeals_by_guild(
+        self, guild_id: int, status: Optional[str] = None
+    ) -> List[Dict]:
+        if status:
+            return self._fetchall(
+                "SELECT * FROM appeals WHERE guild_id = ? AND status = ? ORDER BY created_at DESC",
+                (guild_id, status),
+            )
+        return self._fetchall(
+            "SELECT * FROM appeals WHERE guild_id = ? ORDER BY created_at DESC",
+            (guild_id,),
+        )
+
+    # ── Tempbans ──────────────────────────────────────────────────────────────
+
+    def set_tempban(
+        self, guild_id: int, user_id: int, moderator_id: int,
+        reason: str, duration_secs: int,
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        self._execute(
+            "INSERT INTO tempbans (guild_id, user_id, moderator_id, reason, ban_start, ban_duration, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (guild_id, user_id, moderator_id, reason, now, duration_secs, now),
+        )
+        row = self._fetchone(
+            "SELECT id FROM tempbans WHERE guild_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
+            (guild_id, user_id),
+        )
+        return row["id"] if row else 0
+
+    def get_active_tempbans(self) -> List[Dict]:
+        return self._fetchall(
+            "SELECT * FROM tempbans"
+        )
+
+    def clear_tempban(self, tempban_id: int) -> None:
+        self._execute("DELETE FROM tempbans WHERE id = ?", (tempban_id,))
+
+    def clear_tempbans_for_user(self, user_id: int, guild_id: int) -> None:
+        self._execute(
+            "DELETE FROM tempbans WHERE user_id = ? AND guild_id = ?",
+            (user_id, guild_id),
+        )
+
+    # ── Auto-Responses ────────────────────────────────────────────────────────
+
+    def add_autoresponse(self, guild_id: int, channel_id: Optional[int], trigger: str, response: str) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        self._execute(
+            "INSERT INTO autoresponses (guild_id, channel_id, trigger, response, created_at) VALUES (?, ?, ?, ?, ?)",
+            (guild_id, channel_id, trigger, response, now),
+        )
+        row = self._fetchone(
+            "SELECT id FROM autoresponses WHERE guild_id = ? ORDER BY id DESC LIMIT 1",
+            (guild_id,),
+        )
+        return row["id"] if row else 0
+
+    def remove_autoresponse(self, response_id: int) -> None:
+        self._execute("DELETE FROM autoresponses WHERE id = ?", (response_id,))
+
+    def get_autoresponses(self, guild_id: int) -> List[Dict]:
+        return self._fetchall(
+            "SELECT * FROM autoresponses WHERE guild_id = ? ORDER BY created_at DESC",
+            (guild_id,),
+        )
+
+    def get_autoresponses_by_channel(self, guild_id: int, channel_id: int) -> List[Dict]:
+        return self._fetchall(
+            "SELECT * FROM autoresponses WHERE guild_id = ? AND (channel_id IS NULL OR channel_id = ?) ORDER BY created_at DESC",
+            (guild_id, channel_id),
+        )
 
     # ── Configuración Genérica ────────────────────────────────────────────────
     def _upsert_config(self, table: str, guild_id: int, **kwargs):
@@ -3572,6 +3785,95 @@ class DatabaseManager:
             "GROUP BY inviter_id ORDER BY total DESC LIMIT ?",
             (guild_id, limit),
         )
+
+    # ── AutoMod ───────────────────────────────────────────────────────────────
+
+    DEFAULT_AUTOMOD_RULES: Dict = {
+        "spam": {
+            "enabled": False,
+            "warn_threshold": 5, "warn_timeframe": 10,
+            "mute_threshold": 10, "mute_timeframe": 30, "mute_duration": 3600,
+            "kick_threshold": 15, "kick_timeframe": 60,
+            "ban_threshold": 20, "ban_timeframe": 60,
+        },
+        "mentions": {
+            "enabled": False,
+            "max_mentions": 5,
+            "action": "warn",
+        },
+        "caps": {
+            "enabled": False,
+            "min_length": 15,
+            "min_percent": 70,
+            "action": "warn",
+        },
+        "links": {
+            "enabled": False,
+            "action": "warn",
+            "whitelist": [],
+            "block_invites": True,
+        },
+        "banned_words": {
+            "enabled": False,
+            "words": [],
+            "action": "warn",
+        },
+        "ignored": {
+            "channels": [],
+            "roles": [],
+        },
+    }
+
+    def get_automod_config(self, guild_id: int) -> Dict:
+        row = self._fetchone(
+            "SELECT * FROM automod_config WHERE guild_id = ?", (guild_id,)
+        )
+        if row:
+            rules = json.loads(row.get("rules") or "{}")
+            for key, defaults in self.DEFAULT_AUTOMOD_RULES.items():
+                rules.setdefault(key, defaults.copy())
+            return {
+                "guild_id": guild_id,
+                "enabled": int(row.get("enabled", 1) or 0),
+                "rules": rules,
+            }
+        return {
+            "guild_id": guild_id,
+            "enabled": 1,
+            "rules": {k: v.copy() for k, v in self.DEFAULT_AUTOMOD_RULES.items()},
+        }
+
+    def set_automod_config(self, guild_id: int, enabled: int = None, rules: Dict = None) -> None:
+        current = self.get_automod_config(guild_id)
+        if enabled is not None:
+            current["enabled"] = int(enabled)
+        if rules is not None:
+            for key, defaults in self.DEFAULT_AUTOMOD_RULES.items():
+                rule = rules.get(key, {})
+                merged = defaults.copy()
+                merged.update(rule)
+                current["rules"][key] = merged
+        self._upsert_config("automod_config", guild_id,
+                            enabled=current["enabled"],
+                            rules=json.dumps(current["rules"], ensure_ascii=False))
+
+    def log_automod_action(self, guild_id: int, rule: str, user_id: int,
+                           content: str, action_taken: str) -> None:
+        from datetime import datetime, timezone
+        self._execute(
+            "INSERT INTO automod_log (guild_id, rule, user_id, content, action_taken, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (guild_id, rule, user_id, content[:500] if content else None,
+             action_taken, datetime.now(timezone.utc).isoformat()),
+        )
+
+    def get_automod_log(self, guild_id: int, limit: int = 50) -> List[Dict]:
+        return self._fetchall(
+            "SELECT * FROM automod_log WHERE guild_id = ? ORDER BY created_at DESC LIMIT ?",
+            (guild_id, limit),
+        )
+
+    # ── Suggestions ────────────────────────────────────────────────────────────
 
     def get_all_suggestions(self, guild_id: int, status: str = None) -> List[Dict]:
         """Devuelve sugerencias de un servidor, opcionalmente filtradas por estado."""
