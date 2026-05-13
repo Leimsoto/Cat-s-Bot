@@ -29,7 +29,7 @@
 ## `⚡` Descripción
 
 > **Cat's Bot** es un bot **multifuncional** de código abierto desarrollado exclusivamente para la comunidad de **Las Tortuguitas de Ezku**.
-> Integra de forma fluida herramientas de moderación, música de alta calidad, entretenimiento y diversas utilidades en un solo sistema altamente estable y disponible las 24 horas del día.
+> Integra de forma fluida herramientas de moderación, raido global funcional, entretenimiento y diversas utilidades en un solo sistema altamente estable y disponible las 24 horas del día.
 
 <br/>
 
