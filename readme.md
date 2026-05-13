@@ -1,6 +1,6 @@
 <div align="center">
 
-![header](https://capsule-render.vercel.app/api?type=venom&color=0d001a,7c3aed,ec4899&height=250&section=header&text=CAT'S%20BOT&fontSize=70&fontColor=ffffff&fontAlignY=55&animation=fadeIn&stroke=a855f7&strokeWidth=2)
+# Cat's Bot
 
 <br/>
 
