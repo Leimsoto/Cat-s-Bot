@@ -37,18 +37,18 @@
 
 <br/>
 
-## `🧩` Módulos del Sistema
+## `🛠️` Arquitectura y Tecnologías
+
+El sistema de **Cat's Bot** está construido con una arquitectura moderna que divide el motor del bot y su panel web de administración:
 
 <div align="center">
 
-| &nbsp; | Módulo | Descripción |
-|:---:|:---|:---|
-| 🛡️ | **Moderación** | Sistemas avanzados de ban, kick, mute, warn, logs y gestión de roles. |
-| 🎵 | **Música** | Reproductor de alta fidelidad con colas, pausas, loops y filtros. |
-| 🎉 | **Bienvenidas** | Mensajes de entrada personalizados e interactivos para nuevos miembros. |
-| 🎮 | **Entretenimiento** | Minijuegos, trivia, generación de memes y comandos sociales. |
-| 📊 | **Estadísticas** | Sistema de niveles, perfiles de usuario y auditoría del servidor. |
-| ⚙️ | **Utilidades** | Creación de encuestas, recordatorios, tickets y herramientas generales. |
+| Componente | Tecnología | Descripción |
+|:---|:---:|:---|
+| **Motor del Bot** | `discord.py` | Core del bot en Python, utilizando `yt-dlp` para audio y `google-genai` para integraciones de IA. |
+| **API Backend** | `FastAPI` | API REST asíncrona que conecta la base de datos, el bot en tiempo real y el dashboard web de forma segura (OAuth2/JWT). |
+| **Dashboard Web**| `React + Vite` | Interfaz gráfica moderna y reactiva para gestionar las configuraciones del bot directamente desde el navegador. |
+| **Base de Datos**| `SQLite` | Almacenamiento local estructurado para las configuraciones de servidores, perfiles de usuarios y auditoría. |
 
 </div>
 
