@@ -4,7 +4,7 @@
 
 <br/>
 
-![Typing SVG](https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=700&size=18&pause=1000&color=A855F7&center=true&vCenter=true&width=600&height=40&lines=⚡+Bot+Multifuncional+para+Discord;🛡️+Moderación+•+🎵+Música+•+🎮+Fun;💜+Las+Tortuguitas+de+Ezku;🌐+Sistema+activo+24%2F7)
+![Typing SVG](https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=700&size=18&pause=1000&color=A855F7&center=true&vCenter=true&width=600&height=40&lines=⚡+Bot+Multifuncional+para+Discord;🛡️+Moderación+•+🎵+Radio+•+🎮+Fun;🐱+Las+Tortuguitas+de+Ezku;🌐+Sistema+activo+24%2F7)
 
 <br/>
 
