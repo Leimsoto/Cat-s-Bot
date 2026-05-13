@@ -36,7 +36,6 @@ CATEGORIES = {
             ("/avatar [usuario]", "Avatar en grande"),
             ("/banner [usuario]", "Banner en grande"),
             ("/servericon", "Icono del servidor"),
-            ("/translate", "Traduce texto"),
         ],
     },
     "channels": {
@@ -207,7 +206,6 @@ CATEGORIES = {
             ("/starboard channel", "Canal de starboard"),
             ("/starboard threshold", "Umbral de estrellas"),
             ("/starboard config", "Ver configuración"),
-            ("/resetbot", "Reinicia el bot (owner/dev)"),
         ],
     },
 }
