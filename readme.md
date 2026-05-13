@@ -91,7 +91,7 @@ modules : [moderation, music, welcome, fun, stats, utils]
 
 <div align="center">
 
-**Hasthlord3** <br/>
+**Leimsoto** <br/>
 **Arielteen**
 
 </div>
