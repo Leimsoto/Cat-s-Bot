@@ -91,10 +91,8 @@ modules : [moderation, music, welcome, fun, stats, utils]
 
 <div align="center">
 
-|  | Rol | Usuario | Discord |
-|:---:|:---|:---|:---|
-| 👑 | **Owner / Lead Dev** | Hasthlord3 | [`@hasthlord3`](https://discord.com/users/hasthlord3) |
-| 🛠️ | **Sub-Developer** | Arielteen | [`@arielteen.py`](https://discord.com/users/arielteen.py) |
+**Hasthlord3** — [`@hasthlord3`](https://discord.com/users/hasthlord3) <br/>
+**Arielteen** — [`@arielteen.py`](https://discord.com/users/arielteen.py)
 
 </div>
 
