@@ -87,7 +87,7 @@ modules : [moderation, music, welcome, fun, stats, utils]
 
 <br/>
 
-## `👥` Equipo de Desarrollo
+## `👥` Contribuidores
 
 <div align="center">
 
