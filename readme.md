@@ -54,26 +54,6 @@ El sistema de **Cat's Bot** está construido con una arquitectura moderna que di
 
 <br/>
 
-## `💻` Estado del Sistema
-
-```yaml
-# Cat's Bot · System Status & Config
-
-bot:
-  name    : "Cat's Bot"
-  status  : ONLINE ✓
-  uptime  : 99.9%
-  prefix  : "/"
-  open_source: true
-
-community:
-  name    : "Las Tortuguitas de Ezku"
-  link    : "discord.gg/las-tortuguitas-de-ezku"
-
-modules : [moderation, music, welcome, fun, stats, utils]
-```
-
-<br/>
 
 ## `🌐` Servidor
 
