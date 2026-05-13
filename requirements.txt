@@ -1,7 +1,5 @@
 discord.py>=2.3.0
 python-dotenv>=1.0.0
-psutil>=5.9.0
-
 # Web API (reemplaza Flask)
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0

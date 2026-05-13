@@ -4,6 +4,10 @@ cogs/serverutils.py
 Utilidades de servidor: información y logs en tiempo real.
 
 Comandos slash:
+  /ping        – Latencia del bot
+  /botinfo     – Información general del bot
+  /avatar      – Avatar de un usuario
+  /servericon  – Icono del servidor
   /serverinfo  – Información detallada del servidor
   /serverlogs  – Configuración de captura de logs en tiempo real
 
@@ -77,6 +81,49 @@ class ServerUtils(commands.Cog):
             logger.warning("Sin permisos para enviar serverlogs en %s", guild.name)
         except discord.HTTPException as exc:
             logger.warning("No se pudo enviar serverlog en %s: %s", guild.name, exc)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # /ping, /botinfo, /avatar, /servericon
+    # ─────────────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="ping", description="Latencia del bot")
+    async def ping(self, interaction: discord.Interaction):
+        ms = round(self.bot.latency * 1000)
+        await interaction.response.send_message(f"🏓 Pong! Latencia API: `{ms}ms`")
+
+    @app_commands.command(name="botinfo", description="Información general del bot")
+    async def botinfo(self, interaction: discord.Interaction):
+        delta = discord.utils.utcnow() - self.bot.start_time
+        total_sec = int(delta.total_seconds())
+        h, rem = divmod(total_sec, 3600)
+        m, s = divmod(rem, 60)
+        uptime = f"{h}h {m}m {s}s"
+
+        servers = len(self.bot.guilds)
+        users = sum(g.member_count or 0 for g in self.bot.guilds)
+        
+        embed = discord.Embed(title="🤖 Info del Bot", color=discord.Color.blurple())
+        embed.add_field(name="Latencia", value=f"`{round(self.bot.latency * 1000)} ms`")
+        embed.add_field(name="Uptime", value=f"`{uptime}`")
+        embed.add_field(name="Servidores", value=f"`{servers}`")
+        embed.add_field(name="Usuarios", value=f"`{users}`")
+        embed.set_thumbnail(url=self.bot.user.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="avatar", description="Ver el avatar de un usuario")
+    async def avatar(self, interaction: discord.Interaction, usuario: discord.User = None):
+        target = usuario or interaction.user
+        embed = discord.Embed(title=f"Avatar de {target.display_name}", color=discord.Color.blurple())
+        embed.set_image(url=target.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="servericon", description="Ver el icono del servidor")
+    async def servericon(self, interaction: discord.Interaction):
+        if not interaction.guild or not interaction.guild.icon:
+            return await interaction.response.send_message("❌ Este servidor no tiene icono.", ephemeral=True)
+        embed = discord.Embed(title=f"Icono de {interaction.guild.name}", color=discord.Color.blurple())
+        embed.set_image(url=interaction.guild.icon.url)
+        await interaction.response.send_message(embed=embed)
 
     # ─────────────────────────────────────────────────────────────────────
     # /serverinfo

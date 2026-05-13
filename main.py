@@ -116,7 +116,6 @@ class BotES(commands.Bot):
 
         cogs = [
             "cogs.moderation",
-            "cogs.info",
             "cogs.channels",
             "cogs.users",
             "cogs.embeds",
