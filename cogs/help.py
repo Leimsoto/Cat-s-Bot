@@ -282,24 +282,35 @@ class Help(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="help", description="Muestra la ayuda interactiva del bot")
+    @app_commands.command(name="help", description="Pide ayuda al gato")
     async def help_slash(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        voice = getattr(self.bot, "catbot_voice", None)
+        help_emoji = voice.get("help") if voice else "❓"
+        paw = voice.get("paw") if voice else "🐾"
+
         embed = discord.Embed(
-            title="📖 Ayuda de Cat's Bot",
+            title=f"{help_emoji} El gato te ayuda",
             description=(
-                "Selecciona una categoría en el menú desplegable para ver sus comandos.\n\n"
-                "También puedes escribir **`!help`** en el chat para ver esta misma ayuda."
+                "Elige una categoría en el menú de abajo para ver sus comandos.\n"
+                "También sirve **`!help`** en el chat normal."
             ),
-            color=discord.Color.blurple(),
+            color=0xA855F7,
         )
         total_cmds = sum(len(c["commands"]) for c in CATEGORIES.values())
-        embed.set_footer(text=f"{len(CATEGORIES)} categorías · {total_cmds} comandos")
+        embed.set_footer(
+            text=f"{paw} {len(CATEGORIES)} categorías · {total_cmds} comandos · Cat's Bot"
+        )
         await interaction.followup.send(embed=embed, view=HelpView(), ephemeral=True)
 
     @commands.command(name="help")
     async def help_prefix(self, ctx: commands.Context):
-        await ctx.send("Usa **`/help`** para ver la ayuda interactiva.", delete_after=10)
+        voice = getattr(self.bot, "catbot_voice", None)
+        prefix = voice.get("help") if voice else "❓"
+        await ctx.send(
+            f"{prefix} Usa **`/help`** para que el gato te muestre todo.",
+            delete_after=10,
+        )
         try:
             await ctx.message.delete()
         except Exception:

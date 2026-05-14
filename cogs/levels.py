@@ -107,7 +107,10 @@ class Levels(commands.Cog):
           • levelup_delete_after_seconds   → segundos antes de borrar
           • levelup_embed_config (JSON)    → si está, usa embed; sino texto plano
         """
-        custom_msg = cfg.get("announcement_message") or "¡{user} ha subido al **nivel {level}**!"
+        voice = getattr(self.bot, "catbot_voice", None)
+        star = voice.get("star") if voice else "⭐"
+        default_msg = f"{star} ¡{{user}} acaba de subir al **nivel {{level}}**! El gato está orgulloso."
+        custom_msg = cfg.get("announcement_message") or default_msg
         text = (
             custom_msg
             .replace("{user}", message.author.mention)
@@ -255,15 +258,22 @@ class Levels(commands.Cog):
         default_permissions=discord.Permissions(administrator=True),
     )
 
-    @xp_group.command(name="give", description="[Admin] Da XP a un usuario")
+    @xp_group.command(name="give", description="[Admin] Regala XP a un usuario")
     @app_commands.describe(usuario="Usuario al que dar XP", cantidad="Cantidad de XP a dar")
     @app_commands.checks.has_permissions(administrator=True)
     async def xp_give(self, interaction: discord.Interaction, usuario: discord.Member, cantidad: int):
+        voice = getattr(self.bot, "catbot_voice", None)
         if cantidad <= 0:
-            return await interaction.response.send_message("❌ La cantidad debe ser mayor que 0.", ephemeral=True)
+            msg = (
+                voice.line("error", "El gato no acepta cantidades de cero o negativas.")
+                if voice
+                else "❌ La cantidad debe ser mayor que 0."
+            )
+            return await interaction.response.send_message(msg, ephemeral=True)
         result = self.db.add_xp(usuario.id, interaction.guild_id, cantidad)
+        treat = voice.get("treat") if voice else "🍪"
         await interaction.response.send_message(
-            f"✅ **+{cantidad} XP** para {usuario.mention}. Ahora tiene **{result['xp']:,} XP** (Nivel {result['level']}).",
+            f"{treat} **+{cantidad} XP** para {usuario.mention}. Ahora lleva **{result['xp']:,} XP** (Nivel {result['level']}).",
             ephemeral=True,
         )
         if result["leveled_up"]:
@@ -275,8 +285,11 @@ class Levels(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def xp_reset(self, interaction: discord.Interaction, usuario: discord.Member):
         self.db.reset_user_level(usuario.id, interaction.guild_id)
+        voice = getattr(self.bot, "catbot_voice", None)
+        success = voice.get("success") if voice else "✅"
         await interaction.response.send_message(
-            f"✅ XP de {usuario.mention} reseteado a 0.", ephemeral=True
+            f"{success} El gato borró todo el XP de {usuario.mention}. Vuelta a empezar.",
+            ephemeral=True,
         )
 
 

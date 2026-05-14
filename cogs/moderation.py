@@ -27,6 +27,21 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+def _voice(cog):
+    """Return bot.catbot_voice if available, else a no-op fallback."""
+    v = getattr(cog.bot, "catbot_voice", None)
+    if v:
+        return v
+    class _Fallback:
+        def line(self, role, text): return text
+        def get(self, name): return ""
+        def embed(self, title=None, description=None, kind="info", url=None):
+            import discord
+            return discord.Embed(title=title, description=description)
+    return _Fallback()
+
+
+
 logger = logging.getLogger("Moderation")
 
 
@@ -434,11 +449,11 @@ class Moderation(commands.Cog):
         eliminar_mensajes: app_commands.Range[int, 0, 7] = 0,
     ):
         if not self._has_mod_perms(interaction, "ban_members"):
-            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
 
         err = self._can_moderate(interaction.user, usuario)  # type: ignore
         if err:
-            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", err), ephemeral=True)
 
         await interaction.response.defer()
 
@@ -458,18 +473,18 @@ class Moderation(commands.Cog):
         try:
             await usuario.ban(
                 reason=f"{razon} | Mod: {interaction.user}",
-                delete_message_days=eliminar_mensajes,
+                delete_message_seconds=eliminar_mensajes * 86400,
             )
         except discord.Forbidden:
             logger.warning("Sin permisos para banear a %s en %s", usuario, interaction.guild)
             return await interaction.followup.send(
-                "❌ No tengo permisos suficientes para banear a ese usuario.",
+                _voice(self).line("error", "Al gato le faltan permisos para banear a este usuario."),
                 ephemeral=True,
             )
         except discord.HTTPException as exc:
             logger.warning("Error baneando a %s en %s: %s", usuario, interaction.guild, exc)
             return await interaction.followup.send(
-                "❌ No se pudo completar el ban. Inténtalo de nuevo.",
+                _voice(self).line("error", "El gato perdió la cuerda. No se pudo completar el ban."),
                 ephemeral=True,
             )
 
@@ -517,16 +532,16 @@ class Moderation(commands.Cog):
         eliminar_mensajes: app_commands.Range[int, 0, 7] = 0,
     ):
         if not self._has_mod_perms(interaction, "ban_members"):
-            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
 
         err = self._can_moderate(interaction.user, usuario)
         if err:
-            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", err), ephemeral=True)
 
         secs = parse_duration(duracion)
         if secs is None:
             return await interaction.response.send_message(
-                "❌ Formato inválido. Ejemplos: `30m` · `2h` · `1d` · `1w`",
+                _voice(self).line("error", "Formato inválido. Ejemplos: `30m` · `2h` · `1d` · `1w`"),
                 ephemeral=True,
             )
 
@@ -553,18 +568,18 @@ class Moderation(commands.Cog):
         try:
             await usuario.ban(
                 reason=f"Tempban {fmt_duration(secs)} | {razon} | Mod: {interaction.user}",
-                delete_message_days=eliminar_mensajes,
+                delete_message_seconds=eliminar_mensajes * 86400,
             )
         except discord.Forbidden:
             logger.warning("Sin permisos para tempbanear a %s en %s", usuario, interaction.guild)
             return await interaction.followup.send(
-                "❌ No tengo permisos suficientes para banear a ese usuario.",
+                _voice(self).line("error", "Al gato le faltan permisos para banear a este usuario."),
                 ephemeral=True,
             )
         except discord.HTTPException as exc:
             logger.warning("Error tempbaneando a %s en %s: %s", usuario, interaction.guild, exc)
             return await interaction.followup.send(
-                "❌ No se pudo completar el tempban. Inténtalo de nuevo.",
+                _voice(self).line("error", "El gato perdió la cuerda. No se pudo completar el tempban."),
                 ephemeral=True,
             )
 
@@ -611,14 +626,14 @@ class Moderation(commands.Cog):
         razon: str = "Sin razón especificada",
     ):
         if not self._has_mod_perms(interaction, "ban_members"):
-            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
 
         await interaction.response.defer()
 
         try:
             uid = int(user_id.strip())
         except ValueError:
-            return await interaction.followup.send("❌ ID inválida.", ephemeral=True)
+            return await interaction.followup.send(_voice(self).line("error", "Esa ID no se parece a un ID de Discord."), ephemeral=True)
 
         try:
             entry = await interaction.guild.fetch_ban(discord.Object(id=uid))
@@ -675,11 +690,11 @@ class Moderation(commands.Cog):
         razon: str = "Sin razón especificada",
     ):
         if not self._has_mod_perms(interaction, "kick_members"):
-            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
 
         err = self._can_moderate(interaction.user, usuario)  # type: ignore
         if err:
-            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", err), ephemeral=True)
 
         await interaction.response.defer()
 
@@ -748,7 +763,7 @@ class Moderation(commands.Cog):
         razon: str = "Sin razón especificada",
     ):
         if not self._has_mod_perms(interaction, "manage_roles"):
-            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
         cfg = self.db.get_config(interaction.guild_id)
         mute_role = interaction.guild.get_role(cfg.get("mute_role_id") or 0)
 
@@ -761,7 +776,7 @@ class Moderation(commands.Cog):
 
         err = self._can_moderate(interaction.user, usuario)  # type: ignore
         if err:
-            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", err), ephemeral=True)
 
         if mute_role in usuario.roles:
             return await interaction.response.send_message(
@@ -773,7 +788,7 @@ class Moderation(commands.Cog):
             secs = parse_duration(duracion)
             if secs is None:
                 return await interaction.response.send_message(
-                    "❌ Formato inválido. Ejemplos: `30m` · `2h` · `1d` · `1w`",
+                    _voice(self).line("error", "Formato inválido. Ejemplos: `30m` · `2h` · `1d` · `1w`"),
                     ephemeral=True,
                 )
 
@@ -844,7 +859,7 @@ class Moderation(commands.Cog):
         razon: str = "Sin razón especificada",
     ):
         if not self._has_mod_perms(interaction, "manage_roles"):
-            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
         cfg = self.db.get_config(interaction.guild_id)
         mute_role = interaction.guild.get_role(cfg.get("mute_role_id") or 0)
 
@@ -915,10 +930,10 @@ class Moderation(commands.Cog):
         razon: str = "Sin razón especificada",
     ):
         if not self._has_mod_perms(interaction, "moderate_members"):
-            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
         err = self._can_moderate(interaction.user, usuario)  # type: ignore
         if err:
-            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", err), ephemeral=True)
 
         await interaction.response.defer()
 
@@ -1082,7 +1097,7 @@ class Moderation(commands.Cog):
         razon: str = "Sin razón especificada",
     ):
         if not self._has_mod_perms(interaction, "administrator"):
-            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
         record = self.db.get_user(usuario.id, interaction.guild_id)
         old = record["warns"]
 
@@ -1130,7 +1145,7 @@ class Moderation(commands.Cog):
         usuario: Optional[discord.Member] = None,
     ):
         if not self._has_mod_perms(interaction, "manage_messages"):
-            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
         await interaction.response.defer(ephemeral=True)
 
         try:
@@ -1165,7 +1180,7 @@ class Moderation(commands.Cog):
         estado: Optional[str] = None,
     ):
         if not self._has_mod_perms(interaction, "moderate_members"):
-            return await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
 
         status_filter = (estado or "PENDING").upper()
         if status_filter not in ("PENDING", "ACCEPTED", "DENIED"):

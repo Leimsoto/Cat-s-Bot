@@ -1,4 +1,4 @@
-discord.py>=2.3.0
+discord.py>=2.4.0  # fetch_application_emojis (Application Emojis) requiere 2.4+
 python-dotenv>=1.0.0
 # Web API (reemplaza Flask)
 fastapi>=0.115.0

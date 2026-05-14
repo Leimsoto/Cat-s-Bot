@@ -185,12 +185,18 @@ class AutoMod(commands.Cog):
 
     def _check_banned_words(self, member: discord.Member, content: str,
                             message: discord.Message, cfg: dict) -> Optional[str]:
+        # Bug fix: substring matching causaba falsos positivos (ej. "ass"
+        # disparaba en "pass", "class"). Ahora hace match por palabra completa
+        # con regex word-boundary, case-insensitive.
         words: List[str] = cfg.get("words", [])
         if not words:
             return None
-        lower = content.lower()
         for w in words:
-            if w.lower() in lower:
+            w_clean = w.strip()
+            if not w_clean:
+                continue
+            pattern = r"\b" + re.escape(w_clean) + r"\b"
+            if re.search(pattern, content, re.IGNORECASE):
                 return AutoModActions.parse(cfg.get("action", "warn"))
         return None
 
@@ -318,8 +324,18 @@ class AutoMod(commands.Cog):
     @app_commands.describe(activar="True = activar, False = desactivar")
     async def automod_toggle(self, interaction: discord.Interaction, activar: bool):
         self.db.set_automod_config(interaction.guild_id, enabled=int(activar))
-        estado = "✅ Activada" if activar else "❌ Desactivada"
-        await interaction.response.send_message(f"{estado} la automoderación.", ephemeral=True)
+        voice = getattr(self.bot, "catbot_voice", None)
+        if activar:
+            msg = (
+                voice.line("success", "Automod activado. El gato vigila el chat.")
+                if voice else "✅ Activada la automoderación."
+            )
+        else:
+            msg = (
+                voice.line("afk", "Automod desactivado. El gato se va a dormir.")
+                if voice else "❌ Desactivada la automoderación."
+            )
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @automod_group.command(name="log", description="Muestra el registro de acciones de automoderación")
     @app_commands.describe(limite="Cuantos registros mostrar (máx 20)")
@@ -327,7 +343,12 @@ class AutoMod(commands.Cog):
         limite = max(1, min(20, limite))
         logs = self.db.get_automod_log(interaction.guild_id, limit=limite)
         if not logs:
-            return await interaction.response.send_message("📭 No hay registros de automoderación.", ephemeral=True)
+            voice = getattr(self.bot, "catbot_voice", None)
+            msg = (
+                voice.line("info", "El gato no ha tenido que actuar todavía. Sin registros.")
+                if voice else "📭 No hay registros de automoderación."
+            )
+            return await interaction.response.send_message(msg, ephemeral=True)
 
         embed = discord.Embed(
             title="Registro de Automoderación",

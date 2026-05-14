@@ -115,6 +115,7 @@ class BotES(commands.Bot):
         self.tree.on_error = self.on_app_command_error
 
         cogs = [
+            "cogs._catbot",
             "cogs.moderation",
             "cogs.channels",
             "cogs.users",
@@ -151,11 +152,15 @@ class BotES(commands.Bot):
         logger.info("Comandos slash sincronizados: %d", len(synced))
 
     async def on_ready(self) -> None:
-        logger.info("✅ %s conectado | %d servidor(es)", self.user, len(self.guilds))
+        logger.info(
+            "%s despierta y ronronea | %d servidor(es)",
+            self.user,
+            len(self.guilds),
+        )
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
-                name="Testing With ArielTeen and Yessid",
+                name="patrullando el servidor 🐾",
             )
         )
 
@@ -168,18 +173,30 @@ class BotES(commands.Bot):
         Manejador global de errores de comandos slash.
         Los cogs pueden tener sus propios handlers específicos.
         """
+        voice = getattr(self, "catbot_voice", None)
+        line = voice.line if voice else (lambda role, text: text)
+
         if isinstance(error, discord.app_commands.CommandOnCooldown):
-            msg = f"⏳ Comando en cooldown. Intenta en `{error.retry_after:.1f}s`."
+            msg = line(
+                "loading",
+                f"Espera, el gato está descansando. Vuelve en `{error.retry_after:.1f}s`.",
+            )
         elif isinstance(error, discord.app_commands.MissingPermissions):
-            msg = f"❌ Te faltan permisos: `{', '.join(error.missing_permissions)}`"
+            msg = line(
+                "error",
+                f"Te faltan permisos: `{', '.join(error.missing_permissions)}`",
+            )
         elif isinstance(error, discord.app_commands.BotMissingPermissions):
-            msg = f"❌ Al bot le faltan permisos: `{', '.join(error.missing_permissions)}`"
+            msg = line(
+                "error",
+                f"Al gato le faltan permisos: `{', '.join(error.missing_permissions)}`",
+            )
         elif isinstance(error, discord.app_commands.CommandInvokeError):
             logger.error("Error invocando comando: %s", error.original, exc_info=True)
-            msg = "❌ Error interno al ejecutar el comando. Revisa los logs."
+            msg = line("error", "El gato tropezó con algo. Revisa los logs.")
         else:
             logger.error("Error de comando no manejado: %s", error, exc_info=True)
-            msg = "❌ Ocurrió un error inesperado."
+            msg = line("error", "Algo inesperado pasó. El gato se está reorganizando.")
 
         if not interaction.response.is_done():
             await interaction.response.send_message(msg, ephemeral=True)
