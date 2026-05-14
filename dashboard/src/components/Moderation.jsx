@@ -36,8 +36,7 @@ export default function Moderation({ selectedGuild: guildId }) {
     if (!guildId) return;
     try {
       const data = await apiGet(`/api/moderation/${guildId}/cases?limit=100`, {
-        cache: false,
-      });
+        cache: false});
       setCases(Array.isArray(data) ? data : data.cases || []);
     } catch {
       setCases([]);
@@ -89,8 +88,7 @@ export default function Moderation({ selectedGuild: guildId }) {
     KICK: "#f97316",
     BAN: "#ef4444",
     UNMUTE: "#10b981",
-    UNBAN: "#10b981",
-  };
+    UNBAN: "#10b981"};
 
   useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
@@ -153,9 +151,6 @@ export default function Moderation({ selectedGuild: guildId }) {
       <div className="section-header">
         <h2
           style={{
-            background: "linear-gradient(90deg,#c4b5fd,#818cf8)",
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
           }}
         >
           Moderación
@@ -186,8 +181,7 @@ export default function Moderation({ selectedGuild: guildId }) {
               borderRadius: 22,
               display: "flex",
               flexDirection: "column",
-              gap: 16,
-            }}
+              gap: 16}}
           >
             <div className="section-title">
               <h3 style={{ margin: 0 }}>Canales y roles</h3>
@@ -196,8 +190,7 @@ export default function Moderation({ selectedGuild: guildId }) {
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))",
-                gap: 16,
-              }}
+                gap: 16}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Canal de mod-logs</label>
@@ -269,8 +262,7 @@ export default function Moderation({ selectedGuild: guildId }) {
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
-                gap: 14,
-              }}
+                gap: 14}}
             >
               {[
                 ["warn_mute_enabled", "warn_mute_threshold", "Auto-mute", true],
@@ -288,15 +280,13 @@ export default function Moderation({ selectedGuild: guildId }) {
                     background: cfg[enK]
                       ? "rgba(99,102,241,0.1)"
                       : "rgba(255,255,255,0.02)",
-                    border: `1px solid ${cfg[enK] ? "rgba(139,92,246,0.3)" : "rgba(139,92,246,0.1)"}`,
-                  }}
+                    border: `1px solid ${cfg[enK] ? "rgba(139,92,246,0.3)" : "rgba(139,92,246,0.1)"}`}}
                 >
                   <div
                     style={{
                       display: "flex",
                       justifyContent: "space-between",
-                      alignItems: "center",
-                    }}
+                      alignItems: "center"}}
                   >
                     <span style={{ fontWeight: 800 }}>{lbl}</span>
                     <label className="toggle-switch">
@@ -389,8 +379,7 @@ export default function Moderation({ selectedGuild: guildId }) {
                   display: "flex",
                   alignItems: "center",
                   gap: 14,
-                  flexWrap: "wrap",
-                }}
+                  flexWrap: "wrap"}}
               >
                 <span
                   style={{
@@ -400,8 +389,7 @@ export default function Moderation({ selectedGuild: guildId }) {
                     fontWeight: 900,
                     background: `${COLORS[c.action_type] || "#6366f1"}22`,
                     color: COLORS[c.action_type] || "#818cf8",
-                    border: `1px solid ${COLORS[c.action_type] || "#6366f1"}44`,
-                  }}
+                    border: `1px solid ${COLORS[c.action_type] || "#6366f1"}44`}}
                 >
                   {c.action_type}
                 </span>

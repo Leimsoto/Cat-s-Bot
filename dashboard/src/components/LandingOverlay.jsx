@@ -60,8 +60,7 @@ export default function LandingOverlay({ guilds, onSelectGuild }) {
             <div style={{
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               width: 64, height: 64, borderRadius: 18, marginBottom: 18,
-              boxShadow: '0 0 28px rgba(168,85,247,0.45)',
-            }}>
+              boxShadow: '0 0 28px rgba(168,85,247,0.45)'}}>
               <CatLogo size={64} ariaLabel="Cats Bots" />
             </div>
             <p style={{ fontSize: '0.78rem', fontWeight: 800, letterSpacing: '0.15em', color: 'var(--accent)', textTransform: 'uppercase', margin: '0 0 8px' }}>

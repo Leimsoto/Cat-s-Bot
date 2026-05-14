@@ -46,8 +46,7 @@ const RADIO_BROWSER = 'https://de1.api.radio-browser.info/json/stations/search';
 async function searchRadioBrowser(query) {
   const params = new URLSearchParams({
     name: query, limit: '12', hidebroken: 'true',
-    order: 'clickcount', reverse: 'true',
-  });
+    order: 'clickcount', reverse: 'true'});
   const res = await fetch(`${RADIO_BROWSER}?${params}`);
   if (!res.ok) throw new Error('Error de red');
   return res.json();
@@ -105,8 +104,7 @@ export default function Radio({ selectedGuild }) {
         station_name: cfg?.station_name ?? null,
         volume: cfg?.volume ?? 50,
         auto_reconnect: cfg?.auto_reconnect ? 1 : 0,
-        pause_on_empty: cfg?.pause_on_empty ? 1 : 0,
-      };
+        pause_on_empty: cfg?.pause_on_empty ? 1 : 0};
       await apiPatch(`/api/guilds/${guildId}/radio/config`, payload);
       setDirty(false);
       showToast('Configuración guardada');
@@ -164,14 +162,12 @@ export default function Radio({ selectedGuild }) {
         <div style={{
           position:'fixed',top:22,right:22,zIndex:9999,padding:'12px 20px',borderRadius:14,
           background:toast.type==='error'?'rgba(244,63,94,0.18)':'rgba(99,102,241,0.22)',
-          border:`1px solid ${toast.type==='error'?'rgba(244,63,94,0.4)':'rgba(139,92,246,0.4)'}`,
-          backdropFilter:'blur(16px)',color:'var(--text)',fontWeight:700,boxShadow:'0 8px 32px rgba(0,0,0,0.3)',
-        }}>{toast.msg}</div>
+          border:`1px solid ${toast.type==='error'?'rgba(244,63,94,0.4)':'rgba(139,92,246,0.4)'}`,color:'var(--text)',fontWeight:700,boxShadow:'0 8px 32px rgba(0,0,0,0.3)'}}>{toast.msg}</div>
       )}
 
       {/* ── Header ── */}
       <div className="section-header" style={{marginBottom:24}}>
-        <h2 style={{background:'linear-gradient(90deg,#c4b5fd,#818cf8)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',margin:0}}>
+        <h2 style={{margin:0}}>
           Radio / Música
         </h2>
         <p style={{color:'var(--muted)',margin:'4px 0 0',fontSize:'0.88rem'}}>
@@ -200,15 +196,13 @@ export default function Radio({ selectedGuild }) {
                 padding:'4px 12px',borderRadius:999,fontSize:'0.72rem',fontWeight:700,
                 background:cfg?.enabled?'rgba(52,211,153,0.15)':'rgba(255,255,255,0.07)',
                 color:cfg?.enabled?'#34d399':'var(--muted)',
-                border:`1px solid ${cfg?.enabled?'rgba(52,211,153,0.3)':'rgba(255,255,255,0.1)'}`,
-              }}>
+                border:`1px solid ${cfg?.enabled?'rgba(52,211,153,0.3)':'rgba(255,255,255,0.1)'}`}}>
                 {cfg?.enabled ? '● activo' : '○ inactivo'}
               </span>
               <span style={{
                 padding:'4px 12px',borderRadius:999,fontSize:'0.72rem',fontWeight:700,
                 background:'rgba(255,255,255,0.05)',color:'var(--muted)',
-                border:'1px solid rgba(255,255,255,0.08)',
-              }}>
+                border:'1px solid rgba(255,255,255,0.08)'}}>
                 {cfg?.volume ?? 50}% volumen
               </span>
             </div>
@@ -270,16 +264,14 @@ export default function Radio({ selectedGuild }) {
               background:'rgba(139,92,246,0.08)',
               border:'1px solid rgba(139,92,246,0.2)',
               fontSize:'0.85rem',fontWeight:700,
-              display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,
-            }}>
+              display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
               <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
                 {stationName}
               </span>
               {stationName !== 'Lofi Radio 24/7' && (
                 <button onClick={resetToLofi} style={{
                   flexShrink:0,background:'rgba(255,255,255,0.07)',border:'1px solid rgba(255,255,255,0.1)',
-                  borderRadius:8,padding:'4px 10px',color:'var(--muted)',cursor:'pointer',fontSize:'0.74rem',
-                }}>Lofi</button>
+                  borderRadius:8,padding:'4px 10px',color:'var(--muted)',cursor:'pointer',fontSize:'0.74rem'}}>Lofi</button>
               )}
             </div>
           </div>
@@ -349,8 +341,7 @@ export default function Radio({ selectedGuild }) {
             display:'flex',alignItems:'center',gap:10,
             background:'rgba(0,0,0,0.3)',border:'1px solid rgba(139,92,246,0.25)',
             borderRadius:14,padding:'12px 16px',
-            transition:'border-color 0.2s',
-          }}>
+            transition:'border-color 0.2s'}}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
@@ -361,8 +352,7 @@ export default function Radio({ selectedGuild }) {
               onChange={e => handleSearch(e.target.value)}
               style={{
                 flex:1,background:'transparent',border:'none',outline:'none',
-                color:'var(--text)',fontSize:'0.9rem',fontFamily:'var(--font-main)',
-              }}
+                color:'var(--text)',fontSize:'0.9rem',fontFamily:'var(--font-main)'}}
             />
             {searching && (
               <div className="loading-spinner" style={{width:16,height:16,borderWidth:2}} />
@@ -372,8 +362,7 @@ export default function Radio({ selectedGuild }) {
                 onClick={() => { setSearchQ(''); setResults([]); }}
                 aria-label="Limpiar búsqueda"
                 style={{
-                  background:'none',border:'none',cursor:'pointer',color:'var(--muted)',fontSize:'1rem',padding:0,
-                }}>
+                  background:'none',border:'none',cursor:'pointer',color:'var(--muted)',fontSize:'1rem',padding:0}}>
                 <Icon name="close" />
               </button>
             )}
@@ -394,8 +383,7 @@ export default function Radio({ selectedGuild }) {
                 padding:'10px 18px',borderRadius:12,border:'1px solid rgba(139,92,246,0.3)',
                 background:'linear-gradient(135deg,rgba(99,102,241,0.15),rgba(139,92,246,0.1))',
                 color:'#c4b5fd',cursor:'pointer',fontWeight:700,fontSize:'0.85rem',
-                transition:'all 0.2s',
-              }}
+                transition:'all 0.2s'}}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                 <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
@@ -426,8 +414,7 @@ export default function Radio({ selectedGuild }) {
                   display:'flex',alignItems:'center',gap:14,padding:'12px 14px',
                   borderRadius:12,border:'1px solid rgba(139,92,246,0.15)',
                   background:'rgba(255,255,255,0.02)',cursor:'pointer',
-                  textAlign:'left',transition:'all 0.15s',
-                }}
+                  textAlign:'left',transition:'all 0.15s'}}
                 onMouseEnter={e => e.currentTarget.style.background='rgba(139,92,246,0.1)'}
                 onMouseLeave={e => e.currentTarget.style.background='rgba(255,255,255,0.02)'}
               >

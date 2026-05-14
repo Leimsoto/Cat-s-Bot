@@ -8,107 +8,89 @@ const FEATURES = [
     icon: "fa-microchip",
     title: "IA Conversacional",
     text: "Modelo de lenguaje integrado con memoria por canal, comandos y respuestas contextuales en español.",
-    color: "#a78bfa",
-  },
+    color: "#a78bfa"},
   {
     icon: "fa-shield-halved",
     title: "Moderación Avanzada",
     text: "AutoMod con detección de spam, palabras prohibidas, raid protection y casos persistentes.",
-    color: "#f43f5e",
-  },
+    color: "#f43f5e"},
   {
     icon: "fa-ticket",
     title: "Sistema de Tickets",
     text: "Categorías personalizables, transcripciones automáticas y panel para staff.",
-    color: "#38bdf8",
-  },
+    color: "#38bdf8"},
   {
     icon: "fa-music",
     title: "Radio & Música",
     text: "Streaming 24/7, lofi, estaciones globales y comandos de cola.",
-    color: "#34d399",
-  },
+    color: "#34d399"},
   {
     icon: "fa-chart-line",
     title: "Niveles & XP",
     text: "Sistema de progresión con recompensas de rol, leaderboard y multiplicadores.",
-    color: "#f59e0b",
-  },
+    color: "#f59e0b"},
   {
     icon: "fa-door-open",
     title: "Bienvenidas & Boosters",
     text: "Mensajes con embeds dinámicos, imágenes generadas y reconocimiento de boosts.",
-    color: "#22d3ee",
-  },
+    color: "#22d3ee"},
   {
     icon: "fa-gift",
     title: "Sorteos",
     text: "Giveaways programados con condiciones, ganadores múltiples y reroll.",
-    color: "#ec4899",
-  },
+    color: "#ec4899"},
   {
     icon: "fa-headset",
     title: "Canales de Voz Auto",
     text: "Crea canales temporales bajo demanda, controla permisos y límites.",
-    color: "#818cf8",
-  },
+    color: "#818cf8"},
   {
     icon: "fa-clock",
     title: "Mensajes Programados",
     text: "Envía recordatorios y avisos en intervalos cron, sin perder el ritmo.",
-    color: "#fbbf24",
-  },
+    color: "#fbbf24"},
   {
     icon: "fa-code",
     title: "Embed Builder",
     text: "Constructor visual con preview en vivo, plantillas y envío por API.",
-    color: "#67e8f9",
-  },
+    color: "#67e8f9"},
   {
     icon: "fa-flag",
     title: "Reportes",
     text: "Sistema de reportes con seguimiento, asignación y resolución.",
-    color: "#fb7185",
-  },
+    color: "#fb7185"},
   {
     icon: "fa-link",
     title: "Tracking de Invites",
     text: "Quién invitó a quién, ranking, leaderboard y rewards por invitaciones.",
-    color: "#60a5fa",
-  },
+    color: "#60a5fa"},
 ];
 
 const ADVANTAGES = [
   {
     icon: "fa-bolt",
-    title: "Latencia mínima",
-    text: "Backend FastAPI + caché en memoria. Respuestas inmediatas, panel siempre fluido.",
-  },
+    title: "Rápido de verdad",
+    text: "El panel responde al instante. Sin esperas, sin cargas eternas."},
   {
     icon: "fa-lock",
     title: "OAuth2 seguro",
-    text: "Autenticación oficial de Discord. Sólo administradores y dueños acceden al panel.",
-  },
+    text: "Te logueas con tu cuenta de Discord. Solo admins y dueños del servidor entran al panel."},
   {
     icon: "fa-sliders",
     title: "Configurable por servidor",
-    text: "Cada guild tiene su propia configuración persistente. Sin colisiones entre comunidades.",
-  },
+    text: "Cada servidor tiene su propia configuración. Lo que cambies en uno no toca a los demás."},
   {
     icon: "fa-language",
     title: "100% en español",
-    text: "Comandos, mensajes y dashboard en español nativo. Sin traducciones automáticas.",
-  },
+    text: "Comandos, mensajes y dashboard en español nativo. Sin traducciones automáticas."},
   {
     icon: "fa-arrows-rotate",
     title: "Actualizaciones constantes",
-    text: "Módulos nuevos cada semana, sin interrumpir tu servidor.",
-  },
+    text: "Módulos nuevos cada semana, sin interrumpir tu servidor."},
   {
     icon: "fa-shield-heart",
-    title: "Código abierto y auditable",
-    text: "Todo el código del bot es público y auditable. Cualquiera puede revisar la moderación, la IA y el manejo de datos — transparencia total y un extra de seguridad para tu comunidad.",
-  },
+    title: "Código abierto",
+    text: "El código del bot es público en GitHub. Cualquiera puede revisar cómo modera, qué hace la IA y cómo trata tus datos."},
 ];
 
 function useReveal() {
@@ -272,14 +254,14 @@ export default function Login() {
             </span>
 
             <h1 className="landing-hero-title">
-              Cats Bots — el bot de Discord en español que tu comunidad{" "}
-              <span className="landing-hero-accent">realmente</span> necesita.
+              Tu servidor de Discord, configurado{" "}
+              <span className="landing-hero-accent">desde la web</span>.
             </h1>
 
             <p className="landing-hero-sub">
-              Moderación, IA, tickets, niveles, música y mucho más — todo
-              configurable desde un panel web morado, rápido y sin fricción.
-              Pensado para servidores serios que crecen.
+              Modera, da la bienvenida, premia con niveles, abre tickets y pon
+              música sin escribir un comando. Entra al panel, marca lo que quieres
+              activar y listo.
             </p>
 
             {error && (
@@ -307,8 +289,8 @@ export default function Login() {
             </div>
 
             <p className="landing-hero-note">
-              <i className="fa-solid fa-shield-halved" /> Login OAuth2 oficial
-              de Discord · Sólo admins y owners acceden al panel
+              <i className="fa-solid fa-shield-halved" /> Login con Discord
+              (OAuth2). Solo admins y owners entran al panel.
             </p>
           </div>
 
@@ -450,8 +432,7 @@ export default function Login() {
               {[...modules, ...modules, ...FEATURES.map((f) => ({
                 key: f.title,
                 name: f.title,
-                icon: f.icon,
-              }))].map((m, i) => (
+                icon: f.icon}))].map((m, i) => (
                 <span key={`${m.key}-${i}`} className="landing-module-chip">
                   <i className={`fa-solid ${m.icon}`} />
                   {m.name}

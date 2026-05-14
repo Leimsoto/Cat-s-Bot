@@ -14,8 +14,7 @@ export default function CatLogo({
   size = 40,
   ariaLabel = "Cats Bots",
   className = "",
-  rounded = true,
-}) {
+  rounded = true}) {
   return (
     <img
       src={logoSvg}

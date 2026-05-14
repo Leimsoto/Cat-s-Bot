@@ -121,7 +121,7 @@ export default function Overview({ selectedGuild }) {
         <div className="ov-chart-card glass-panel">
           <div className="ov-chart-header">
             <div>
-              <h3>Actividad — 7 días</h3>
+              <h3>Actividad de 7 días</h3>
               <p className="ov-subtitle">
                 Comandos, moderación, automod y seguridad
               </p>
@@ -141,8 +141,7 @@ export default function Overview({ selectedGuild }) {
                       className="pogy-bar"
                       style={{
                         height: `${Math.max(((point[key] || 0) / maxVal) * 100, 4)}%`,
-                        "--bar-color": color,
-                      }}
+                        "--bar-color": color}}
                       title={`${point.label} ${lbl}: ${point[key] || 0}`}
                     />
                   ))}
@@ -219,8 +218,7 @@ export default function Overview({ selectedGuild }) {
                   className="ov-activity-badge"
                   style={{
                     background: "rgba(56,189,248,0.12)",
-                    color: "#38bdf8",
-                  }}
+                    color: "#38bdf8"}}
                 >
                   <i className="fa-solid fa-bolt" />
                 </div>
@@ -260,8 +258,7 @@ export default function Overview({ selectedGuild }) {
                   className="ov-activity-badge"
                   style={{
                     background: "rgba(245,158,11,0.12)",
-                    color: "#f59e0b",
-                  }}
+                    color: "#f59e0b"}}
                 >
                   <i className="fa-solid fa-folder-open" />
                 </div>

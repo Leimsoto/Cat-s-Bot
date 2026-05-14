@@ -43,10 +43,10 @@ export default function AutoResponses({ selectedGuild: guildId }) {
       <div className="section-header" style={{ marginBottom: 24 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
           <div>
-            <h2 style={{ background: "linear-gradient(90deg,#c4b5fd,#818cf8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", margin: 0 }}>Auto-Respuestas</h2>
+            <h2 style={{ margin: 0 }}>Auto-Respuestas</h2>
             <p style={{ color: "var(--muted)", margin: "4px 0 0", fontSize: "0.85rem" }}>{items.length} configuradas</p>
           </div>
-          <button onClick={() => setShowForm(!showForm)} style={{ padding: "10px 20px", borderRadius: 12, background: "linear-gradient(135deg,#8b5cf6,#6366f1)", color: "#fff", border: "none", cursor: "pointer", fontWeight: 700, fontSize: "0.85rem", display: "flex", alignItems: "center", gap: 8 }}>
+          <button onClick={() => setShowForm(!showForm)} style={{ padding: "10px 20px", borderRadius: 12, color: "#fff", border: "none", cursor: "pointer", fontWeight: 700, fontSize: "0.85rem", display: "flex", alignItems: "center", gap: 8 }}>
             <i className="fa-solid fa-plus" /> Nueva
           </button>
         </div>
@@ -67,7 +67,7 @@ export default function AutoResponses({ selectedGuild: guildId }) {
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 }}>
             <button onClick={() => setShowForm(false)} style={{ padding: "8px 18px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.05)", color: "var(--text)", cursor: "pointer" }}>Cancelar</button>
-            <button onClick={handleAdd} style={{ padding: "8px 18px", borderRadius: 10, background: "linear-gradient(135deg,#8b5cf6,#6366f1)", color: "#fff", border: "none", cursor: "pointer", fontWeight: 700 }}><i className="fa-solid fa-plus" style={{ marginRight: 6 }} />Crear</button>
+            <button onClick={handleAdd} style={{ padding: "8px 18px", borderRadius: 10, color: "#fff", border: "none", cursor: "pointer", fontWeight: 700 }}><i className="fa-solid fa-plus" style={{ marginRight: 6 }} />Crear</button>
           </div>
         </div>
       )}

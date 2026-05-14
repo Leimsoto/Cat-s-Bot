@@ -10,8 +10,7 @@ const NAV_SECTIONS = [
       { id: "moderation", icon: ICONS.moderation, label: "Moderación" },
       { id: "automod", icon: ICONS.automod, label: "Automod" },
       { id: "logs", icon: ICONS.logs, label: "Registros" },
-    ],
-  },
+    ]},
   {
     label: "Módulos",
     items: [
@@ -25,8 +24,7 @@ const NAV_SECTIONS = [
       { id: "custom-commands", icon: ICONS.customCommands, label: "Comandos Custom" },
       { id: "giveaways", icon: ICONS.giveaways, label: "Sorteos" },
       { id: "tags", icon: ICONS.tags, label: "Tags" },
-    ],
-  },
+    ]},
   {
     label: "Herramientas",
     items: [
@@ -35,8 +33,7 @@ const NAV_SECTIONS = [
       { id: "schedules", icon: ICONS.schedules, label: "Horarios" },
       { id: "welcome", icon: ICONS.welcome, label: "Bienvenidas" },
       { id: "suggestions", icon: ICONS.suggestions, label: "Sugerencias" },
-    ],
-  },
+    ]},
 ];
 
 const getGuildIcon = (guild) => {
@@ -52,8 +49,7 @@ export default function Sidebar({
   activePage,
   setActivePage,
   mobileMenuOpen,
-  setMobileMenuOpen,
-}) {
+  setMobileMenuOpen}) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef(null);
   const currentGuild = user?.allowedGuilds?.find((g) => g.id === selectedGuild);
@@ -94,8 +90,7 @@ export default function Sidebar({
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          width: "100%",
-        }}
+          width: "100%"}}
       >
         <div className="sidebar-brand-block sidebar-brand-row">
           <CatLogo size={38} ariaLabel="Cats Bots" />
@@ -112,8 +107,7 @@ export default function Sidebar({
             border: "none",
             color: "#DBDEE1",
             fontSize: "1.2rem",
-            cursor: "pointer",
-          }}
+            cursor: "pointer"}}
         >
           <i className="fa-solid fa-xmark" />
         </button>
@@ -157,8 +151,7 @@ export default function Sidebar({
                     background: "#5865F2",
                     display: "flex",
                     alignItems: "center",
-                    justifyContent: "center",
-                  }}
+                    justifyContent: "center"}}
                 >
                   #
                 </div>
@@ -169,8 +162,7 @@ export default function Sidebar({
                   style={{
                     fontSize: "0.72rem",
                     color: "var(--muted)",
-                    marginLeft: "auto",
-                  }}
+                    marginLeft: "auto"}}
                 >
                   {g.memberCount} miembros
                 </span>

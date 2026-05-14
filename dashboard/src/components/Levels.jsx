@@ -57,8 +57,7 @@ export default function Levels({ selectedGuild: guildId }) {
         levelup_persist: cfg.levelup_persist ? 1 : 0,
         levelup_autodelete: cfg.levelup_autodelete ? 1 : 0,
         levelup_delete_after_seconds: cfg.levelup_delete_after_seconds ?? 30,
-        levelup_embed_config: cfg.levelup_embed_config ?? null,
-      };
+        levelup_embed_config: cfg.levelup_embed_config ?? null};
       await apiPatch(`/api/guilds/${guildId}/levels`, payload);
       setDirty(false);
       showToast("Configuración guardada");
@@ -76,12 +75,10 @@ export default function Levels({ selectedGuild: guildId }) {
     try {
       await apiPost(`/api/guilds/${guildId}/levels/rewards`, {
         level: parseInt(newReward.level),
-        role_id: parseInt(newReward.role_id),
-      });
+        role_id: parseInt(newReward.role_id)});
       setNewReward({ level: "", role_id: "" });
       const data = await apiGet(`/api/guilds/${guildId}/levels`, {
-        cache: false,
-      });
+        cache: false});
       setRewards(data.rewards || []);
       showToast("Recompensa añadida");
     } catch (e) {
@@ -142,9 +139,6 @@ export default function Levels({ selectedGuild: guildId }) {
       <div className="section-header">
         <h2
           style={{
-            background: "linear-gradient(90deg,#c4b5fd,#818cf8)",
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
           }}
         >
           Niveles
@@ -193,8 +187,7 @@ export default function Levels({ selectedGuild: guildId }) {
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
-                gap: 14,
-              }}
+                gap: 14}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>XP mínimo / mensaje</label>
@@ -340,8 +333,7 @@ export default function Levels({ selectedGuild: guildId }) {
                   color: "var(--text)",
                   fontFamily: "ui-monospace, Menlo, Consolas, monospace",
                   fontSize: "0.82rem",
-                  resize: "vertical",
-                }}
+                  resize: "vertical"}}
               />
               <span style={{ fontSize: "0.74rem", color: "var(--muted)" }}>
                 Si está vacío, se usa el mensaje de texto. Variables disponibles
@@ -388,8 +380,7 @@ export default function Levels({ selectedGuild: guildId }) {
                 display: "flex",
                 gap: 12,
                 flexWrap: "wrap",
-                alignItems: "flex-end",
-              }}
+                alignItems: "flex-end"}}
             >
               <div className="config-item" style={{ marginBottom: 0, flex: "0 0 120px" }}>
                 <label>Nivel</label>
@@ -470,8 +461,7 @@ export default function Levels({ selectedGuild: guildId }) {
                       padding: "12px 16px",
                       borderRadius: 14,
                       background: "rgba(255,255,255,0.02)",
-                      border: "1px solid var(--border)",
-                    }}
+                      border: "1px solid var(--border)"}}
                   >
                     <div
                       style={{
@@ -486,8 +476,7 @@ export default function Levels({ selectedGuild: guildId }) {
                           "linear-gradient(135deg,rgba(99,102,241,0.25),rgba(139,92,246,0.15))",
                         fontWeight: 900,
                         fontSize: "0.95rem",
-                        color: "#c4b5fd",
-                      }}
+                        color: "#c4b5fd"}}
                     >
                       Lv.{r.level}
                     </div>
@@ -508,8 +497,7 @@ export default function Levels({ selectedGuild: guildId }) {
                         color: "#f43f5e",
                         cursor: "pointer",
                         fontSize: "0.82rem",
-                        fontWeight: 700,
-                      }}
+                        fontWeight: 700}}
                     >
                       <Icon name="close" />
                     </button>

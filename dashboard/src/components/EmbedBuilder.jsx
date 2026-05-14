@@ -5,8 +5,7 @@ const EMPTY_EMBED = {
   title: '', description: '', color: '#6366f1',
   footer: '', footer_icon: '',
   image: '', thumbnail: '',
-  author: '', author_icon: '', author_url: '',
-};
+  author: '', author_icon: '', author_url: ''};
 
 const EMPTY_WEBHOOK = { name: '', icon_url: '' };
 
@@ -46,8 +45,7 @@ export default function EmbedBuilder({ selectedGuild }) {
         channel_id: channelId,
         embed,
         webhook_name: webhook.name || undefined,
-        webhook_avatar: webhook.icon_url || undefined,
-      });
+        webhook_avatar: webhook.icon_url || undefined});
       showToast('✅ Embed enviado correctamente!');
     } catch (e) { showToast(e.message || 'Error al enviar el embed.', 'error'); }
     finally { setSending(false); }
@@ -55,7 +53,7 @@ export default function EmbedBuilder({ selectedGuild }) {
 
   const colorHex = embed.color || '#6366f1';
 
-  const TABS = [['content','✏️ Contenido'],['author','👤 Autor/Footer'],['webhook','🤖 Webhook'],['media','🖼️ Imágenes']];
+  const TABS = [['content','✏️ Contenido'],['author','👤 Autor/Footer'],['webhook','Webhook'],['media','🖼️ Imágenes']];
 
   return (
     <div className="automod-container animate-fade-in">
@@ -63,15 +61,13 @@ export default function EmbedBuilder({ selectedGuild }) {
         <div style={{
           position:'fixed',top:22,right:22,zIndex:9999,padding:'12px 20px',borderRadius:14,
           background: toast.type==='error'?'rgba(244,63,94,0.18)':'rgba(99,102,241,0.22)',
-          border:`1px solid ${toast.type==='error'?'rgba(244,63,94,0.4)':'rgba(139,92,246,0.4)'}`,
-          backdropFilter:'blur(16px)',color:'var(--text)',fontWeight:700,
-          boxShadow:'0 8px 32px rgba(0,0,0,0.4)',
-        }}>{toast.msg}</div>
+          border:`1px solid ${toast.type==='error'?'rgba(244,63,94,0.4)':'rgba(139,92,246,0.4)'}`,color:'var(--text)',fontWeight:700,
+          boxShadow:'0 8px 32px rgba(0,0,0,0.4)'}}>{toast.msg}</div>
       )}
 
       <div className="automod-header">
         <div className="header-info">
-          <h2 className="glow-text" style={{background:'linear-gradient(90deg,#c4b5fd,#818cf8)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent'}}>
+          <h2 className="glow-text" style={{}}>
             ✏️ Creador de Embeds
           </h2>
           <p className="subtitle">Diseña mensajes enriquecidos y envíalos a cualquier canal del servidor.</p>
@@ -116,7 +112,7 @@ export default function EmbedBuilder({ selectedGuild }) {
 
             {tab === 'author' && (<>
               <div style={{padding:12,borderRadius:12,background:'rgba(99,102,241,0.06)',border:'1px solid rgba(139,92,246,0.12)',marginBottom:4}}>
-                <p style={{margin:0,fontSize:'0.82rem',color:'var(--muted)'}}>📝 El <strong style={{color:'var(--text)'}}>Autor</strong> aparece en la parte superior del embed. El <strong style={{color:'var(--text)'}}>Footer</strong> aparece en la parte inferior.</p>
+                <p style={{margin:0,fontSize:'0.82rem',color:'var(--muted)'}}>El <strong style={{color:'var(--text)'}}>Autor</strong> aparece en la parte superior del embed. El <strong style={{color:'var(--text)'}}>Footer</strong> aparece en la parte inferior.</p>
               </div>
               <div className="config-item"><label>Nombre del Autor</label><input type="text" value={embed.author} placeholder="Nombre del autor" onChange={e=>setE('author',e.target.value)}/></div>
               <div className="config-item"><label>Icono del Autor (URL)</label><input type="url" value={embed.author_icon} placeholder="https://cdn.discordapp.com/..." onChange={e=>setE('author_icon',e.target.value)}/></div>
@@ -128,7 +124,7 @@ export default function EmbedBuilder({ selectedGuild }) {
 
             {tab === 'webhook' && (<>
               <div style={{padding:12,borderRadius:12,background:'rgba(99,102,241,0.06)',border:'1px solid rgba(139,92,246,0.12)',marginBottom:4}}>
-                <p style={{margin:0,fontSize:'0.82rem',color:'var(--muted)'}}>🤖 Personaliza el <strong style={{color:'var(--text)'}}>nombre y avatar</strong> con que aparecerá el mensaje. Si no configuras nada, se usa el nombre e icono del bot.</p>
+                <p style={{margin:0,fontSize:'0.82rem',color:'var(--muted)'}}>Personaliza el <strong style={{color:'var(--text)'}}>nombre y avatar</strong> con que aparecerá el mensaje. Si no configuras nada, se usa el nombre e icono del bot.</p>
               </div>
               <div className="config-item"><label>Nombre del Webhook</label><input type="text" value={webhook.name} placeholder="Bot ES" onChange={e=>setW('name',e.target.value)}/></div>
               <div className="config-item"><label>URL del Icono/Avatar</label><input type="url" value={webhook.icon_url} placeholder="https://cdn.discordapp.com/..." onChange={e=>setW('icon_url',e.target.value)}/></div>
@@ -150,12 +146,12 @@ export default function EmbedBuilder({ selectedGuild }) {
           <div className="glass-panel mod-section" style={{padding:18,borderRadius:18,display:'flex',gap:12,flexWrap:'wrap',alignItems:'center'}}>
             <div style={{flex:1,minWidth:180}}>
               <select value={channelId} onChange={e=>setChannelId(e.target.value)} style={{width:'100%',padding:'10px 12px'}}>
-                <option value="">📨 Seleccionar canal destino</option>
+                <option value="">Seleccionar canal destino</option>
                 {channels.map(c=><option key={c.id} value={c.id}>#{c.name}</option>)}
               </select>
             </div>
             <button className="btn-primary btn-save" onClick={sendEmbed} disabled={sending} style={{flexShrink:0,padding:'10px 22px',borderRadius:12}}>
-              {sending ? 'Enviando…' : '📨 Enviar Embed'}
+              {sending ? 'Enviando…' : 'Enviar Embed'}
             </button>
           </div>
         </div>
@@ -203,8 +199,7 @@ export default function EmbedBuilder({ selectedGuild }) {
             <pre style={{
               marginTop:8,padding:'12px 14px',borderRadius:12,fontSize:'0.75rem',
               background:'rgba(0,0,0,0.4)',border:'1px solid rgba(139,92,246,0.2)',
-              color:'#c4b5fd',overflow:'auto',maxHeight:220,whiteSpace:'pre-wrap',
-            }}>{JSON.stringify({embed,webhook_name:webhook.name,webhook_avatar:webhook.icon_url},null,2)}</pre>
+              color:'#c4b5fd',overflow:'auto',maxHeight:220,whiteSpace:'pre-wrap'}}>{JSON.stringify({embed,webhook_name:webhook.name,webhook_avatar:webhook.icon_url},null,2)}</pre>
           </details>
         </div>
       </div>

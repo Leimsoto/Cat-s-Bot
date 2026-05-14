@@ -33,8 +33,7 @@ export default function IAConfig({ selectedGuild: guildId }) {
       const [iaCfg, keyData] = await Promise.all([
         apiGet(`/api/guilds/${guildId}/ia`),
         apiGet(`/api/guilds/${guildId}/ia/key`).catch(() => ({
-          assigned: null,
-        })),
+          assigned: null})),
       ]);
       setCfg(iaCfg || {});
       setKeyAssignment(keyData?.assigned || null);
@@ -69,8 +68,7 @@ export default function IAConfig({ selectedGuild: guildId }) {
         ai_limit_hours: cfg.ai_limit_hours ?? 12,
         ai_imagine_enabled: cfg.ai_imagine_enabled ? 1 : 0,
         ai_webhook_name: cfg.ai_webhook_name || null,
-        ai_webhook_icon: cfg.ai_webhook_icon || null,
-      };
+        ai_webhook_icon: cfg.ai_webhook_icon || null};
       await apiPatch(`/api/guilds/${guildId}/ia`, payload);
       setDirty(false);
       showToast("Configuración IA guardada");
@@ -129,9 +127,6 @@ export default function IAConfig({ selectedGuild: guildId }) {
       <div className="section-header">
         <h2
           style={{
-            background: "linear-gradient(90deg,#c4b5fd,#818cf8)",
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
           }}
         >
           Inteligencia Artificial
@@ -159,8 +154,7 @@ export default function IAConfig({ selectedGuild: guildId }) {
               padding: "10px 14px",
               background: "var(--accent-light)",
               border: "1px solid var(--border-accent)",
-              borderRadius: "var(--radius-md)",
-            }}
+              borderRadius: "var(--radius-md)"}}
           >
             <div>
               <div style={{ fontWeight: 700 }}>
@@ -185,8 +179,7 @@ export default function IAConfig({ selectedGuild: guildId }) {
               border: "1px solid rgba(245,158,11,0.3)",
               borderRadius: "var(--radius-md)",
               color: "var(--warning)",
-              fontSize: "0.88rem",
-            }}
+              fontSize: "0.88rem"}}
           >
             <Icon name="warning" /> Sin key asignada. La IA usará la key global del bot
             (GEMINI_API_KEY) si está configurada, o no responderá. Contacta con el
@@ -208,8 +201,7 @@ export default function IAConfig({ selectedGuild: guildId }) {
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))",
-            gap: 16,
-          }}
+            gap: 16}}
         >
           <div className="config-item" style={{ marginBottom: 0 }}>
             <label>Modelo</label>
@@ -292,8 +284,7 @@ export default function IAConfig({ selectedGuild: guildId }) {
               borderRadius: "var(--radius-md)",
               color: "var(--text)",
               fontFamily: "var(--font-main)",
-              fontSize: "0.9rem",
-            }}
+              fontSize: "0.9rem"}}
           />
         </div>
 

@@ -26,8 +26,7 @@ const EMPTY_FORM = {
   duration_hours: 24,
   channel_id: null,
   req_roles: [],
-  deny_roles: [],
-};
+  deny_roles: []};
 
 export default function Giveaways({ selectedGuild, onToast }) {
   const guildId = selectedGuild;
@@ -73,8 +72,7 @@ export default function Giveaways({ selectedGuild, onToast }) {
     all: giveaways.length,
     active: giveaways.filter((g) => g.status === "active").length,
     ended: giveaways.filter((g) => g.status === "ended").length,
-    cancelled: giveaways.filter((g) => g.status === "cancelled").length,
-  }), [giveaways]);
+    cancelled: giveaways.filter((g) => g.status === "cancelled").length}), [giveaways]);
 
   function timeRemainingFromUnix(endTimeSec) {
     const diff = endTimeSec * 1000 - Date.now();
@@ -100,8 +98,7 @@ export default function Giveaways({ selectedGuild, onToast }) {
         duration_hours: Number(form.duration_hours),
         winners_count: Math.max(1, parseInt(form.winners_count, 10) || 1),
         req_roles: form.req_roles.map(Number),
-        deny_roles: form.deny_roles.map(Number),
-      });
+        deny_roles: form.deny_roles.map(Number)});
       toast("success", "Sorteo creado");
       setForm(EMPTY_FORM);
       setShowCreate(false);
@@ -277,8 +274,7 @@ export default function Giveaways({ selectedGuild, onToast }) {
                       width: 40, height: 40, borderRadius: 12,
                       background: `${stColor}22`, color: stColor,
                       display: "flex", alignItems: "center", justifyContent: "center",
-                      fontSize: "1.2rem",
-                    }}
+                      fontSize: "1.2rem"}}
                   >
                     <Icon name="giveaways" />
                   </div>
@@ -286,8 +282,7 @@ export default function Giveaways({ selectedGuild, onToast }) {
                     style={{
                       background: `${stColor}22`, color: stColor,
                       padding: "3px 10px", borderRadius: 999,
-                      fontSize: "0.72rem", fontWeight: 700,
-                    }}
+                      fontSize: "0.72rem", fontWeight: 700}}
                   >
                     {STATUS_LABEL[g.status] || g.status}
                   </span>

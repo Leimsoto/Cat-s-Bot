@@ -121,8 +121,7 @@ export default function SearchableSelect({
   minSearchChars = 0,
   debounceMs = 200,
   emptyMessage = "Sin resultados.",
-  loadingMessage = "Cargando…",
-}) {
+  loadingMessage = "Cargando…"}) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [remoteOptions, setRemoteOptions] = useState([]);
@@ -154,8 +153,7 @@ export default function SearchableSelect({
       top,
       left: r.left,
       width: r.width,
-      maxHeight: placeAbove ? Math.min(maxH, spaceAbove) : Math.min(maxH, spaceBelow),
-    });
+      maxHeight: placeAbove ? Math.min(maxH, spaceAbove) : Math.min(maxH, spaceBelow)});
   }, []);
 
   // Modo: si hay endpoint, modo remoto. Si no, local.
@@ -359,8 +357,7 @@ export default function SearchableSelect({
                 top: popoverPos.top,
                 left: popoverPos.left,
                 width: popoverPos.width,
-                maxHeight: popoverPos.maxHeight,
-              }}
+                maxHeight: popoverPos.maxHeight}}
             >
               <div className="ss-search">
                 <input

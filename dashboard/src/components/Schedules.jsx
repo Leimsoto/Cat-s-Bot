@@ -49,8 +49,7 @@ const EMPTY_FORM = {
   channel_id: null,
   content: "",
   interval_seconds: 3600,
-  custom_interval_min: "",
-};
+  custom_interval_min: ""};
 
 export default function Schedules({ selectedGuild, onToast }) {
   const guildId = selectedGuild;
@@ -105,8 +104,7 @@ export default function Schedules({ selectedGuild, onToast }) {
         name: form.name.trim(),
         channel_id: Number(form.channel_id),
         content: form.content.trim(),
-        interval_seconds: interval,
-      });
+        interval_seconds: interval});
       toast("success", "Horario creado");
       setForm(EMPTY_FORM);
       setShowCreate(false);
@@ -191,8 +189,7 @@ export default function Schedules({ selectedGuild, onToast }) {
                 padding: "6px 14px", borderRadius: 999, fontSize: "0.8rem", fontWeight: 700,
                 background: "rgba(99,102,241,0.15)",
                 border: "1px solid rgba(139,92,246,0.3)",
-                color: "var(--accent)",
-              }}
+                color: "var(--accent)"}}
             >
               {schedules.filter((s) => s.enabled).length} activos · {schedules.length} / {limits.max_schedules}
             </span>
@@ -309,8 +306,7 @@ export default function Schedules({ selectedGuild, onToast }) {
                 alignItems: "center",
                 gap: 16,
                 flexWrap: "wrap",
-                borderLeft: `3px solid ${enabled ? "var(--accent)" : "rgba(139,92,246,0.2)"}`,
-              }}
+                borderLeft: `1px solid ${enabled ? "var(--border-accent)" : "var(--border)"}`}}
             >
               <div style={{ flex: 1, minWidth: 200 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
@@ -323,8 +319,7 @@ export default function Schedules({ selectedGuild, onToast }) {
                       fontWeight: 800,
                       background: enabled ? "rgba(16,185,129,0.15)" : "rgba(255,255,255,0.05)",
                       border: `1px solid ${enabled ? "rgba(16,185,129,0.4)" : "rgba(255,255,255,0.1)"}`,
-                      color: enabled ? "#34d399" : "var(--muted)",
-                    }}
+                      color: enabled ? "#34d399" : "var(--muted)"}}
                   >
                     {enabled ? "Activo" : "Pausado"}
                   </span>
@@ -343,8 +338,7 @@ export default function Schedules({ selectedGuild, onToast }) {
                     maxWidth: 600,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
+                    whiteSpace: "nowrap"}}
                   title={s.content}
                 >
                   {s.content}

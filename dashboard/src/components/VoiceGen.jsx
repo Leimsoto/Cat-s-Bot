@@ -24,8 +24,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
       const [cfgData, vcData] = await Promise.all([
         apiGet(`/api/guilds/${guildId}/voice-gen/config`),
         apiGet(`/api/guilds/${guildId}/voice-gen/channels`).catch(() => ({
-          active_channels: [],
-        })),
+          active_channels: []})),
       ]);
       setCfg(cfgData.config || {});
       setActiveVCs(vcData.active_channels || []);
@@ -61,8 +60,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
         panel_title: cfg?.panel_title ?? null,
         panel_description: cfg?.panel_description ?? null,
         panel_color: cfg?.panel_color ?? null,
-        auto_send_panel: cfg?.auto_send_panel ? 1 : 0,
-      };
+        auto_send_panel: cfg?.auto_send_panel ? 1 : 0};
       await apiPatch(`/api/guilds/${guildId}/voice-gen/config`, payload);
       setDirty(false);
       showToast("Configuración guardada");
@@ -76,8 +74,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
   const resendPanel = async (channel_id) => {
     try {
       await apiPost(`/api/guilds/${guildId}/voice-gen/resend-panel`, {
-        channel_id,
-      });
+        channel_id});
       showToast("Panel reenviado");
     } catch (e) {
       showToast(e.message || "Error reenviando panel", "error");
@@ -150,17 +147,12 @@ export default function VoiceGen({ selectedGuild: guildId }) {
             justifyContent: "space-between",
             alignItems: "flex-start",
             flexWrap: "wrap",
-            gap: 12,
-          }}
+            gap: 12}}
         >
           <div>
             <h2
               style={{
-                background: "linear-gradient(90deg,#c4b5fd,#818cf8)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                margin: 0,
-              }}
+                margin: 0}}
             >
               Generador de VCs
             </h2>
@@ -183,8 +175,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
               style={{
                 fontSize: "0.8rem",
                 fontWeight: 700,
-                color: cfg?.enabled ? "#34d399" : "var(--muted)",
-              }}
+                color: cfg?.enabled ? "#34d399" : "var(--muted)"}}
             >
               {cfg?.enabled ? "Activo" : "Inactivo"}
             </span>
@@ -219,8 +210,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
                 fontSize: "1rem",
                 borderBottom: "1px solid rgba(139,92,246,0.15)",
                 paddingBottom: 12,
-                marginBottom: 18,
-              }}
+                marginBottom: 18}}
             >
               Canal Hub — Punto de entrada
             </div>
@@ -228,8 +218,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-                gap: 16,
-              }}
+                gap: 16}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Canal de voz Hub</label>
@@ -288,8 +277,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
                 fontSize: "1rem",
                 borderBottom: "1px solid rgba(139,92,246,0.15)",
                 paddingBottom: 12,
-                marginBottom: 18,
-              }}
+                marginBottom: 18}}
             >
               Personalización del nombre
             </div>
@@ -297,8 +285,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-                gap: 16,
-              }}
+                gap: 16}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Plantilla de nombre</label>
@@ -334,8 +321,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
                 borderRadius: "var(--radius-md)",
                 background: "var(--accent-light)",
                 border: "1px solid var(--border-accent)",
-                fontSize: "0.84rem",
-              }}
+                fontSize: "0.84rem"}}
             >
               <span style={{ color: "var(--text-muted)", marginRight: 8 }}>Preview:</span>
               <strong style={{ color: "#c4b5fd" }}>
@@ -354,8 +340,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
               fontWeight: 800,
               fontSize: "1rem",
               borderBottom: "1px solid rgba(139,92,246,0.15)",
-              paddingBottom: 12,
-            }}
+              paddingBottom: 12}}
           >
             Personalización del panel
           </div>
@@ -405,8 +390,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
                 borderRadius: "var(--radius-md)",
                 color: "var(--text)",
                 fontFamily: "var(--font-main)",
-                fontSize: "0.9rem",
-              }}
+                fontSize: "0.9rem"}}
             />
             <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>
               Variables: <code>{"{channel}"}</code> <code>{"{owner}"}</code>
@@ -452,8 +436,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
                         color: "var(--muted)",
                         fontSize: "0.75rem",
                         textTransform: "uppercase",
-                        letterSpacing: "0.05em",
-                      }}
+                        letterSpacing: "0.05em"}}
                     >
                       {h}
                     </th>
@@ -470,8 +453,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
                       style={{
                         padding: "10px 16px",
                         fontFamily: "monospace",
-                        fontSize: "0.78rem",
-                      }}
+                        fontSize: "0.78rem"}}
                     >
                       <Icon name="voiceChannel" /> {vc.channel_id}
                     </td>
@@ -480,8 +462,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
                         padding: "10px 16px",
                         fontFamily: "monospace",
                         fontSize: "0.78rem",
-                        color: "var(--muted)",
-                      }}
+                        color: "var(--muted)"}}
                     >
                       {vc.owner_id}
                     </td>
@@ -489,8 +470,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
                       style={{
                         padding: "10px 16px",
                         fontSize: "0.76rem",
-                        color: "var(--muted)",
-                      }}
+                        color: "var(--muted)"}}
                     >
                       {vc.created_at
                         ? new Date(vc.created_at * 1000).toLocaleString("es")

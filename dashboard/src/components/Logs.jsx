@@ -13,8 +13,7 @@ const ACTION_META = {
   unban:      { label: 'Unban',       color: '#34d399', icon: '✅' },
   unmute:     { label: 'Unmute',      color: '#34d399', icon: '🔊' },
   timeout:    { label: 'Timeout',     color: '#a78bfa', icon: '⏱️' },
-  note:       { label: 'Nota',        color: '#60a5fa', icon: '📝' },
-};
+  note:       { label: 'Nota',        color: '#60a5fa', icon: '📝' }};
 
 const LOG_EVENTS = [
   { key: 'message_edit', label: 'Mensajes editados', icon: 'fa-pen' },
@@ -122,8 +121,7 @@ export default function Logs({ selectedGuild }) {
       await apiPatch(`/api/guilds/${guildId}/logging`, {
         serverlog_channel: logCfg.serverlog_channel,
         serverlog_enabled: logCfg.serverlog_enabled,
-        log_events: JSON.stringify(logCfg.log_events_parsed || {}),
-      });
+        log_events: JSON.stringify(logCfg.log_events_parsed || {})});
       setDirty(false);
       showToast('Configuración guardada');
     } catch (e) { showToast(e.message, 'error'); }
@@ -160,7 +158,7 @@ export default function Logs({ selectedGuild }) {
       <Toast toast={toast} onDismiss={() => setToast(null)} />
 
       <div className="section-header" style={{ marginBottom: 16 }}>
-        <h2 style={{ background: 'linear-gradient(90deg,#c4b5fd,#818cf8)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', margin: 0 }}>
+        <h2 style={{ margin: 0 }}>
           Registros
         </h2>
       </div>
@@ -278,7 +276,7 @@ export default function Logs({ selectedGuild }) {
             <div className="dashboard-empty-state"><div className="loading-spinner" /><p>Cargando registros…</p></div>
           ) : filtered.length === 0 ? (
             <div className="glass-panel" style={{ padding: 48, textAlign: 'center' }}>
-              <div style={{ fontSize: '2.5rem', marginBottom: 12 }}>📋</div>
+              <div style={{ fontSize: '2.5rem', marginBottom: 12 }}><i className="fa-solid fa-clipboard-list" aria-hidden="true" /></div>
               <h3 style={{ margin: '0 0 8px' }}>Sin registros</h3>
               <p style={{ color: 'var(--muted)', margin: 0, fontSize: '0.85rem' }}>{search ? 'No hay resultados.' : 'No hay acciones registradas.'}</p>
             </div>

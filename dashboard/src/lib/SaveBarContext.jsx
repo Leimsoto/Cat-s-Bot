@@ -4,8 +4,7 @@ const SaveBarCtx = createContext({
   dirty: false,
   saving: false,
   register: () => {},
-  clear: () => {},
-});
+  clear: () => {}});
 
 /**
  * Provider — wrap Dashboard with this.
@@ -16,8 +15,7 @@ export function SaveBarProvider({ children, renderBar }) {
     dirty: false,
     saving: false,
     onSave: null,
-    onRevert: null,
-  });
+    onRevert: null});
 
   const register = useCallback(({ dirty, saving, onSave, onRevert }) => {
     setState({ dirty, saving, onSave, onRevert });

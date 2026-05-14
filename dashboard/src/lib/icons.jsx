@@ -85,8 +85,7 @@ export const ICONS = {
   eye: "fa-eye",
   eyeOff: "fa-eye-slash",
   settings: "fa-gear",
-  filter: "fa-filter",
-};
+  filter: "fa-filter"};
 
 /**
  * Componente <Icon /> — wrapper consistente sobre FontAwesome.
@@ -102,8 +101,7 @@ const SIZE_MAP = {
   sm: "fa-xs",
   md: "",
   lg: "fa-lg",
-  xl: "fa-xl",
-};
+  xl: "fa-xl"};
 
 export function Icon({
   name,

@@ -110,7 +110,7 @@ body {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     overflow-x: hidden;
-    min-height: 100vh;
+    min-height: 100dvh;
 }
 
 h1,
@@ -208,12 +208,12 @@ body {
    5. LAYOUT
    ═══════════════════════════════════════════════════════════════════ */
 #root {
-    min-height: 100vh;
+    min-height: 100dvh;
 }
 
 .app-container {
     display: flex;
-    height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     gap: 0;
     padding: 0;
@@ -223,7 +223,7 @@ body {
 .main-content {
     flex: 1;
     min-width: 0;
-    height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -241,7 +241,7 @@ body {
 .sidebar {
     width: var(--sidebar-width);
     flex-shrink: 0;
-    height: 100vh;
+    height: 100dvh;
     position: sticky;
     top: 0;
     display: flex;
@@ -540,8 +540,6 @@ body {
     justify-content: space-between;
     padding: 0 24px;
     background: rgba(8, 11, 18, 0.85);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
     position: sticky;
     top: 0;
@@ -1488,8 +1486,6 @@ input:checked + .slider::before {
     padding: 10px 22px;
     background: rgba(168, 85, 247, 0.08);
     border-bottom: 1px solid var(--border-accent);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
 }
 
 .save-bar-text,
@@ -1530,8 +1526,6 @@ input:checked + .slider::before {
     animation: slideInRight 0.25s ease;
     box-shadow: var(--shadow-lg);
     max-width: 340px;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
 }
 
 .toast--success {
@@ -1556,7 +1550,7 @@ input:checked + .slider::before {
    15. LOGIN PAGE
    ═══════════════════════════════════════════════════════════════════ */
 .login-body {
-    min-height: 100vh;
+    min-height: 100dvh;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1596,7 +1590,7 @@ input:checked + .slider::before {
    16. LOADING STATES
    ═══════════════════════════════════════════════════════════════════ */
 .loading-stage {
-    min-height: 100vh;
+    min-height: 100dvh;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1798,8 +1792,6 @@ input:checked + .slider::before {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -3534,7 +3526,7 @@ pre.mono {
         transform: translateX(-100%);
         transition: transform 0.25s ease;
         z-index: 300;
-        height: 100vh;
+        height: 100dvh;
         position: fixed;
         left: 0;
         top: 0;
@@ -3717,7 +3709,7 @@ pre.mono {
     --brand-indigo: #6366f1;
 
     position: relative;
-    min-height: 100vh;
+    min-height: 100dvh;
     overflow-x: hidden;
     color: var(--text);
     background:
@@ -3914,10 +3906,7 @@ pre.mono {
     font-size: 0.95rem;
 }
 .landing-logo-text span {
-    background: linear-gradient(135deg, #c084fc, #d946ef);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+    color: var(--text);
 }
 
 .landing-nav-links {
@@ -3984,7 +3973,6 @@ pre.mono {
     font-size: 0.78rem;
     font-weight: 600;
     margin-bottom: 22px;
-    backdrop-filter: blur(10px);
 }
 .landing-pill-sep { color: rgba(255, 255, 255, 0.25); }
 .landing-pill-dot {
@@ -4016,10 +4004,7 @@ pre.mono {
 
 .landing-hero-accent {
     display: inline-block;
-    background: linear-gradient(135deg, #c084fc 0%, #d946ef 50%, #f0abfc 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+    color: var(--text);
     background-size: 200% 200%;
     animation: landingGradientShift 6s ease-in-out infinite;
 }
@@ -4379,10 +4364,7 @@ pre.mono {
     font-size: 2.1rem;
     line-height: 1.1;
     font-variant-numeric: tabular-nums;
-    background: linear-gradient(135deg, #faf5ff, #d8b4fe);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+    color: var(--text);
 }
 .ll-stat-label {
     display: block;
@@ -4498,7 +4480,6 @@ pre.mono {
     font-size: 0.88rem;
     font-weight: 600;
     white-space: nowrap;
-    backdrop-filter: blur(10px);
 }
 .landing-module-chip i {
     color: var(--accent);
@@ -4720,10 +4701,7 @@ pre.mono {
 }
 
 .ov-stat-value {
-    background: linear-gradient(135deg, #faf5ff 0%, #d8b4fe 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+    color: var(--text);
     font-variant-numeric: tabular-nums;
 }
 
@@ -4927,8 +4905,6 @@ pre.mono {
 /* Topbar — subtle */
 .topbar {
     background: rgba(17, 19, 24, 0.7);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
     border-bottom: 1px solid var(--border);
 }
 
@@ -4940,7 +4916,7 @@ pre.mono {
 /* Auth callback splash */
 .auth-cb-shell {
     position: relative;
-    min-height: 100vh;
+    min-height: 100dvh;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -5142,10 +5118,7 @@ body::before {
         0 0 0 1px rgba(168, 85, 247, 0.32);
 }
 .sidebar-brand-row .sidebar-kicker {
-    background: linear-gradient(135deg, #c084fc, #d946ef);
-    -webkit-background-clip: text;
-            background-clip: text;
-    color: transparent;
+    color: var(--text);
     -webkit-text-fill-color: transparent;
     font-weight: 800;
 }
@@ -5209,10 +5182,7 @@ body::before {
 }
 
 .topbar-eyebrow {
-    background: linear-gradient(135deg, #c084fc, #d946ef);
-    -webkit-background-clip: text;
-            background-clip: text;
-    color: transparent;
+    color: var(--text);
     -webkit-text-fill-color: transparent;
     font-weight: 800;
     letter-spacing: 0.18em;
@@ -5302,10 +5272,7 @@ body::before {
         inset 0 0 0 1px rgba(168, 85, 247, 0.45);
 }
 .loading-copy h1 {
-    background: linear-gradient(135deg, #f1edfa 0%, #d8b4fe 60%, #d946ef 100%);
-    -webkit-background-clip: text;
-            background-clip: text;
-    color: transparent;
+    color: var(--text);
     -webkit-text-fill-color: transparent;
 }
 .loading-steps span {
@@ -5342,10 +5309,7 @@ body::before {
     box-shadow: 0 10px 30px rgba(168, 85, 247, 0.35);
 }
 .dashboard-empty-state h2 {
-    background: linear-gradient(135deg, #f1edfa 0%, #d8b4fe 60%, #d946ef 100%);
-    -webkit-background-clip: text;
-            background-clip: text;
-    color: transparent;
+    color: var(--text);
     -webkit-text-fill-color: transparent;
     font-weight: 800;
     font-size: 1.5rem;
@@ -5353,19 +5317,13 @@ body::before {
 
 /* Body / brand text helper for h2 in topbar (no override on inner cards) */
 .topbar-title-wrap h1 {
-    background: linear-gradient(135deg, #f1edfa 0%, #d8b4fe 70%, #d946ef 100%);
-    -webkit-background-clip: text;
-            background-clip: text;
-    color: transparent;
+    color: var(--text);
     -webkit-text-fill-color: transparent;
 }
 
 /* Brand text in sidebar with subtle gradient */
 .sidebar-brand-row .brand-text-glow {
-    background: linear-gradient(135deg, #f1edfa 0%, #d8b4fe 70%, #d946ef 100%);
-    -webkit-background-clip: text;
-            background-clip: text;
-    color: transparent;
+    color: var(--text);
     -webkit-text-fill-color: transparent;
     font-weight: 800;
     font-size: 1.1rem;
@@ -5397,3 +5355,35 @@ body::before {
 
 
 
+
+/* ───────────────────────────── Mobile safe-area + a11y ─────────────────────────
+   Reserva espacio para notch / barra de gestos en superficies fijas.
+   Respeta prefers-reduced-motion para animaciones no funcionales.
+   Foco visible obligatorio (DESIGN.md).
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.safe-bottom { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+.safe-top    { padding-top: max(16px, env(safe-area-inset-top)); }
+.safe-x      { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+
+/* iOS: input >= 16px previene zoom forzado */
+@media (max-width: 640px) {
+    input, select, textarea {
+        font-size: max(16px, 1rem);
+    }
+}

@@ -16,8 +16,7 @@ const DEFAULT_CAT = {
   name: "",
   emoji: "",
   description: "",
-  questions: "¿En qué podemos ayudarte?",
-};
+  questions: "¿En qué podemos ayudarte?"};
 
 export default function Tickets({ selectedGuild: guildId }) {
   const [tab, setTab] = useState("config");
@@ -49,8 +48,7 @@ export default function Tickets({ selectedGuild: guildId }) {
       const [tData, tplData] = await Promise.all([
         apiGet(`/api/guilds/${guildId}/tickets`),
         apiGet(`/api/guilds/${guildId}/tickets/templates`).catch(() => ({
-          templates: [],
-        })),
+          templates: []})),
       ]);
       setCfg(tData.config || {});
       setCategories(tData.categories || []);
@@ -87,8 +85,7 @@ export default function Tickets({ selectedGuild: guildId }) {
         panel_select_template: cfg.panel_select_template ?? null,
         panel_inside_template: cfg.panel_inside_template ?? null,
         msg_open_template: cfg.msg_open_template ?? null,
-        msg_close_template: cfg.msg_close_template ?? null,
-      };
+        msg_close_template: cfg.msg_close_template ?? null};
       await apiPatch(`/api/guilds/${guildId}/tickets`, payload);
       setDirty(false);
       showToast("Configuración guardada");
@@ -114,8 +111,7 @@ export default function Tickets({ selectedGuild: guildId }) {
         name: newCat.name.trim(),
         emoji: newCat.emoji || "",
         description: newCat.description || "",
-        questions: qs,
-      });
+        questions: qs});
       setNewCat(DEFAULT_CAT);
       const data = await apiGet(`/api/guilds/${guildId}/tickets`, { cache: false });
       setCategories(data.categories || []);
@@ -195,8 +191,7 @@ export default function Tickets({ selectedGuild: guildId }) {
     setTplDraft({
       key: tpl.template_key,
       name: tpl.name || "",
-      json: JSON.stringify(tpl.embed_data || {}, null, 2),
-    });
+      json: JSON.stringify(tpl.embed_data || {}, null, 2)});
   };
 
   // ── Panel ──────────────────────────────────────────────────────────────────
@@ -205,8 +200,7 @@ export default function Tickets({ selectedGuild: guildId }) {
     setSendingPanel(true);
     try {
       await apiPost(`/api/guilds/${guildId}/tickets/send-panel`, {
-        channel_id: parseInt(panelChannel),
-      });
+        channel_id: parseInt(panelChannel)});
       showToast("Panel enviado");
     } catch (e) {
       showToast(e.message, "error");
@@ -263,8 +257,7 @@ export default function Tickets({ selectedGuild: guildId }) {
   // Plantillas como opciones para SearchableSelect (id = template_key)
   const tplOptions = templates.map((t) => ({
     id: t.template_key,
-    name: t.name || t.template_key,
-  }));
+    name: t.name || t.template_key}));
   // Añadir entrada "Sin plantilla" virtual
   const tplOptionsWithNone = [{ id: "", name: "(Sin plantilla)" }, ...tplOptions];
 
@@ -275,9 +268,6 @@ export default function Tickets({ selectedGuild: guildId }) {
       <div className="section-header">
         <h2
           style={{
-            background: "linear-gradient(90deg,#c4b5fd,#818cf8)",
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
           }}
         >
           Tickets
@@ -313,8 +303,7 @@ export default function Tickets({ selectedGuild: guildId }) {
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))",
-                gap: 16,
-              }}
+                gap: 16}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Canal del panel</label>
@@ -366,8 +355,7 @@ export default function Tickets({ selectedGuild: guildId }) {
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
-                gap: 16,
-              }}
+                gap: 16}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Plantilla nombre del canal</label>
@@ -418,8 +406,7 @@ export default function Tickets({ selectedGuild: guildId }) {
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
-                gap: 16,
-              }}
+                gap: 16}}
             >
               {[
                 ["panel_select_template", "Panel de selección"],
@@ -460,8 +447,7 @@ export default function Tickets({ selectedGuild: guildId }) {
                 display: "grid",
                 gridTemplateColumns: "120px 1fr 1fr",
                 gap: 12,
-                alignItems: "end",
-              }}
+                alignItems: "end"}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Emoji</label>
@@ -508,8 +494,7 @@ export default function Tickets({ selectedGuild: guildId }) {
                   color: "var(--text)",
                   fontFamily: "var(--font-main)",
                   fontSize: "0.9rem",
-                  resize: "vertical",
-                }}
+                  resize: "vertical"}}
               />
             </div>
             <div>
@@ -564,8 +549,7 @@ export default function Tickets({ selectedGuild: guildId }) {
               style={{
                 display: "grid",
                 gridTemplateColumns: "1fr 1fr",
-                gap: 12,
-              }}
+                gap: 12}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Clave</label>
@@ -589,8 +573,7 @@ export default function Tickets({ selectedGuild: guildId }) {
                         background:
                           tplDraft.key === p.key ? "var(--accent-light)" : "transparent",
                         color: "var(--text)",
-                        cursor: "pointer",
-                      }}
+                        cursor: "pointer"}}
                     >
                       {p.key}
                     </button>
@@ -624,8 +607,7 @@ export default function Tickets({ selectedGuild: guildId }) {
                   color: "var(--text)",
                   fontFamily: "ui-monospace, Menlo, Consolas, monospace",
                   fontSize: "0.82rem",
-                  resize: "vertical",
-                }}
+                  resize: "vertical"}}
               />
               <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>
                 Formato Discord embed JSON. Variables disponibles en runtime:{" "}
@@ -660,8 +642,7 @@ export default function Tickets({ selectedGuild: guildId }) {
                     padding: "10px 14px",
                     background: "var(--panel)",
                     border: "1px solid var(--border)",
-                    borderRadius: "var(--radius-md)",
-                  }}
+                    borderRadius: "var(--radius-md)"}}
                 >
                   <code style={{ color: "var(--accent)" }}>{t.template_key}</code>
                   <span style={{ flex: 1, color: "var(--text)" }}>
@@ -680,8 +661,7 @@ export default function Tickets({ selectedGuild: guildId }) {
                     style={{
                       padding: "6px 12px",
                       fontSize: "0.78rem",
-                      color: "var(--danger)",
-                    }}
+                      color: "var(--danger)"}}
                   >
                     <Icon name="delete" /> Borrar
                   </button>
@@ -708,8 +688,7 @@ export default function Tickets({ selectedGuild: guildId }) {
               display: "grid",
               gridTemplateColumns: "1fr auto",
               gap: 12,
-              alignItems: "end",
-            }}
+              alignItems: "end"}}
           >
             <div className="config-item" style={{ marginBottom: 0 }}>
               <label>Canal</label>
@@ -754,8 +733,7 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
       }
     })(),
     welcome_embed_template_key: category.welcome_embed_template_key || "",
-    staff_role_id: category.staff_role_id || "",
-  });
+    staff_role_id: category.staff_role_id || ""});
 
   const handleSave = () => {
     const payload = {
@@ -767,8 +745,7 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
         .map((q) => q.trim())
         .filter(Boolean),
       welcome_embed_template_key: draft.welcome_embed_template_key || null,
-      staff_role_id: draft.staff_role_id ? parseInt(draft.staff_role_id) : null,
-    };
+      staff_role_id: draft.staff_role_id ? parseInt(draft.staff_role_id) : null};
     onSave(payload);
     setOpen(false);
   };
@@ -779,16 +756,14 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
         background: "var(--panel)",
         border: "1px solid var(--border)",
         borderRadius: "var(--radius-md)",
-        overflow: "hidden",
-      }}
+        overflow: "hidden"}}
     >
       <div
         style={{
           display: "flex",
           alignItems: "center",
           gap: 12,
-          padding: "10px 14px",
-        }}
+          padding: "10px 14px"}}
       >
         <span style={{ fontSize: "1.1rem", minWidth: 24 }}>{category.emoji || ""}</span>
         <div style={{ flex: 1 }}>
@@ -812,8 +787,7 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
           style={{
             padding: "6px 12px",
             fontSize: "0.78rem",
-            color: "var(--danger)",
-          }}
+            color: "var(--danger)"}}
         >
           <Icon name="delete" /> Borrar
         </button>
@@ -827,15 +801,13 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
             display: "flex",
             flexDirection: "column",
             gap: 12,
-            background: "var(--bg-2)",
-          }}
+            background: "var(--bg-2)"}}
         >
           <div
             style={{
               display: "grid",
               gridTemplateColumns: "120px 1fr 1fr",
-              gap: 12,
-            }}
+              gap: 12}}
           >
             <div className="config-item" style={{ marginBottom: 0 }}>
               <label>Emoji</label>
@@ -879,8 +851,7 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
                 color: "var(--text)",
                 fontFamily: "var(--font-main)",
                 fontSize: "0.9rem",
-                resize: "vertical",
-              }}
+                resize: "vertical"}}
             />
           </div>
 
@@ -888,8 +859,7 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
             style={{
               display: "grid",
               gridTemplateColumns: "1fr 1fr",
-              gap: 12,
-            }}
+              gap: 12}}
           >
             <div className="config-item" style={{ marginBottom: 0 }}>
               <label>Plantilla de bienvenida</label>

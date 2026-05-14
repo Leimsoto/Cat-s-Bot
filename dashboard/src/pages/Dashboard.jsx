@@ -45,8 +45,7 @@ const PAGE_TITLES = {
   invites: "Invitaciones",
   automod: "Automoderación",
   autoresponses: "Auto-Respuestas",
-  "custom-commands": "Comandos Personalizados",
-};
+  "custom-commands": "Comandos Personalizados"};
 
 const GUILD_KEY = "botES_guild_id";
 const GUILDS_KEY = "botES_guilds_cache";
@@ -89,8 +88,7 @@ function TopBar({
   selectedGuild,
   user,
   requiresGuild,
-  setShowLanding,
-}) {
+  setShowLanding}) {
   const { dirty, saving, onSave, onRevert } = useSaveBarState();
 
   return (
@@ -106,8 +104,7 @@ function TopBar({
             fontSize: "1.4rem",
             cursor: "pointer",
             display: "flex",
-            alignItems: "center",
-          }}
+            alignItems: "center"}}
         >
           <i className="fa-solid fa-bars" />
         </button>
@@ -188,8 +185,7 @@ export default function Dashboard() {
     username: cachedUser?.username || "Cargando...",
     avatar:
       cachedUser?.avatar || "https://cdn.discordapp.com/embed/avatars/0.png",
-    allowedGuilds: cachedGuilds,
-  });
+    allowedGuilds: cachedGuilds});
   const [selectedGuild, setSelectedGuild] = useState(initialGuildId);
   const [activePage, setActivePage] = useState("overview");
   const [showLanding, setShowLanding] = useState(
@@ -208,8 +204,7 @@ export default function Dashboard() {
           id: profile.id,
           username: profile.username || "Usuario Discord",
           avatar:
-            profile.avatar || "https://cdn.discordapp.com/embed/avatars/0.png",
-        };
+            profile.avatar || "https://cdn.discordapp.com/embed/avatars/0.png"};
         sessionStorage.setItem(GUILDS_KEY, JSON.stringify(guilds));
         sessionStorage.setItem(USER_KEY, JSON.stringify(nextUser));
         setUser({ ...nextUser, allowedGuilds: guilds });

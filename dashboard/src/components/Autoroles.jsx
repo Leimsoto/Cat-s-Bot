@@ -130,8 +130,7 @@ export default function Autoroles({ selectedGuild, onToast }) {
       await apiPost(`/api/guilds/${guildId}/autoroles/reactions`, {
         message_id: Number(msgId),
         channel_id: Number(panelChannelId),
-        mapping_data: JSON.stringify(parsed),
-      });
+        mapping_data: JSON.stringify(parsed)});
       toast("success", "Panel guardado");
       setPanelMsgId("");
       setPanelChannelId(null);
@@ -238,8 +237,7 @@ export default function Autoroles({ selectedGuild, onToast }) {
                             ? `${meta.color}22`
                             : "rgba(88,101,242,0.15)",
                           color: meta?.color || "#5865f2",
-                          flexShrink: 0,
-                        }}
+                          flexShrink: 0}}
                       >
                         <Icon name="role" />
                       </div>
@@ -352,8 +350,7 @@ export default function Autoroles({ selectedGuild, onToast }) {
                         display: "flex",
                         alignItems: "flex-start",
                         gap: 12,
-                        flexDirection: "column",
-                      }}
+                        flexDirection: "column"}}
                     >
                       <div style={{ display: "flex", alignItems: "center", gap: 12, width: "100%" }}>
                         <div
@@ -361,8 +358,7 @@ export default function Autoroles({ selectedGuild, onToast }) {
                           style={{
                             background: "rgba(88,101,242,0.15)",
                             color: "#5865f2",
-                            flexShrink: 0,
-                          }}
+                            flexShrink: 0}}
                         >
                           <Icon name="tags" />
                         </div>
@@ -389,8 +385,7 @@ export default function Autoroles({ selectedGuild, onToast }) {
                                 display: "inline-flex",
                                 alignItems: "center",
                                 gap: 6,
-                                marginRight: 12,
-                              }}
+                                marginRight: 12}}
                             >
                               <span style={{ fontSize: "1.1em" }}>{emoji}</span>
                               <span style={{ color: role?.color || "inherit" }}>

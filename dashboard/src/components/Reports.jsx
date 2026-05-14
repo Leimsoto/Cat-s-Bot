@@ -21,8 +21,7 @@ import { Icon } from "../lib/icons";
 const STATUS_META = {
   PENDING:   { label: "Pendiente",   color: "#f59e0b", icon: "loading" },
   RESOLVED:  { label: "Resuelto",    color: "#34d399", icon: "success" },
-  DISMISSED: { label: "Desestimado", color: "#9ca3af", icon: "close" },
-};
+  DISMISSED: { label: "Desestimado", color: "#9ca3af", icon: "close" }};
 
 const FILTERS = [
   { id: "PENDING",   label: "Pendientes" },
@@ -37,8 +36,7 @@ const ACTION_COLOR = {
   unmute: "#9ca3af",
   kick:   "#fb923c",
   ban:    "#ef4444",
-  unban:  "#34d399",
-};
+  unban:  "#34d399"};
 
 export default function Reports({ selectedGuild, onToast }) {
   const guildId = selectedGuild;
@@ -202,8 +200,7 @@ export default function Reports({ selectedGuild, onToast }) {
                                 padding: "3px 10px",
                                 borderRadius: 999,
                                 fontSize: "0.72rem",
-                                fontWeight: 700,
-                              }}
+                                fontWeight: 700}}
                             >
                               {meta.label}
                             </span>
@@ -296,8 +293,7 @@ export default function Reports({ selectedGuild, onToast }) {
                               borderRadius: 999,
                               fontSize: "0.72rem",
                               fontWeight: 700,
-                              textTransform: "uppercase",
-                            }}
+                              textTransform: "uppercase"}}
                           >
                             {a.action_type}
                           </span>

@@ -10,39 +10,32 @@ const RULE_META = {
     label: "Anti-Spam",
     desc: "Detecta mensajes repetidos o envíos masivos",
     icon: "fa-ban",
-    color: "#ef4444",
-  },
+    color: "#ef4444"},
   mentions: {
     label: "Menciones masivas",
     desc: "Limita la cantidad de menciones por mensaje",
     icon: "fa-at",
-    color: "#f97316",
-  },
+    color: "#f97316"},
   caps: {
     label: "Mayúsculas",
     desc: "Limita el % de mayúsculas en un mensaje",
     icon: "fa-font",
-    color: "#eab308",
-  },
+    color: "#eab308"},
   links: {
     label: "Anti-Links",
     desc: "Bloquea enlaces no autorizados",
     icon: "fa-link",
-    color: "#3b82f6",
-  },
+    color: "#3b82f6"},
   words: {
     label: "Palabras prohibidas",
     desc: "Filtra mensajes con palabras de la lista negra",
     icon: "fa-comment-slash",
-    color: "#8b5cf6",
-  },
+    color: "#8b5cf6"},
   invites: {
     label: "Anti-Invites",
     desc: "Bloquea enlaces de invitación de Discord",
     icon: "fa-paper-plane",
-    color: "#ec4899",
-  },
-};
+    color: "#ec4899"}};
 
 export default function AutoMod({ selectedGuild: guildId }) {
   const [cfg, setCfg] = useState(null);
@@ -73,8 +66,7 @@ export default function AutoMod({ selectedGuild: guildId }) {
     if (!guildId) return;
     try {
       const data = await apiGet(`/api/guilds/${guildId}/automod/log?limit=50`, {
-        cache: false,
-      });
+        cache: false});
       setLogs(Array.isArray(data) ? data : data.logs || []);
     } catch {
       setLogs([]);
@@ -114,8 +106,7 @@ export default function AutoMod({ selectedGuild: guildId }) {
         rules:
           typeof cfg.rules === "object"
             ? JSON.stringify(cfg.rules)
-            : cfg.rules,
-      };
+            : cfg.rules};
       await apiPatch(`/api/guilds/${guildId}/automod`, payload);
       setDirty(false);
       showToast("Configuración guardada");
@@ -148,9 +139,6 @@ export default function AutoMod({ selectedGuild: guildId }) {
       <div className="section-header">
         <h2
           style={{
-            background: "linear-gradient(90deg,#c4b5fd,#818cf8)",
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
           }}
         >
           Automoderación
@@ -185,8 +173,7 @@ export default function AutoMod({ selectedGuild: guildId }) {
               display: "flex",
               justifyContent: "space-between",
               alignItems: "center",
-              marginBottom: 16,
-            }}
+              marginBottom: 16}}
           >
             <div>
               <h3 style={{ margin: 0 }}>Sistema de Automoderación</h3>
@@ -194,10 +181,9 @@ export default function AutoMod({ selectedGuild: guildId }) {
                 style={{
                   color: "var(--muted)",
                   margin: "4px 0 0",
-                  fontSize: "0.84rem",
-                }}
+                  fontSize: "0.84rem"}}
               >
-                {cfg.enabled ? "Activo — monitoreando mensajes" : "Desactivado"}
+                {cfg.enabled ? "Activo, monitoreando mensajes" : "Desactivado"}
               </p>
             </div>
             <label className="toggle-switch">
@@ -214,8 +200,7 @@ export default function AutoMod({ selectedGuild: guildId }) {
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))",
-              gap: 16,
-            }}
+              gap: 16}}
           >
             {Object.entries(RULE_META).map(([key, meta]) => {
               const rule = rules[key] || {};
@@ -231,16 +216,14 @@ export default function AutoMod({ selectedGuild: guildId }) {
                     background: isOn
                       ? meta.color + "08"
                       : "rgba(255,255,255,0.02)",
-                    transition: "all 0.2s",
-                  }}
+                    transition: "all 0.2s"}}
                 >
                   <div
                     style={{
                       display: "flex",
                       justifyContent: "space-between",
                       alignItems: "center",
-                      marginBottom: 10,
-                    }}
+                      marginBottom: 10}}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       <i
@@ -252,8 +235,7 @@ export default function AutoMod({ selectedGuild: guildId }) {
                         <div
                           style={{
                             fontSize: "0.78rem",
-                            color: "var(--muted)",
-                          }}
+                            color: "var(--muted)"}}
                         >
                           {meta.desc}
                         </div>
@@ -328,8 +310,7 @@ export default function AutoMod({ selectedGuild: guildId }) {
                           color: "var(--text)",
                           fontFamily: "var(--font-main)",
                           fontSize: "0.84rem",
-                          resize: "vertical",
-                        }}
+                          resize: "vertical"}}
                       />
                     </div>
                   )}
@@ -375,14 +356,12 @@ export default function AutoMod({ selectedGuild: guildId }) {
               style={{
                 width: "100%",
                 borderCollapse: "collapse",
-                fontSize: "0.84rem",
-              }}
+                fontSize: "0.84rem"}}
             >
               <thead>
                 <tr
                   style={{
-                    borderBottom: "1px solid rgba(255,255,255,0.07)",
-                  }}
+                    borderBottom: "1px solid rgba(255,255,255,0.07)"}}
                 >
                   {["Regla", "Usuario", "Acción", "Fecha"].map((h) => (
                     <th
@@ -394,8 +373,7 @@ export default function AutoMod({ selectedGuild: guildId }) {
                         color: "var(--muted)",
                         fontSize: "0.75rem",
                         textTransform: "uppercase",
-                        letterSpacing: "0.05em",
-                      }}
+                        letterSpacing: "0.05em"}}
                     >
                       {h}
                     </th>
@@ -406,14 +384,12 @@ export default function AutoMod({ selectedGuild: guildId }) {
                 {logs.map((l, i) => {
                   const meta = RULE_META[l.rule] || {
                     label: l.rule,
-                    color: "#7a9bb5",
-                  };
+                    color: "#7a9bb5"};
                   return (
                     <tr
                       key={l.id || i}
                       style={{
-                        borderBottom: "1px solid rgba(255,255,255,0.04)",
-                      }}
+                        borderBottom: "1px solid rgba(255,255,255,0.04)"}}
                     >
                       <td style={{ padding: "10px 16px" }}>
                         <span
@@ -424,8 +400,7 @@ export default function AutoMod({ selectedGuild: guildId }) {
                             fontWeight: 700,
                             background: meta.color + "18",
                             color: meta.color,
-                            border: `1px solid ${meta.color}30`,
-                          }}
+                            border: `1px solid ${meta.color}30`}}
                         >
                           {meta.label}
                         </span>
@@ -434,8 +409,7 @@ export default function AutoMod({ selectedGuild: guildId }) {
                         style={{
                           padding: "10px 16px",
                           fontFamily: "monospace",
-                          fontSize: "0.78rem",
-                        }}
+                          fontSize: "0.78rem"}}
                       >
                         {l.user_id}
                       </td>
@@ -446,8 +420,7 @@ export default function AutoMod({ selectedGuild: guildId }) {
                         style={{
                           padding: "10px 16px",
                           color: "var(--muted)",
-                          fontSize: "0.76rem",
-                        }}
+                          fontSize: "0.76rem"}}
                       >
                         {l.created_at
                           ? new Date(l.created_at).toLocaleDateString("es")

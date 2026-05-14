@@ -96,8 +96,7 @@ export default function Suggestions({ selectedGuild: guildId, onToast }) {
         auto_publish: Number(cfg.auto_publish || 0),
         min_length: Number(cfg.min_length || 10),
         max_length: Number(cfg.max_length || 2000),
-        cooldown_seconds: Number(cfg.cooldown_seconds || 0),
-      };
+        cooldown_seconds: Number(cfg.cooldown_seconds || 0)};
       // remover null para no sobreescribir con NULL involuntariamente
       Object.keys(payload).forEach((k) => payload[k] == null && delete payload[k]);
       await apiPatch(`/api/guilds/${guildId}/suggestions`, payload);
@@ -131,8 +130,7 @@ export default function Suggestions({ selectedGuild: guildId, onToast }) {
     try {
       await apiPatch(`/api/guilds/${guildId}/suggestions/list/${id}`, {
         status: "DENIED",
-        denial_reason: reason.trim() || null,
-      });
+        denial_reason: reason.trim() || null});
       toast("success", `#${id} → Denegada`);
       await Promise.all([loadSuggestions(statusFilter), load()]);
     } catch (e) {
@@ -180,8 +178,7 @@ export default function Suggestions({ selectedGuild: guildId, onToast }) {
                     style={{
                       padding: "5px 12px", borderRadius: 999,
                       fontSize: "0.75rem", fontWeight: 700,
-                      background: `${color}18`, color, border: `1px solid ${color}33`,
-                    }}
+                      background: `${color}18`, color, border: `1px solid ${color}33`}}
                   >
                     {stats[s.toLowerCase()] || 0} {STATUS_LABEL[s]}
                   </span>
@@ -347,8 +344,7 @@ export default function Suggestions({ selectedGuild: guildId, onToast }) {
                           width: 36, height: 36, borderRadius: "50%", flexShrink: 0,
                           background: "var(--accent-light)",
                           display: "flex", alignItems: "center", justifyContent: "center",
-                          color: "var(--accent)", fontWeight: 700,
-                        }}
+                          color: "var(--accent)", fontWeight: 700}}
                       >
                         {(s.username || "?")[0].toUpperCase()}
                       </div>
@@ -360,8 +356,7 @@ export default function Suggestions({ selectedGuild: guildId, onToast }) {
                             padding: "3px 10px", borderRadius: 999,
                             fontSize: "0.72rem", fontWeight: 700,
                             background: `${stColor}18`, color: stColor,
-                            border: `1px solid ${stColor}33`,
-                          }}
+                            border: `1px solid ${stColor}33`}}
                         >
                           {STATUS_LABEL[s.status] || s.status}
                         </span>

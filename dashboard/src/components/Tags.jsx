@@ -42,8 +42,7 @@ export default function Tags({ selectedGuild }) {
     try {
       await apiPost(`/api/guilds/${selectedGuild}/tags`, {
         name: form.name.trim().toLowerCase().replace(/\s+/g, "-"),
-        content: form.content.trim(),
-      });
+        content: form.content.trim()});
       showToast("✅ Tag creado");
       setForm(EMPTY_FORM);
       setShowCreate(false);
@@ -85,17 +84,12 @@ export default function Tags({ selectedGuild }) {
             justifyContent: "space-between",
             alignItems: "flex-start",
             flexWrap: "wrap",
-            gap: 12,
-          }}
+            gap: 12}}
         >
           <div>
             <h2
               style={{
-                background: "linear-gradient(90deg,#c4b5fd,#818cf8)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                margin: 0,
-              }}
+                margin: 0}}
             >
               Tags / Comandos Personalizados
             </h2>
@@ -103,8 +97,7 @@ export default function Tags({ selectedGuild }) {
               style={{
                 color: "var(--muted)",
                 margin: "4px 0 0",
-                fontSize: "0.88rem",
-              }}
+                fontSize: "0.88rem"}}
             >
               {tags.length} tag(s) configurado(s)
             </p>
@@ -118,8 +111,7 @@ export default function Tags({ selectedGuild }) {
               display: "flex",
               alignItems: "center",
               gap: 8,
-              fontSize: "0.9rem",
-            }}
+              fontSize: "0.9rem"}}
           >
             <span style={{ fontSize: "1.1rem" }}>{showCreate ? "✕" : "+"}</span>
             {showCreate ? "Cancelar" : "Crear tag"}
@@ -139,8 +131,7 @@ export default function Tags({ selectedGuild }) {
               fontSize: "1rem",
               borderBottom: "1px solid rgba(139,92,246,0.15)",
               paddingBottom: 12,
-              marginBottom: 20,
-            }}
+              marginBottom: 20}}
           >
             Nuevo Tag
           </div>
@@ -175,8 +166,7 @@ export default function Tags({ selectedGuild }) {
                     <span
                       style={{
                         fontSize: "0.72rem",
-                        color: "rgba(200,200,220,0.4)",
-                      }}
+                        color: "rgba(200,200,220,0.4)"}}
                     >
                       {form.content.length}/1900 chars
                     </span>
@@ -239,8 +229,7 @@ export default function Tags({ selectedGuild }) {
           background: "rgba(0,0,0,0.25)",
           border: "1px solid rgba(139,92,246,0.2)",
           borderRadius: 14,
-          padding: "11px 16px",
-        }}
+          padding: "11px 16px"}}
       >
         <svg
           width="15"
@@ -266,8 +255,7 @@ export default function Tags({ selectedGuild }) {
             outline: "none",
             color: "var(--text)",
             fontSize: "0.88rem",
-            fontFamily: "var(--font-main)",
-          }}
+            fontFamily: "var(--font-main)"}}
         />
         {search && (
           <button
@@ -276,8 +264,7 @@ export default function Tags({ selectedGuild }) {
               background: "none",
               border: "none",
               cursor: "pointer",
-              color: "var(--muted)",
-            }}
+              color: "var(--muted)"}}
           >
             ✕
           </button>
@@ -290,7 +277,7 @@ export default function Tags({ selectedGuild }) {
           className="glass-panel"
           style={{ padding: "48px", textAlign: "center" }}
         >
-          <div style={{ fontSize: "2.5rem", marginBottom: 12 }}>🏷️</div>
+          <div style={{ fontSize: "2.5rem", marginBottom: 12 }}><i className="fa-solid fa-tags" aria-hidden="true" /></div>
           <h3 style={{ margin: "0 0 8px" }}>
             {search ? "Sin resultados" : "Sin tags configurados"}
           </h3>
@@ -305,8 +292,7 @@ export default function Tags({ selectedGuild }) {
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))",
-            gap: 14,
-          }}
+            gap: 14}}
         >
           {filtered.map((tag) => (
             <div
@@ -319,8 +305,7 @@ export default function Tags({ selectedGuild }) {
                   display: "flex",
                   alignItems: "center",
                   gap: 10,
-                  marginBottom: 10,
-                }}
+                  marginBottom: 10}}
               >
                 <div
                   style={{
@@ -333,8 +318,7 @@ export default function Tags({ selectedGuild }) {
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    fontSize: "1rem",
-                  }}
+                    fontSize: "1rem"}}
                 >
                   🏷️
                 </div>
@@ -345,8 +329,7 @@ export default function Tags({ selectedGuild }) {
                       display: "block",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
+                      whiteSpace: "nowrap"}}
                   >
                     /{tag.name}
                   </strong>
@@ -369,8 +352,7 @@ export default function Tags({ selectedGuild }) {
                     cursor: "pointer",
                     fontSize: "0.76rem",
                     fontWeight: 700,
-                    flexShrink: 0,
-                  }}
+                    flexShrink: 0}}
                 >
                   ✕
                 </button>
@@ -384,8 +366,7 @@ export default function Tags({ selectedGuild }) {
                   display: "-webkit-box",
                   WebkitLineClamp: 3,
                   WebkitBoxOrient: "vertical",
-                  overflow: "hidden",
-                }}
+                  overflow: "hidden"}}
               >
                 {tag.content || "Sin contenido"}
               </p>

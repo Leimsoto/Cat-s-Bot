@@ -240,8 +240,7 @@ export default function Welcome({ selectedGuild: guildId, onToast }) {
                       alignItems: "center",
                       gap: 14,
                       padding: "12px 20px",
-                      borderBottom: i < leaderboard.length - 1 ? "1px solid var(--border)" : "none",
-                    }}
+                      borderBottom: i < leaderboard.length - 1 ? "1px solid var(--border)" : "none"}}
                   >
                     <div
                       style={{
@@ -257,8 +256,7 @@ export default function Welcome({ selectedGuild: guildId, onToast }) {
                           i === 0 ? "#fbbf24" :
                           i === 1 ? "#9ca3af" :
                           i === 2 ? "#b46b37" :
-                          "var(--muted)",
-                      }}
+                          "var(--muted)"}}
                     >
                       #{i + 1}
                     </div>
@@ -270,8 +268,7 @@ export default function Welcome({ selectedGuild: guildId, onToast }) {
                           width: 36, height: 36, borderRadius: "50%", flexShrink: 0,
                           background: "var(--accent-light)",
                           display: "flex", alignItems: "center", justifyContent: "center",
-                          color: "var(--accent)", fontWeight: 700,
-                        }}
+                          color: "var(--accent)", fontWeight: 700}}
                       >
                         {entry.username?.[0]?.toUpperCase() || "?"}
                       </div>

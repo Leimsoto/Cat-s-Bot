@@ -22,8 +22,7 @@ function RouteFallback() {
         placeItems: 'center',
         background: '#0b0a10',
         color: '#94a3b8',
-        font: '500 0.875rem "DM Sans", system-ui, sans-serif',
-      }}
+        font: '500 0.875rem "DM Sans", system-ui, sans-serif'}}
     >
       Cargando…
     </div>
