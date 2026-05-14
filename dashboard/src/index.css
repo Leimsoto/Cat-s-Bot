@@ -5119,7 +5119,7 @@ body::before {
 }
 .sidebar-brand-row .sidebar-kicker {
     color: var(--text);
-    -webkit-text-fill-color: transparent;
+    -webkit-text-fill-color: initial;
     font-weight: 800;
 }
 
@@ -5171,19 +5171,16 @@ body::before {
     border-top: 1px solid rgba(168, 85, 247, 0.10);
 }
 
-/* Topbar — landing-glass with slim purple tint */
+/* Topbar — solid surface, sin glass */
 .topbar {
     height: var(--topbar-height);
-    background: rgba(13, 10, 22, 0.72);
-    border-bottom: 1px solid rgba(168, 85, 247, 0.12);
-    backdrop-filter: blur(18px) saturate(160%);
-    -webkit-backdrop-filter: blur(18px) saturate(160%);
-    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.025);
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
 }
 
 .topbar-eyebrow {
     color: var(--text);
-    -webkit-text-fill-color: transparent;
+    -webkit-text-fill-color: initial;
     font-weight: 800;
     letter-spacing: 0.18em;
 }
@@ -5273,7 +5270,7 @@ body::before {
 }
 .loading-copy h1 {
     color: var(--text);
-    -webkit-text-fill-color: transparent;
+    -webkit-text-fill-color: initial;
 }
 .loading-steps span {
     background: rgba(168, 85, 247, 0.08);
@@ -5284,16 +5281,12 @@ body::before {
 /* Empty-state — branded glass + gradient icon */
 .dashboard-empty-state {
     padding: 48px 28px;
-    background: rgba(20, 14, 32, 0.55);
-    border: 1px solid rgba(168, 85, 247, 0.16);
-    border-radius: var(--radius-2xl);
-    box-shadow:
-        0 12px 40px rgba(0, 0, 0, 0.35),
-        inset 0 0 0 1px rgba(255, 255, 255, 0.02);
-    backdrop-filter: blur(14px) saturate(150%);
-    -webkit-backdrop-filter: blur(14px) saturate(150%);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
     max-width: 560px;
     margin: 24px auto;
+    text-align: center;
 }
 .dashboard-empty-icon {
     display: grid;
@@ -5310,7 +5303,7 @@ body::before {
 }
 .dashboard-empty-state h2 {
     color: var(--text);
-    -webkit-text-fill-color: transparent;
+    -webkit-text-fill-color: initial;
     font-weight: 800;
     font-size: 1.5rem;
 }
@@ -5318,13 +5311,13 @@ body::before {
 /* Body / brand text helper for h2 in topbar (no override on inner cards) */
 .topbar-title-wrap h1 {
     color: var(--text);
-    -webkit-text-fill-color: transparent;
+    -webkit-text-fill-color: initial;
 }
 
 /* Brand text in sidebar with subtle gradient */
 .sidebar-brand-row .brand-text-glow {
     color: var(--text);
-    -webkit-text-fill-color: transparent;
+    -webkit-text-fill-color: initial;
     font-weight: 800;
     font-size: 1.1rem;
 }
@@ -5388,57 +5381,73 @@ body::before {
     }
 }
 
-/* ───────────────────────────── Light theme stub ────────────────────────────
-   DESIGN.md exige dark default + light disponible y auditado.
-   Activación: prefers-color-scheme: light (sistema) o data-theme="light" (manual).
-   Tokens tintados hacia el morado (chroma 0.005-0.01), nunca #fff puro.
-   ───────────────────────────────────────────────────────────────────────── */
 
-@media (prefers-color-scheme: light) {
-    :root:not([data-theme="dark"]) {
-        --bg: #faf8fc;
-        --surface: #ffffff;
-        --panel: #f5f1fa;
-        --panel-hover: #ece4f5;
-        --text: #1a0f24;
-        --text-muted: #5b4d6e;
-        --text-dim: #8a7b9e;
-        --border: rgba(26, 15, 36, 0.08);
-        --border-accent: rgba(168, 85, 247, 0.32);
-        --muted: #5b4d6e;
-        --dim: #8a7b9e;
-        --line: rgba(26, 15, 36, 0.08);
-        --line-strong: rgba(168, 85, 247, 0.32);
-        --material-soft: rgba(26, 15, 36, 0.03);
-        --material-inset: rgba(26, 15, 36, 0.12);
-        --material: #f5f1fa;
-        --shadow-sm: 0 1px 2px rgba(26, 15, 36, 0.08);
-        --shadow-md: 0 4px 12px rgba(26, 15, 36, 0.10), 0 1px 3px rgba(26, 15, 36, 0.06);
-        --shadow-lg: 0 10px 28px rgba(26, 15, 36, 0.14), 0 2px 6px rgba(26, 15, 36, 0.08);
-        --shadow-inset: inset 0 2px 8px rgba(26, 15, 36, 0.06);
-        --shadow-inset-deep: inset 0 3px 12px rgba(26, 15, 36, 0.10);
-        --shadow-inset-small: inset 0 1px 4px rgba(26, 15, 36, 0.05);
+/* ───────────────────────────── Mobile dashboard fixes ───────────────────────
+   Tras feedback: el dashboard se veía bugueado en móvil.
+   - Scrim para drawer sidebar (cerrar tocando fuera).
+   - Topbar más alto y legible en móvil.
+   - Content-area respeta safe-area-inset.
+   - Title eyebrow se mantiene visible.
+   ────────────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+    /* Scrim cuando sidebar abierto */
+    .sidebar.mobile-open::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        z-index: -1;
+        pointer-events: auto;
+    }
+
+    /* Body no scroll cuando drawer abierto */
+    body:has(.sidebar.mobile-open) {
+        overflow: hidden;
+    }
+
+    /* Topbar más legible en móvil */
+    .topbar {
+        height: auto;
+        min-height: var(--topbar-height);
+        padding: 10px 14px;
+    }
+
+    .topbar-eyebrow {
+        font-size: 0.62rem;
+        margin: 0 0 2px 0;
+        opacity: 0.85;
+    }
+
+    .topbar-title-wrap {
+        min-width: 0;
+        flex: 1;
+    }
+
+    .topbar-title-wrap h1 {
+        font-size: 1.05rem;
+        line-height: 1.2;
+        max-width: 100%;
+    }
+
+    /* Content-area: respeta safe-area + padding cómodo */
+    .content-area {
+        padding: 14px 14px max(24px, env(safe-area-inset-bottom));
+    }
+
+    /* Botón hamburguesa: tap target 44 garantizado */
+    .topbar .mobile-only {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    /* Sidebar mobile drawer respeta safe-area-inset-top */
+    .sidebar {
+        padding-top: max(14px, env(safe-area-inset-top));
     }
 }
 
-:root[data-theme="light"] {
-    --bg: #faf8fc;
-    --surface: #ffffff;
-    --panel: #f5f1fa;
-    --panel-hover: #ece4f5;
-    --text: #1a0f24;
-    --text-muted: #5b4d6e;
-    --text-dim: #8a7b9e;
-    --border: rgba(26, 15, 36, 0.08);
-    --border-accent: rgba(168, 85, 247, 0.32);
-    --muted: #5b4d6e;
-    --dim: #8a7b9e;
-    --line: rgba(26, 15, 36, 0.08);
-    --line-strong: rgba(168, 85, 247, 0.32);
-    --material-soft: rgba(26, 15, 36, 0.03);
-    --material-inset: rgba(26, 15, 36, 0.12);
-    --material: #f5f1fa;
-    --shadow-sm: 0 1px 2px rgba(26, 15, 36, 0.08);
-    --shadow-md: 0 4px 12px rgba(26, 15, 36, 0.10), 0 1px 3px rgba(26, 15, 36, 0.06);
-    --shadow-lg: 0 10px 28px rgba(26, 15, 36, 0.14), 0 2px 6px rgba(26, 15, 36, 0.08);
+/* Force dark color-scheme — sin modo claro (user request) */
+:root {
+    color-scheme: dark;
 }

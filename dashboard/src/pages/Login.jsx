@@ -3,6 +3,21 @@ import CatLogo from "../components/CatLogo";
 
 const LOGIN_URL = "/api/auth/login";
 
+function DiscordIcon({ size = 18 }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M20.317 4.369A19.79 19.79 0 0 0 16.558 3a14.86 14.86 0 0 0-.65 1.328 18.27 18.27 0 0 0-5.487 0A12.5 12.5 0 0 0 9.77 3a19.74 19.74 0 0 0-3.76 1.37C2.4 9.59 1.5 14.67 1.96 19.68a19.94 19.94 0 0 0 5.99 3.02c.48-.66.92-1.36 1.3-2.1a12.94 12.94 0 0 1-2.04-.98c.17-.13.34-.26.5-.39a14.27 14.27 0 0 0 12.58 0c.16.13.33.26.5.39-.65.39-1.34.71-2.04.98.38.74.82 1.44 1.3 2.1a19.91 19.91 0 0 0 5.99-3.02c.55-5.92-.91-10.95-3.72-15.31zM8.02 16.27c-1.18 0-2.16-1.08-2.16-2.42 0-1.33.96-2.42 2.16-2.42 1.2 0 2.18 1.09 2.16 2.42 0 1.34-.97 2.42-2.16 2.42zm7.96 0c-1.18 0-2.16-1.08-2.16-2.42 0-1.33.96-2.42 2.16-2.42 1.2 0 2.18 1.09 2.16 2.42 0 1.34-.96 2.42-2.16 2.42z" />
+    </svg>
+  );
+}
+
 const FEATURES = [
   {
     icon: "fa-microchip",
@@ -222,7 +237,7 @@ export default function Login() {
             <CatLogo size={32} ariaLabel="Cat's Bot" />
           </span>
           <span className="landing-logo-text">
-            Cats <span>Bots</span>
+            Cat's <span>Bot</span>
           </span>
         </a>
         <nav className="landing-nav-links">
@@ -232,7 +247,7 @@ export default function Login() {
           <a href="#estadisticas">Estadísticas</a>
         </nav>
         <button className="landing-nav-cta" onClick={handleLogin}>
-          <i className="fa-brands fa-discord" />
+          <DiscordIcon />
           Iniciar sesión
         </button>
       </header>
@@ -279,12 +294,18 @@ export default function Login() {
 
             <div className="landing-hero-actions">
               <button className="landing-cta-primary" onClick={handleLogin}>
-                <i className="fa-brands fa-discord" />
+                <DiscordIcon size={20} />
                 Acceder al panel
-                <i className="fa-solid fa-arrow-right landing-cta-arrow" />
+                <i className="fa-solid fa-arrow-right landing-cta-arrow" aria-hidden="true" />
               </button>
-              <a className="landing-cta-secondary" href="#caracteristicas">
-                Ver capacidades
+              <a
+                className="landing-cta-secondary"
+                href="https://catsbot-setup.leimsoto.com"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <i className="fa-solid fa-plus" aria-hidden="true" />
+                Aún no lo tienes, invítalo
               </a>
             </div>
 
@@ -483,7 +504,7 @@ export default function Login() {
               </div>
               <div className="landing-cta-card-actions">
                 <button className="landing-cta-primary" onClick={handleLogin}>
-                  <i className="fa-brands fa-discord" />
+                  <DiscordIcon />
                   Acceder al panel
                 </button>
                 <small>
