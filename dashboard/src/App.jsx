@@ -1,7 +1,9 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import Login from './pages/Login';
-import Dashboard from './pages/Dashboard';
-import AuthCallback from './pages/AuthCallback';
+
+const Login = lazy(() => import('./pages/Login'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const AuthCallback = lazy(() => import('./pages/AuthCallback'));
 
 function ProtectedRoute({ children }) {
   const token = localStorage.getItem('botES_token');
@@ -9,25 +11,46 @@ function ProtectedRoute({ children }) {
   return children;
 }
 
+function RouteFallback() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        minHeight: '100dvh',
+        display: 'grid',
+        placeItems: 'center',
+        background: '#0b0a10',
+        color: '#94a3b8',
+        font: '500 0.875rem "DM Sans", system-ui, sans-serif',
+      }}
+    >
+      Cargando…
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Login />} />
-        <Route path="/auth/callback" element={<AuthCallback />} />
-        <Route path="/panel/login" element={<Navigate to="/" replace />} />
-        <Route path="/panel/auth/callback" element={<AuthCallback />} />
-        <Route path="/panel" element={<Navigate to="/panel/dashboard" replace />} />
-        <Route
-          path="/panel/dashboard/*"
-          element={
-            <ProtectedRoute>
-              <Dashboard />
-            </ProtectedRoute>
-          }
-        />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          <Route path="/" element={<Login />} />
+          <Route path="/auth/callback" element={<AuthCallback />} />
+          <Route path="/panel/login" element={<Navigate to="/" replace />} />
+          <Route path="/panel/auth/callback" element={<AuthCallback />} />
+          <Route path="/panel" element={<Navigate to="/panel/dashboard" replace />} />
+          <Route
+            path="/panel/dashboard/*"
+            element={
+              <ProtectedRoute>
+                <Dashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 }
