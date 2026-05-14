@@ -3511,7 +3511,8 @@ pre.mono {
     }
 }
 
-@media (max-width: 768px) {
+/* Sidebar como drawer en tablet + móvil. ≥1024 = sidebar fija desktop. */
+@media (max-width: 1023.98px) {
     :root {
         --sidebar-width: 0px;
     }
@@ -3520,24 +3521,30 @@ pre.mono {
         display: flex !important;
     }
 
-    /* Sidebar becomes a slide-in drawer */
+    /* Sidebar fuera del flex flow: NO reserva ancho, NO espacio vacío. */
     .sidebar {
-        width: 256px;
+        width: 280px;
+        max-width: 84vw;
         transform: translateX(-100%);
-        transition: transform 0.25s ease;
+        transition: transform 0.25s ease-out;
         z-index: 300;
         height: 100dvh;
         position: fixed;
         left: 0;
         top: 0;
+        flex: 0 0 auto;
     }
 
     .sidebar.mobile-open {
         transform: translateX(0);
     }
 
+    /* Main content ocupa todo el ancho disponible. */
     .main-content {
         margin-left: 0;
+        width: 100%;
+        max-width: 100%;
+        flex: 1 1 100%;
     }
 
     .content-area {
@@ -3550,11 +3557,14 @@ pre.mono {
 
     .topbar-title-wrap h1 {
         font-size: 1rem;
-        max-width: 52vw;
+        max-width: 60vw;
         overflow: hidden;
         white-space: nowrap;
         text-overflow: ellipsis;
     }
+}
+
+@media (max-width: 768px) {
 
     .ov-charts-row,
     .ov-bottom-row {
@@ -5322,14 +5332,13 @@ body::before {
     font-size: 1.1rem;
 }
 
-/* Mobile drawer keeps backdrop legibility */
-@media (max-width: 768px) {
+/* Drawer sidebar legibilidad (≤1023) */
+@media (max-width: 1023.98px) {
     .sidebar {
         background:
             linear-gradient(180deg, rgba(168, 85, 247, 0.06) 0%, transparent 24%),
-            rgba(10, 7, 18, 0.92);
-        backdrop-filter: blur(20px) saturate(160%);
-        -webkit-backdrop-filter: blur(20px) saturate(160%);
+            rgba(10, 7, 18, 0.96);
+        box-shadow: 8px 0 32px rgba(0, 0, 0, 0.5);
     }
     body::before {
         opacity: 0.5;
@@ -5390,7 +5399,7 @@ body::before {
    - Title eyebrow se mantiene visible.
    ────────────────────────────────────────────────────────────────────────── */
 
-@media (max-width: 768px) {
+@media (max-width: 1023.98px) {
     /* Scrim cuando sidebar abierto */
     .sidebar.mobile-open::before {
         content: "";
@@ -5406,7 +5415,7 @@ body::before {
         overflow: hidden;
     }
 
-    /* Topbar más legible en móvil */
+    /* Topbar legible en tablet/móvil */
     .topbar {
         height: auto;
         min-height: var(--topbar-height);
@@ -5441,7 +5450,7 @@ body::before {
         min-height: 44px;
     }
 
-    /* Sidebar mobile drawer respeta safe-area-inset-top */
+    /* Sidebar drawer respeta safe-area-inset-top */
     .sidebar {
         padding-top: max(14px, env(safe-area-inset-top));
     }
