@@ -72,7 +72,7 @@ El sistema de **Cat's Bot** está construido con una arquitectura moderna que di
 <div align="center">
 
 **Leimsoto** <br/>
-**Arielteen**
+**Arielteen** <br/>
 **Claude**
 
 </div>
