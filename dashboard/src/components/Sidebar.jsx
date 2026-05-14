@@ -93,10 +93,10 @@ export default function Sidebar({
           width: "100%"}}
       >
         <div className="sidebar-brand-block sidebar-brand-row">
-          <CatLogo size={38} ariaLabel="Cats Bots" />
+          <CatLogo size={38} ariaLabel="Cat's Bot" />
           <div>
             <p className="sidebar-kicker">Panel de Control</p>
-            <h2 className="brand-text-glow">Cats Bots</h2>
+            <h2 className="brand-text-glow">Cat's Bot</h2>
           </div>
         </div>
         <button

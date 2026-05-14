@@ -219,7 +219,7 @@ export default function Login() {
       <header className="landing-nav">
         <a className="landing-logo" href="#top">
           <span className="landing-logo-mark landing-logo-mark--cat">
-            <CatLogo size={32} ariaLabel="Cats Bots" />
+            <CatLogo size={32} ariaLabel="Cat's Bot" />
           </span>
           <span className="landing-logo-text">
             Cats <span>Bots</span>
@@ -298,10 +298,10 @@ export default function Login() {
             <div className="landing-hero-card-head">
               <div className="landing-hero-card-id">
                 <span className="landing-hero-card-mark landing-hero-card-mark--cat">
-                  <CatLogo size={42} ariaLabel="Cats Bots" />
+                  <CatLogo size={42} ariaLabel="Cat's Bot" />
                 </span>
                 <div>
-                  <strong>Cats Bots</strong>
+                  <strong>Cat's Bot</strong>
                   <small>Panel · v2.0</small>
                 </div>
               </div>
@@ -444,7 +444,7 @@ export default function Login() {
 
         <section id="ventajas" className="landing-section">
           <Reveal className="landing-section-head">
-            <span className="landing-eyebrow">Por qué Cats Bots</span>
+            <span className="landing-eyebrow">Por qué Cat's Bot</span>
             <h2>Pensado por y para administradores serios.</h2>
             <p>
               Cada decisión técnica del bot está orientada a no dejarte solo
@@ -499,9 +499,9 @@ export default function Login() {
       <footer className="landing-footer">
         <div>
           <span className="landing-logo-mark landing-logo-mark--sm landing-logo-mark--cat">
-            <CatLogo size={20} ariaLabel="Cats Bots" />
+            <CatLogo size={20} ariaLabel="Cat's Bot" />
           </span>
-          <span>Cats Bots</span>
+          <span>Cat's Bot</span>
           <small>Panel de control v2.0</small>
         </div>
         <div className="landing-footer-meta">

@@ -1,51 +1,75 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import { useNavigate } from "react-router-dom";
 import Sidebar from "../components/Sidebar";
 import LandingOverlay from "../components/LandingOverlay";
-import Overview from "../components/Overview";
-import IAConfig from "../components/IAConfig";
-import Radio from "../components/Radio";
-import Tickets from "../components/Tickets";
-import Moderation from "../components/Moderation";
-import EmbedBuilder from "../components/EmbedBuilder";
-import Levels from "../components/Levels";
-import Autoroles from "../components/Autoroles";
-import Giveaways from "../components/Giveaways";
-import Tags from "../components/Tags";
-import Reports from "../components/Reports";
-import Schedules from "../components/Schedules";
-import Logs from "../components/Logs";
-import VoiceGen from "../components/VoiceGen";
-import Welcome from "../components/Welcome";
-import Suggestions from "../components/Suggestions";
-import AutoMod from "../components/AutoMod";
-import AutoResponses from "../components/AutoResponses";
-import CustomCommands from "../components/CustomCommands";
 import { apiGet, apiPreload } from "../lib/api";
 import CatLogo from "../components/CatLogo";
 import { SaveBarProvider, useSaveBarState } from "../lib/SaveBarContext";
 
+const Overview = lazy(() => import("../components/Overview"));
+const IAConfig = lazy(() => import("../components/IAConfig"));
+const Radio = lazy(() => import("../components/Radio"));
+const Tickets = lazy(() => import("../components/Tickets"));
+const Moderation = lazy(() => import("../components/Moderation"));
+const EmbedBuilder = lazy(() => import("../components/EmbedBuilder"));
+const Levels = lazy(() => import("../components/Levels"));
+const Autoroles = lazy(() => import("../components/Autoroles"));
+const Giveaways = lazy(() => import("../components/Giveaways"));
+const Tags = lazy(() => import("../components/Tags"));
+const Reports = lazy(() => import("../components/Reports"));
+const Schedules = lazy(() => import("../components/Schedules"));
+const Logs = lazy(() => import("../components/Logs"));
+const VoiceGen = lazy(() => import("../components/VoiceGen"));
+const Welcome = lazy(() => import("../components/Welcome"));
+const Suggestions = lazy(() => import("../components/Suggestions"));
+const AutoMod = lazy(() => import("../components/AutoMod"));
+const AutoResponses = lazy(() => import("../components/AutoResponses"));
+const CustomCommands = lazy(() => import("../components/CustomCommands"));
+
+const PANELS = {
+  overview: Overview,
+  ia: IAConfig,
+  radio: Radio,
+  tickets: Tickets,
+  moderation: Moderation,
+  embeds: EmbedBuilder,
+  levels: Levels,
+  autoroles: Autoroles,
+  giveaways: Giveaways,
+  tags: Tags,
+  reports: Reports,
+  schedules: Schedules,
+  logs: Logs,
+  "voice-gen": VoiceGen,
+  welcome: Welcome,
+  suggestions: Suggestions,
+  automod: AutoMod,
+  autoresponses: AutoResponses,
+  "custom-commands": CustomCommands,
+};
+
 const PAGE_TITLES = {
-  overview: "Resumen del Servidor",
-  ia: "Inteligencia Artificial",
-  radio: "Radio / Música",
-  tickets: "Sistema de Tickets",
+  overview: "Resumen del servidor",
+  ia: "Inteligencia artificial",
+  radio: "Radio y música",
+  tickets: "Tickets",
   moderation: "Moderación",
-  embeds: "Creador de Embeds",
-  levels: "Sistema de Niveles",
+  embeds: "Creador de embeds",
+  levels: "Niveles",
   autoroles: "Autoroles",
   giveaways: "Sorteos",
   tags: "Tags",
   reports: "Reportes",
-  schedules: "Mensajes Programados",
+  schedules: "Mensajes programados",
   logs: "Registros",
-  "voice-gen": "Canales de Voz Auto",
-  welcome: "Bienvenidas & Boosters",
+  "voice-gen": "Canales de voz",
+  welcome: "Bienvenidas y boosters",
   suggestions: "Sugerencias",
   invites: "Invitaciones",
   automod: "Automoderación",
-  autoresponses: "Auto-Respuestas",
-  "custom-commands": "Comandos Personalizados"};
+  autoresponses: "Auto-respuestas",
+  "custom-commands": "Comandos personalizados",
+};
 
 const GUILD_KEY = "botES_guild_id";
 const GUILDS_KEY = "botES_guilds_cache";
@@ -61,17 +85,17 @@ function readCache(key, fallback) {
 
 function LoadingScreen() {
   return (
-    <div className="loading-stage">
+    <div className="loading-stage" role="status" aria-live="polite">
       <div className="loading-orb loading-orb--cat">
         <CatLogo size={56} />
       </div>
       <div className="loading-copy">
-        <p className="topbar-eyebrow">Cats Bots — Panel de Control</p>
-        <h1>Sincronizando el panel</h1>
-        <p>Verificando sesión, servidores y módulos disponibles.</p>
+        <p className="topbar-eyebrow">Cat's Bot · Panel</p>
+        <h1>Cargando tu panel</h1>
+        <p>Verificando sesión y servidores.</p>
       </div>
       <div className="loading-steps">
-        <span>Auth</span>
+        <span>Sesión</span>
         <span>Servidores</span>
         <span>Módulos</span>
       </div>
@@ -79,7 +103,22 @@ function LoadingScreen() {
   );
 }
 
-const GUILD_KEY_TB = "botES_guild_id";
+function PanelFallback() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        padding: "48px 24px",
+        textAlign: "center",
+        color: "var(--text-muted)",
+        font: '500 0.875rem "DM Sans", system-ui, sans-serif',
+      }}
+    >
+      Cargando módulo…
+    </div>
+  );
+}
 
 function TopBar({
   activePage,
@@ -88,7 +127,8 @@ function TopBar({
   selectedGuild,
   user,
   requiresGuild,
-  setShowLanding}) {
+  setShowLanding,
+}) {
   const { dirty, saving, onSave, onRevert } = useSaveBarState();
 
   return (
@@ -97,22 +137,25 @@ function TopBar({
         <button
           className="mobile-only"
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+          aria-label="Abrir menú"
           style={{
             background: "none",
             border: "none",
-            color: "#DBDEE1",
+            color: "var(--text)",
             fontSize: "1.4rem",
             cursor: "pointer",
             display: "flex",
-            alignItems: "center"}}
+            alignItems: "center",
+            minWidth: 44,
+            minHeight: 44,
+            justifyContent: "center",
+          }}
         >
-          <i className="fa-solid fa-bars" />
+          <i className="fa-solid fa-bars" aria-hidden="true" />
         </button>
         <div className="topbar-title-wrap">
-          <p className="topbar-eyebrow">Cats Bots — Panel</p>
-          <h1 style={{ margin: 0 }}>
-            {PAGE_TITLES[activePage] || "Panel"}
-          </h1>
+          <p className="topbar-eyebrow">Cat's Bot · Panel</p>
+          <h1 style={{ margin: 0 }}>{PAGE_TITLES[activePage] || "Panel"}</h1>
         </div>
       </div>
       <div className="topbar-actions">
@@ -123,7 +166,7 @@ function TopBar({
               onClick={onRevert}
               disabled={saving}
             >
-              <i className="fa-solid fa-rotate-left" />
+              <i className="fa-solid fa-rotate-left" aria-hidden="true" />
               <span>Descartar</span>
             </button>
             <button
@@ -131,40 +174,42 @@ function TopBar({
               onClick={onSave}
               disabled={saving}
             >
-              <i className="fa-solid fa-floppy-disk" />
+              <i className="fa-solid fa-floppy-disk" aria-hidden="true" />
               <span>{saving ? "Guardando…" : "Guardar"}</span>
             </button>
           </div>
         )}
         {selectedGuild && user && (
-          <div
+          <button
             className="mobile-guild-selector mobile-only"
+            type="button"
+            aria-label="Cambiar de servidor"
             onClick={() => {
-              localStorage.removeItem(GUILD_KEY_TB);
+              localStorage.removeItem(GUILD_KEY);
               setShowLanding(true);
             }}
           >
             <img
               src={
-                user.allowedGuilds.find((g) => g.id === selectedGuild)
-                  ?.icon || "https://cdn.discordapp.com/embed/avatars/0.png"
+                user.allowedGuilds.find((g) => g.id === selectedGuild)?.icon ||
+                "https://cdn.discordapp.com/embed/avatars/0.png"
               }
               alt=""
             />
             <span>
-              {user.allowedGuilds.find((g) => g.id === selectedGuild)
-                ?.name || "Servidor"}
+              {user.allowedGuilds.find((g) => g.id === selectedGuild)?.name ||
+                "Servidor"}
             </span>
-          </div>
+          </button>
         )}
         {requiresGuild && (
           <button
             className="btn-icon"
             onClick={() => window.location.reload()}
-            title="Recargar datos"
-            aria-label="Recargar datos"
+            title="Recargar"
+            aria-label="Recargar"
           >
-            <i className="fa-solid fa-rotate-right" />
+            <i className="fa-solid fa-rotate-right" aria-hidden="true" />
           </button>
         )}
       </div>
@@ -182,10 +227,11 @@ export default function Dashboard() {
     : null;
 
   const [user, setUser] = useState({
-    username: cachedUser?.username || "Cargando...",
+    username: cachedUser?.username || "Cargando…",
     avatar:
       cachedUser?.avatar || "https://cdn.discordapp.com/embed/avatars/0.png",
-    allowedGuilds: cachedGuilds});
+    allowedGuilds: cachedGuilds,
+  });
   const [selectedGuild, setSelectedGuild] = useState(initialGuildId);
   const [activePage, setActivePage] = useState("overview");
   const [showLanding, setShowLanding] = useState(
@@ -204,7 +250,8 @@ export default function Dashboard() {
           id: profile.id,
           username: profile.username || "Usuario Discord",
           avatar:
-            profile.avatar || "https://cdn.discordapp.com/embed/avatars/0.png"};
+            profile.avatar || "https://cdn.discordapp.com/embed/avatars/0.png",
+        };
         sessionStorage.setItem(GUILDS_KEY, JSON.stringify(guilds));
         sessionStorage.setItem(USER_KEY, JSON.stringify(nextUser));
         setUser({ ...nextUser, allowedGuilds: guilds });
@@ -230,7 +277,6 @@ export default function Dashboard() {
     localStorage.setItem(GUILD_KEY, guildId);
     setSelectedGuild(guildId);
     setShowLanding(false);
-    // Preload common data
     ["overview", "config", "radio", "ia"].forEach((s) =>
       apiPreload(`/api/guilds/${guildId}/${s}`),
     );
@@ -240,120 +286,72 @@ export default function Dashboard() {
 
   if (loading) return <LoadingScreen />;
 
+  const ActivePanel = PANELS[activePage];
+
   return (
     <SaveBarProvider>
-    <div className="app-container">
-      {showLanding && (
-        <LandingOverlay
-          guilds={user.allowedGuilds}
+      <div className="app-container">
+        {showLanding && (
+          <LandingOverlay
+            guilds={user.allowedGuilds}
+            onSelectGuild={handleGuildSelect}
+          />
+        )}
+
+        <Sidebar
+          user={user}
+          selectedGuild={selectedGuild}
           onSelectGuild={handleGuildSelect}
-        />
-      )}
-
-      <Sidebar
-        user={user}
-        selectedGuild={selectedGuild}
-        onSelectGuild={handleGuildSelect}
-        activePage={activePage}
-        setActivePage={setActivePage}
-        mobileMenuOpen={mobileMenuOpen}
-        setMobileMenuOpen={setMobileMenuOpen}
-      />
-
-      <div className="main-content">
-        <TopBar
           activePage={activePage}
+          setActivePage={setActivePage}
           mobileMenuOpen={mobileMenuOpen}
           setMobileMenuOpen={setMobileMenuOpen}
-          selectedGuild={selectedGuild}
-          user={user}
-          requiresGuild={requiresGuild}
-          setShowLanding={setShowLanding}
         />
 
-        <div className="content-area">
-          {!showLanding && (!requiresGuild || selectedGuild) && (
-            <>
-              {activePage === "overview" && (
-                <Overview selectedGuild={selectedGuild} />
-              )}
-              {activePage === "ia" && (
-                <IAConfig selectedGuild={selectedGuild} />
-              )}
-              {activePage === "radio" && (
-                <Radio selectedGuild={selectedGuild} />
-              )}
-              {activePage === "tickets" && (
-                <Tickets selectedGuild={selectedGuild} />
-              )}
-              {activePage === "moderation" && (
-                <Moderation selectedGuild={selectedGuild} />
-              )}
-              {activePage === "embeds" && (
-                <EmbedBuilder selectedGuild={selectedGuild} />
-              )}
-              {activePage === "levels" && (
-                <Levels selectedGuild={selectedGuild} />
-              )}
-              {activePage === "autoroles" && (
-                <Autoroles selectedGuild={selectedGuild} />
-              )}
-              {activePage === "giveaways" && (
-                <Giveaways selectedGuild={selectedGuild} />
-              )}
-              {activePage === "tags" && <Tags selectedGuild={selectedGuild} />}
-              {activePage === "reports" && (
-                <Reports selectedGuild={selectedGuild} />
-              )}
-              {activePage === "schedules" && (
-                <Schedules selectedGuild={selectedGuild} />
-              )}
-              {activePage === "voice-gen" && (
-                <VoiceGen selectedGuild={selectedGuild} />
-              )}
-              {activePage === "logs" && <Logs selectedGuild={selectedGuild} />}
-              {activePage === "welcome" && (
-                <Welcome selectedGuild={selectedGuild} />
-              )}
-              {activePage === "suggestions" && (
-                <Suggestions selectedGuild={selectedGuild} />
-              )}
-              {activePage === "automod" && (
-                <AutoMod selectedGuild={selectedGuild} />
-              )}
-              {activePage === "autoresponses" && (
-                <AutoResponses selectedGuild={selectedGuild} />
-              )}
-              {activePage === "custom-commands" && (
-                <CustomCommands selectedGuild={selectedGuild} />
-              )}
-            </>
-          )}
+        <div className="main-content">
+          <TopBar
+            activePage={activePage}
+            mobileMenuOpen={mobileMenuOpen}
+            setMobileMenuOpen={setMobileMenuOpen}
+            selectedGuild={selectedGuild}
+            user={user}
+            requiresGuild={requiresGuild}
+            setShowLanding={setShowLanding}
+          />
 
-          {!showLanding && requiresGuild && !selectedGuild && (
-            <div className="dashboard-empty-state glass-panel">
-              <div className="dashboard-empty-icon">
-                <i className="fa-solid fa-building-shield" />
+          <div className="content-area">
+            {!showLanding && (!requiresGuild || selectedGuild) && ActivePanel && (
+              <Suspense fallback={<PanelFallback />}>
+                <ActivePanel selectedGuild={selectedGuild} />
+              </Suspense>
+            )}
+
+            {!showLanding && requiresGuild && !selectedGuild && (
+              <div className="dashboard-empty-state">
+                <div className="dashboard-empty-icon">
+                  <i
+                    className="fa-solid fa-building-shield"
+                    aria-hidden="true"
+                  />
+                </div>
+                <h2>Elige un servidor</h2>
+                <p>
+                  Selecciona uno de tus servidores para configurarlo.
+                </p>
+                <button
+                  className="btn-primary"
+                  onClick={() => {
+                    localStorage.removeItem(GUILD_KEY);
+                    setShowLanding(true);
+                  }}
+                >
+                  Elegir servidor
+                </button>
               </div>
-              <h2>Selecciona un Servidor</h2>
-              <p>
-                Elige un servidor para ver sus configuraciones, estadísticas y
-                módulos.
-              </p>
-              <button
-                className="btn-primary"
-                onClick={() => {
-                  localStorage.removeItem(GUILD_KEY);
-                  setShowLanding(true);
-                }}
-              >
-                Elegir Servidor
-              </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </div>
-    </div>
     </SaveBarProvider>
   );
 }

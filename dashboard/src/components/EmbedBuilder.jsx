@@ -131,7 +131,7 @@ export default function EmbedBuilder({ selectedGuild }) {
               {webhook.icon_url && (
                 <div style={{display:'flex',alignItems:'center',gap:12,padding:12,borderRadius:12,background:'rgba(255,255,255,0.02)',border:'1px solid rgba(139,92,246,0.12)'}}>
                   <img src={webhook.icon_url} alt="avatar preview" onError={e=>e.target.style.display='none'} style={{width:40,height:40,borderRadius:'50%',objectFit:'cover',border:'2px solid rgba(139,92,246,0.3)'}}/>
-                  <div><div style={{fontWeight:700}}>{webhook.name||'Cats Bots'}</div><div style={{fontSize:'0.75rem',color:'var(--muted)'}}>Vista previa del avatar</div></div>
+                  <div><div style={{fontWeight:700}}>{webhook.name||"Cat's Bot"}</div><div style={{fontSize:'0.75rem',color:'var(--muted)'}}>Vista previa del avatar</div></div>
                 </div>
               )}
             </>)}
@@ -168,7 +168,7 @@ export default function EmbedBuilder({ selectedGuild }) {
                 alt="" style={{width:36,height:36,borderRadius:'50%',objectFit:'cover'}}
               />
               <div>
-                <strong style={{color:'#fff',fontSize:'0.9rem'}}>{webhook.name||'Cats Bots'}</strong>
+                <strong style={{color:'#fff',fontSize:'0.9rem'}}>{webhook.name||"Cat's Bot"}</strong>
                 <span style={{background:'#5865f2',color:'#fff',fontSize:'0.62rem',fontWeight:700,padding:'1px 5px',borderRadius:4,marginLeft:6}}>BOT</span>
               </div>
             </div>

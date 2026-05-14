@@ -23,7 +23,7 @@ export default function AuthCallback() {
           <CatLogo size={56} />
         </div>
         <h2>Autenticando con Discord</h2>
-        <p>Procesando tu sesión de Cats Bots...</p>
+        <p>Procesando tu sesión de Cat's Bot...</p>
         <div className="auth-cb-loader" aria-hidden="true">
           <span /><span /><span />
         </div>

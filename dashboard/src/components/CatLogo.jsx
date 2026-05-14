@@ -1,5 +1,5 @@
 /**
- * CatLogo — Brand mark (Cats Bots).
+ * CatLogo — Brand mark (Cat's Bot).
  * Renders the new brand SVG logo.
  *
  * Props:
@@ -12,7 +12,7 @@ import logoSvg from "../assets/logo.svg";
 
 export default function CatLogo({
   size = 40,
-  ariaLabel = "Cats Bots",
+  ariaLabel = "Cat's Bot",
   className = "",
   rounded = true}) {
   return (

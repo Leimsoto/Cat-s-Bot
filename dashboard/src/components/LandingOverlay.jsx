@@ -61,10 +61,10 @@ export default function LandingOverlay({ guilds, onSelectGuild }) {
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               width: 64, height: 64, borderRadius: 18, marginBottom: 18,
               boxShadow: '0 0 28px rgba(168,85,247,0.45)'}}>
-              <CatLogo size={64} ariaLabel="Cats Bots" />
+              <CatLogo size={64} ariaLabel="Cat's Bot" />
             </div>
             <p style={{ fontSize: '0.78rem', fontWeight: 800, letterSpacing: '0.15em', color: 'var(--accent)', textTransform: 'uppercase', margin: '0 0 8px' }}>
-              Panel de Control · Cats Bots
+              Panel de Control · Cat's Bot
             </p>
             <h2 style={{ margin: '0 0 8px', fontSize: '1.8rem', fontWeight: 900 }}>
               Selecciona un servidor
@@ -77,10 +77,10 @@ export default function LandingOverlay({ guilds, onSelectGuild }) {
           {guilds.length === 0 ? (
             <div className="dashboard-empty-state" style={{ padding: '28px', textAlign: 'center' }}>
               <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
-                <CatLogo size={56} ariaLabel="Cats Bots" />
+                <CatLogo size={56} ariaLabel="Cat's Bot" />
               </div>
               <h3>Sin servidores disponibles</h3>
-              <p style={{ color: 'var(--muted)' }}>Cats Bots aún no está en ninguno de tus servidores de administrador.</p>
+              <p style={{ color: 'var(--muted)' }}>Cat's Bot aún no está en ninguno de tus servidores de administrador.</p>
               <a
                 href={`https://discord.com/oauth2/authorize?client_id=${import.meta.env.VITE_DISCORD_CLIENT_ID || ''}&permissions=8&scope=bot+applications.commands`}
                 className="btn-primary" target="_blank" rel="noreferrer"
