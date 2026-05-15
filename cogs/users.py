@@ -91,7 +91,7 @@ class Users(commands.Cog):
     # /addrole
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="addrole", description="Añade un rol a un usuario")
+    @app_commands.command(name="asignar_rol", description="Añade un rol a un usuario")
     @app_commands.describe(usuario="Usuario al que añadir el rol", rol="Rol a añadir")
     async def addrole(
         self, interaction: discord.Interaction,
@@ -136,7 +136,7 @@ class Users(commands.Cog):
     # /removerole
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="removerole", description="Quita un rol de un usuario")
+    @app_commands.command(name="quitar_rol", description="Quita un rol de un usuario")
     @app_commands.describe(usuario="Usuario al que quitar el rol", rol="Rol a quitar")
     async def removerole(
         self, interaction: discord.Interaction,
@@ -181,7 +181,7 @@ class Users(commands.Cog):
     # /roleinfo
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="roleinfo", description="Muestra información detallada de un rol")
+    @app_commands.command(name="rol_info", description="Muestra información detallada de un rol")
     @app_commands.describe(rol="Rol a consultar")
     async def roleinfo(self, interaction: discord.Interaction, rol: discord.Role):
         members_with = len(rol.members)
@@ -235,7 +235,7 @@ class Users(commands.Cog):
     # /userinfo
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="userinfo", description="Información súper detallada de un usuario")
+    @app_commands.command(name="usuario_info", description="Información súper detallada de un usuario")
     @app_commands.describe(usuario="Usuario a consultar (por defecto tú mismo)")
     async def userinfo(
         self, interaction: discord.Interaction,
@@ -359,7 +359,7 @@ class Users(commands.Cog):
     # /nick
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="nick", description="Cambia el apodo/nickname de un usuario")
+    @app_commands.command(name="apodo", description="Cambia el apodo/nickname de un usuario")
     @app_commands.describe(
         usuario="Usuario al que cambiar el apodo",
         nickname="Nuevo apodo (déjalo vacío para resetear)",

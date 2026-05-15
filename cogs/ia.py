@@ -1,24 +1,28 @@
 """
 cogs/ia.py — Módulo de IA
 ─────────────────────────
-• Chat con historial por usuario/guild    (Gemini 2.5 Flash-Lite → Flash → Pro)
-• Lectura multimodal en adjuntos          (imágenes, PDFs, audio, vídeo)
-• System prompt por guild configurable    (DB o .env como fallback)
-• Rate limiting correcto: 1 slot/REQUEST  (no tokens LLM)
-• Workers con cog_load/cog_unload limpio  (sin task leaks)
-• Backoff exponencial
-• Métricas en memoria + /ai_status
+Sistema de IA conversacional con multi-API-key y selección de modelo por guild.
 
-Modelos soportados (verificados contra google-genai SDK 2025/2026):
-  • gemini-2.5-flash         — equilibrio velocidad/calidad (default)
-  • gemini-2.5-flash-lite    — más rápido, menor coste
-  • gemini-2.5-pro           — máxima calidad
-  • gemini-2.0-flash         — modelo estable previo
-  • gemma-3-27b-it           — modelo abierto vía Google AI
+Funcionalidad:
+  • Chat con historial por usuario/guild
+  • Lectura multimodal (imágenes, PDFs, audio, vídeo)
+  • System prompt configurable por guild (DB o .env como fallback)
+  • Rate limiting (1 slot por REQUEST, no por token LLM)
+  • Workers limpios con cog_load/cog_unload
+  • Backoff exponencial frente a 429/quota
+  • Métricas en memoria + /ia_estado
 
-Las variantes 'gemini-3.1-*' y 'gemma-4-*' que figuraban antes NO existen en la
-API pública y producían 404 al primer mensaje. Se migran configs antiguos al
-default automáticamente en cog_load.
+Modelos: solo Gemma 4 vía API de Gemini. Cualquier valor distinto en DB
+(legados de Gemini 2.5/3, etc.) se migra al default ``gemma-4-26b-it`` en
+``_resolve_client``.
+  • gemma-4-26b-it           — default · 15 RPM · TPM ilimitado · 1.5K RPD
+  • gemma-4-31b-it           — XL razonamiento · 15 RPM · TPM ilimitado · 1.5K RPD
+
+Multimodal y grounding:
+  La API de Gemini permite enviar adjuntos (imagen/audio/video/PDF) y
+  habilitar Google Search grounding cuando el modelo subyacente es Gemma 4,
+  igual que con Gemini. No hay degradación de features al cambiar de Gemini
+  a Gemma 4 en esta API.
 
 Multi-API-keys:
   El cog mantiene un pool de clientes (uno por API key registrada en la tabla
@@ -62,25 +66,25 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # ── Modelos ──────────────────────────────────────────────────────────────────
-# Verificados contra docs públicas del SDK google-genai. El primer elemento
-# es el default cuando no hay configuración o hay que migrar uno inválido.
+# UNICAMENTE Gemma 4 vía Google AI Studio. La API de Gemini sirve ambos modelos
+# de Gemma con soporte multimodal (imágenes, audio, video, PDF) y grounding de
+# búsqueda. Las variantes Gemini se eliminaron por decisión de producto — todo
+# el flujo del bot va sobre Gemma 4.
+#
+# Cuotas del free tier (RPM / TPM / RPD):
+#   gemma-4-26b-it    15 / ilimitado / 1.5K   (default)
+#   gemma-4-31b-it    15 / ilimitado / 1.5K   (mejor razonamiento)
 CHAT_MODELS = [
-    "gemini-2.5-flash",           # default — equilibrio
-    "gemini-2.5-flash-lite",      # más rápido, menor coste
-    "gemini-2.5-pro",             # máxima calidad
-    "gemini-2.0-flash",           # estable previo
-    "gemma-3-27b-it",             # modelo abierto vía Google AI
+    "gemma-4-26b-it",             # default — Gemma 4 grande, TPM ilimitado
+    "gemma-4-31b-it",             # Gemma 4 XL, TPM ilimitado
 ]
 
 DEFAULT_MODEL = CHAT_MODELS[0]
 
-# Etiquetas legibles para la UI (sin emojis decorativos — política Fase 2)
+# Etiquetas legibles para la UI.
 _MODEL_LABELS = {
-    "gemini-2.5-flash":      "Gemini 2.5 Flash",
-    "gemini-2.5-flash-lite": "Gemini 2.5 Flash-Lite",
-    "gemini-2.5-pro":        "Gemini 2.5 Pro",
-    "gemini-2.0-flash":      "Gemini 2.0 Flash",
-    "gemma-3-27b-it":        "Gemma 3 (27B)",
+    "gemma-4-26b-it":         "Gemma 4 (26B)",
+    "gemma-4-31b-it":         "Gemma 4 (31B)",
 }
 
 # ── MIME types aceptados como adjunto ────────────────────────────────────────
@@ -884,7 +888,7 @@ class IA(commands.Cog):
     # Nota: /iaconfig e /iasync han sido eliminados.
     # La configuración de IA se realiza desde el Dashboard Web → Módulo IA.
 
-    @app_commands.command(name="ai_status", description="Métricas y estado del servicio IA")
+    @app_commands.command(name="ia_estado", description="Métricas y estado del servicio IA")
     @app_commands.checks.has_permissions(administrator=True)
     async def ai_status(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -932,7 +936,7 @@ class IA(commands.Cog):
 
 
 
-    @app_commands.command(name="iaclear", description="Borra tu historial de conversación con la IA")
+    @app_commands.command(name="ia_limpiar", description="Borra tu historial de conversación con la IA")
     async def iaclear(self, interaction: discord.Interaction):
         ctx_id = f"{interaction.guild_id}_{interaction.user.id}"
         removed = ctx_id in self._chat_histories

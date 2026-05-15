@@ -197,13 +197,53 @@ export default function SearchableSelect({
     return filterLocal(options || [], query, maxResults);
   }, [isRemote, remoteOptions, options, query, maxResults]);
 
+  // Cache de resoluciones puntuales (cuando el valor seleccionado no aparece
+  // en `remoteOptions` porque el popover nunca se abrió). Evita renderizar el
+  // ID crudo como nombre (`#1234567890`) en módulos como Moderación o VoiceGen.
+  const [resolvedById, setResolvedById] = useState({});
+
   // Mapa id -> opt (para mostrar selección sin fetch adicional).
   const knownById = useMemo(() => {
     const m = new Map();
     for (const o of options || []) m.set(String(o.id), o);
     for (const o of remoteOptions) m.set(String(o.id), o);
+    for (const k of Object.keys(resolvedById)) m.set(k, resolvedById[k]);
     return m;
-  }, [options, remoteOptions]);
+  }, [options, remoteOptions, resolvedById]);
+
+  // Resolución implícita: si está en modo remoto con valor(es) que aún no
+  // existen en knownById, hace un fetch sin filtro para encontrarlos.
+  useEffect(() => {
+    if (!isRemote || !endpoint) return;
+    const ids = multiple
+      ? (Array.isArray(value) ? value.map(String) : [])
+      : (value != null && value !== "" ? [String(value)] : []);
+    const missing = ids.filter((id) => !knownById.has(id));
+    if (missing.length === 0) return;
+
+    const sep = endpoint.includes("?") ? "&" : "?";
+    const url = `${endpoint}${sep}search=&limit=500`;
+    let cancelled = false;
+    apiGet(url, { cache: false })
+      .then((data) => {
+        if (cancelled) return;
+        const arr = Array.isArray(data?.[itemsKey])
+          ? data[itemsKey]
+          : Array.isArray(data)
+          ? data
+          : [];
+        const updates = {};
+        for (const o of arr) {
+          const k = String(o.id);
+          if (missing.includes(k)) updates[k] = o;
+        }
+        if (Object.keys(updates).length > 0) {
+          setResolvedById((prev) => ({ ...prev, ...updates }));
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isRemote, endpoint, value, multiple, itemsKey, knownById]);
 
   // Cerrar al hacer click fuera (también considera el popover en portal).
   useEffect(() => {

@@ -21,6 +21,7 @@ Configuración persistente: panel web → Bienvenidas (tabs Bienvenidas/Boosters
 """
 
 import json
+from cogs._message_payload import render_message_payload
 import logging
 from datetime import datetime, timezone
 
@@ -137,38 +138,26 @@ class Welcomes(commands.Cog):
         if not embed_data:
             return
 
+        variables = {
+            "user": member.mention,
+            "username": member.display_name,
+            "server": guild.name,
+            "count": str(guild.member_count or 0),
+        }
         try:
-            data = json.loads(embed_data)
-            title = (
-                data.get("title", "")
-                .replace("{user}", member.display_name)
-                .replace("{server}", guild.name)
-            )
-            desc = (
-                data.get("description", "")
-                .replace("{user}", member.mention)
-                .replace("{server}", guild.name)
-                .replace("{count}", str(guild.member_count or 0))
-            )
-            if inviter:
-                desc += f"\n\n💌 Invitado por: {inviter.mention}"
+            payload = render_message_payload(embed_data, variables, member)
+        except Exception as exc:
+            logger.error("Error parseando welcome embed_data: %s", exc)
+            return
 
-            embed = discord.Embed(
-                title=title or None,
-                description=desc or None,
-                color=discord.Color(int(data.get("color", 0x5865F2))),
-                timestamp=datetime.now(timezone.utc) if data.get("timestamp") else None,
-            )
-            if data.get("image_url"):
-                embed.set_image(url=data["image_url"])
-            if data.get("thumbnail_url"):
-                embed.set_thumbnail(url=member.display_avatar.url)
-            if data.get("footer_text"):
-                embed.set_footer(
-                    text=data["footer_text"], icon_url=data.get("footer_icon")
-                )
+        if inviter and payload["embed"] is not None:
+            payload["embed"].description = (
+                (payload["embed"].description or "") + f"\n\n💌 Invitado por: {inviter.mention}"
+            ).strip()
 
-            await channel.send(content=member.mention, embed=embed)
+        content = payload["content"] or member.mention
+        try:
+            await channel.send(content=content, embed=payload["embed"])
         except Exception as exc:
             logger.error("Error enviando bienvenida: %s", exc)
 
@@ -274,22 +263,21 @@ class Welcomes(commands.Cog):
             if not embed_data:
                 return
             try:
-                data = json.loads(embed_data)
-                title = data.get("title", "¡Nuevo Booster!").replace(
-                    "{user}", after.display_name
+                variables = {
+                    "user": after.mention,
+                    "username": after.display_name,
+                    "server": after.guild.name,
+                }
+                payload = render_message_payload(
+                    embed_data, variables, member=after,
+                    default_color=int(discord.Color.purple()),
                 )
-                desc = data.get(
-                    "description", "Gracias por mejorar nuestro servidor, te amamos."
-                ).replace("{user}", after.mention)
-
-                embed = discord.Embed(
-                    title=title,
-                    description=desc,
-                    color=discord.Color.purple(),
+                if payload["embed"] is not None and gif_url:
+                    payload["embed"].set_image(url=gif_url)
+                await channel.send(
+                    content=payload["content"] or after.mention,
+                    embed=payload["embed"],
                 )
-                if gif_url:
-                    embed.set_image(url=gif_url)
-                await channel.send(content=after.mention, embed=embed)
             except Exception as exc:
                 logger.error("Error enviando agradecimiento de boost: %s", exc)
 

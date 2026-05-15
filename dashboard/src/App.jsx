@@ -4,6 +4,8 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 const Login = lazy(() => import('./pages/Login'));
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const AuthCallback = lazy(() => import('./pages/AuthCallback'));
+const Privacy = lazy(() => import('./pages/Privacy'));
+const Tos = lazy(() => import('./pages/Tos'));
 
 function ProtectedRoute({ children }) {
   const token = localStorage.getItem('botES_token');
@@ -35,6 +37,8 @@ export default function App() {
       <Suspense fallback={<RouteFallback />}>
         <Routes>
           <Route path="/" element={<Login />} />
+          <Route path="/privacy" element={<Privacy />} />
+          <Route path="/tos" element={<Tos />} />
           <Route path="/auth/callback" element={<AuthCallback />} />
           <Route path="/panel/login" element={<Navigate to="/" replace />} />
           <Route path="/panel/auth/callback" element={<AuthCallback />} />

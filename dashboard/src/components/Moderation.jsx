@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { apiGet, apiPatch } from "../lib/api";
+import { apiGet, apiPatch, apiPost } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
@@ -9,9 +9,12 @@ export default function Moderation({ selectedGuild: guildId }) {
   const [tab, setTab] = useState("config");
   const [cfg, setCfg] = useState(null);
   const [cases, setCases] = useState([]);
+  const [appeals, setAppeals] = useState([]);
+  const [appealFilter, setAppealFilter] = useState("PENDING");
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [creatingMuteRole, setCreatingMuteRole] = useState(false);
   const [toast, setToast] = useState(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
@@ -43,12 +46,57 @@ export default function Moderation({ selectedGuild: guildId }) {
     }
   }, [guildId]);
 
+  const loadAppeals = useCallback(async () => {
+    if (!guildId) return;
+    try {
+      const query = appealFilter === "ALL" ? "" : `?status=${appealFilter}`;
+      const data = await apiGet(
+        `/api/moderation/${guildId}/appeals${query}`,
+        { cache: false }
+      );
+      setAppeals(Array.isArray(data) ? data : []);
+    } catch {
+      setAppeals([]);
+    }
+  }, [guildId, appealFilter]);
+
+  const createMuteRole = async () => {
+    if (!guildId || creatingMuteRole) return;
+    setCreatingMuteRole(true);
+    try {
+      const res = await apiPost(`/api/guilds/${guildId}/moderation/mute-role`);
+      if (res?.id) {
+        setCfg((p) => ({ ...p, mute_role_id: res.id }));
+        setDirty(true);
+        showToast(`Rol "${res.name}" listo. Recuerda guardar los cambios.`);
+      }
+    } catch (e) {
+      showToast(e.message || "No se pudo crear el rol", "error");
+    } finally {
+      setCreatingMuteRole(false);
+    }
+  };
+
+  const resolveAppeal = async (id, status, autoRemove) => {
+    try {
+      await apiPatch(`/api/moderation/${guildId}/appeals/${id}`, {
+        status,
+        auto_remove: autoRemove,
+      });
+      showToast(`Apelación ${status === "ACCEPTED" ? "aceptada" : "rechazada"}`);
+      loadAppeals();
+    } catch (e) {
+      showToast(e.message || "Error procesando apelación", "error");
+    }
+  };
+
   useEffect(() => {
     load();
   }, [load]);
   useEffect(() => {
     if (tab === "cases") loadCases();
-  }, [tab, loadCases]);
+    if (tab === "appeals") loadAppeals();
+  }, [tab, loadCases, loadAppeals]);
 
   const set = (k, v) => {
     setCfg((p) => ({ ...p, [k]: v }));
@@ -161,6 +209,7 @@ export default function Moderation({ selectedGuild: guildId }) {
         {[
           ["config", "Configuración"],
           ["cases", "Casos"],
+          ["appeals", "Apelaciones"],
         ].map(([id, label]) => (
           <button
             key={id}
@@ -205,7 +254,14 @@ export default function Moderation({ selectedGuild: guildId }) {
                 />
               </div>
               <div className="config-item" style={{ marginBottom: 0 }}>
-                <label>Rol de mute</label>
+                <label>
+                  Rol de mute
+                  {!cfg.mute_role_id && (
+                    <span style={{ marginLeft: 8, fontSize: "0.7rem", color: "#f59e0b" }}>
+                      sin configurar → auto-mute no funcionará
+                    </span>
+                  )}
+                </label>
                 <SearchableSelect
                   value={cfg.mute_role_id || ""}
                   onChange={setId("mute_role_id")}
@@ -215,6 +271,17 @@ export default function Moderation({ selectedGuild: guildId }) {
                   renderOption={renderRoleOption}
                   renderSelected={renderRoleSelected}
                 />
+                {!cfg.mute_role_id && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={createMuteRole}
+                    disabled={creatingMuteRole}
+                    style={{ marginTop: 8, fontSize: "0.8rem", padding: "6px 12px" }}
+                  >
+                    {creatingMuteRole ? "Creando…" : "🪄 Crear rol Muted automáticamente"}
+                  </button>
+                )}
               </div>
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Rol de moderador</label>
@@ -406,6 +473,125 @@ export default function Moderation({ selectedGuild: guildId }) {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {tab === "appeals" && (
+        <div className="moderation-container">
+          <div className="tabs-container" style={{ marginBottom: 12 }}>
+            {[
+              ["PENDING", "Pendientes"],
+              ["ACCEPTED", "Aceptadas"],
+              ["REJECTED", "Rechazadas"],
+              ["ALL", "Todas"],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                className={`tab-btn ${appealFilter === id ? "active" : ""}`}
+                onClick={() => setAppealFilter(id)}
+                style={{ fontSize: "0.8rem", padding: "8px 14px" }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="cases-list">
+            {appeals.length === 0 && (
+              <div className="no-results">
+                <p>No hay apelaciones en este filtro.</p>
+              </div>
+            )}
+            {appeals.map((a) => {
+              const status = (a.status || "PENDING").toUpperCase();
+              const statusColor = {
+                PENDING: "#f59e0b",
+                ACCEPTED: "#10b981",
+                REJECTED: "#ef4444",
+              }[status] || "#6366f1";
+              return (
+                <div
+                  key={a.id}
+                  className="case-row"
+                  style={{
+                    padding: 16,
+                    borderRadius: 14,
+                    background: "rgba(255,255,255,0.02)",
+                    border: `1px solid ${statusColor}33`,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 10,
+                  }}
+                >
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+                    <span
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 999,
+                        fontSize: "0.72rem",
+                        fontWeight: 900,
+                        background: `${statusColor}22`,
+                        color: statusColor,
+                        border: `1px solid ${statusColor}55`,
+                      }}
+                    >
+                      {status}
+                    </span>
+                    <span
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 999,
+                        fontSize: "0.72rem",
+                        fontWeight: 800,
+                        background: `${COLORS[a.action_type] || "#6366f1"}22`,
+                        color: COLORS[a.action_type] || "#818cf8",
+                      }}
+                    >
+                      {a.action_type}
+                    </span>
+                    <div style={{ fontWeight: 700 }}>Usuario: {a.user_id}</div>
+                    <div style={{ marginLeft: "auto", fontSize: "0.78rem", color: "var(--muted)" }}>
+                      {a.created_at ? new Date(a.created_at).toLocaleString() : "—"}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: "0.86rem" }}>
+                    <strong>Razón original:</strong> {a.reason || "—"}
+                  </div>
+                  <div style={{ fontSize: "0.86rem" }}>
+                    <strong>Defensa:</strong>{" "}
+                    <span style={{ color: "var(--muted)" }}>
+                      {a.appeal_text || "—"}
+                    </span>
+                  </div>
+                  {status === "PENDING" && (
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <button
+                        className="btn btn-success"
+                        style={{ fontSize: "0.78rem", padding: "6px 12px" }}
+                        onClick={() => resolveAppeal(a.id, "ACCEPTED", true)}
+                      >
+                        ✅ Aceptar y revertir sanción
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ fontSize: "0.78rem", padding: "6px 12px" }}
+                        onClick={() => resolveAppeal(a.id, "ACCEPTED", false)}
+                      >
+                        Aceptar (sin revertir)
+                      </button>
+                      <button
+                        className="btn btn-danger"
+                        style={{ fontSize: "0.78rem", padding: "6px 12px" }}
+                        onClick={() => resolveAppeal(a.id, "REJECTED", false)}
+                      >
+                        ❌ Rechazar
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

@@ -65,7 +65,7 @@ class Channels(commands.Cog):
     # /lock
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="lock", description="Bloquea el canal — nadie puede enviar mensajes")
+    @app_commands.command(name="bloquear", description="Bloquea el canal — nadie puede enviar mensajes")
     @app_commands.describe(razon="Razón del bloqueo")
     async def lock(
         self, interaction: discord.Interaction,
@@ -121,7 +121,7 @@ class Channels(commands.Cog):
     # /unlock
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="unlock", description="Desbloquea el canal")
+    @app_commands.command(name="desbloquear", description="Desbloquea el canal")
     async def unlock(self, interaction: discord.Interaction):
         if not await check_channel_perms(interaction):
             return
@@ -173,7 +173,7 @@ class Channels(commands.Cog):
     # /clear
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="clear", description="Elimina una cantidad de mensajes del canal")
+    @app_commands.command(name="limpiar", description="Elimina una cantidad de mensajes del canal")
     @app_commands.describe(cantidad="Cantidad de mensajes a eliminar (1-100)")
     async def clear(
         self, interaction: discord.Interaction,
@@ -218,7 +218,7 @@ class Channels(commands.Cog):
     # /clearall
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="clearall", description="Elimina TODOS los mensajes del canal (irreversible)")
+    @app_commands.command(name="limpiar_todo", description="Elimina TODOS los mensajes del canal (irreversible)")
     async def clearall(self, interaction: discord.Interaction):
         if not await check_channel_perms(interaction):
             return
@@ -249,7 +249,7 @@ class Channels(commands.Cog):
     # /slowmode
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="slowmode", description="Configura el modo lento del canal")
+    @app_commands.command(name="modo_lento", description="Configura el modo lento del canal")
     @app_commands.describe(segundos="Segundos entre mensajes (0 para desactivar, máx 21600)")
     async def slowmode(
         self, interaction: discord.Interaction,

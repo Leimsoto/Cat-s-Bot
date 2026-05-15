@@ -76,7 +76,7 @@ async def public_stats(request: Request):
     total_commands = 0
     if db is not None:
         try:
-            row = db._fetchone("SELECT COUNT(*) AS c FROM moderation_logs")
+            row = db._fetchone("SELECT COUNT(*) AS c FROM mod_actions")
             total_commands = int(row["c"]) if row and "c" in row else 0
         except Exception:
             total_commands = 0

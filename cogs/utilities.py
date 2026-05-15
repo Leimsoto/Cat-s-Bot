@@ -98,7 +98,7 @@ class Utilities(commands.Cog):
     # /poll
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="poll", description="Crea una encuesta con hasta 10 opciones")
+    @app_commands.command(name="encuesta", description="Crea una encuesta con hasta 10 opciones")
     async def poll(self, interaction: discord.Interaction):
         await interaction.response.send_modal(PollModal())
 
@@ -106,7 +106,7 @@ class Utilities(commands.Cog):
     # /remindme
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="remindme", description="Establece un recordatorio")
+    @app_commands.command(name="recordar", description="Establece un recordatorio")
     @app_commands.describe(
         tiempo="Tiempo (ej: 30m, 1h, 2d, 5m)",
         mensaje="Mensaje del recordatorio",

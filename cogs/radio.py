@@ -250,17 +250,40 @@ class Radio(commands.Cog):
                 "limit": 10,
                 "hidebroken": "true",
                 "order": "clickcount",
-                "reverse": "true"
+                "reverse": "true",
             }
-            try:
-                resp = await asyncio.to_thread(requests.get, RADIO_API_URL, params=params, timeout=5)
-                data = resp.json()
-            except Exception as e:
-                logger.error(f"Error consultando la API de radios: {e}")
-                return await interaction.followup.send("❌ Error consultando la API de radios.")
+            data = []
+            # Lista de mirrors de radio-browser (rotación oficial). Si el primero
+            # falla o devuelve vacío, probamos los siguientes — el bug reportado
+            # era que con la radio activa la consulta a `de1` colgaba/timeout
+            # silenciosamente y no se mostraban resultados.
+            mirrors = [
+                RADIO_API_URL,
+                "https://de2.api.radio-browser.info/json/stations/search",
+                "https://fi1.api.radio-browser.info/json/stations/search",
+                "https://nl1.api.radio-browser.info/json/stations/search",
+            ]
+            for url in mirrors:
+                try:
+                    resp = await asyncio.to_thread(
+                        requests.get, url, params=params, timeout=12,
+                        headers={"User-Agent": "CatsBot/2.0 (radio-search)"},
+                    )
+                    resp.raise_for_status()
+                    parsed = resp.json()
+                    if isinstance(parsed, list) and parsed:
+                        data = parsed
+                        break
+                except Exception as e:
+                    logger.debug(f"Mirror {url} falló: {e}")
+                    continue
 
             if not data:
-                return await interaction.followup.send("❌ No se encontraron estaciones con ese nombre.")
+                return await interaction.followup.send(
+                    "❌ No se encontraron estaciones con ese nombre. "
+                    "Si la radio está activa, espera unos segundos e inténtalo de nuevo.",
+                    ephemeral=True,
+                )
 
             options = []
             for idx, station in enumerate(data[:10]):
@@ -330,19 +353,20 @@ class Radio(commands.Cog):
                             await asyncio.sleep(self.cog._playback_wait)
                             self.cog.start_playing(vc, channel, cfg)
                         else:
-                            is_playing = vc.is_playing()
-                            if is_playing:
+                            # Cambio en caliente: detener el stream actual,
+                            # mover de canal si hace falta y SIEMPRE relanzar
+                            # con la nueva URL/estación.
+                            if vc.is_playing():
                                 vc.stop()
-                            
+
                             if vc.channel.id != channel.id:
                                 try:
                                     await vc.move_to(channel)
                                 except Exception:
                                     pass
-                                    
-                            if not is_playing:
-                                await asyncio.sleep(self.cog._playback_wait)
-                                self.cog.start_playing(vc, channel, cfg)
+
+                            await asyncio.sleep(self.cog._playback_wait)
+                            self.cog.start_playing(vc, channel, cfg)
 
                     except Exception as e:
                         logger.exception(f"Error aplicando emisora en {inter.guild.name}: {e}")

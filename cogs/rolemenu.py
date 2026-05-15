@@ -86,7 +86,7 @@ class RoleMenu(commands.Cog):
         self.bot = bot
         self.db = bot.db
 
-    @app_commands.command(name="rolemenu", description="Crea un menú de roles autoasignables")
+    @app_commands.command(name="menu_roles", description="Crea un menú de roles autoasignables")
     @app_commands.describe(
         roles="Roles disponibles (separados por espacio, mencionándolos)",
         placeholder="Texto guía del menú (ej: 'Elige tus roles')",

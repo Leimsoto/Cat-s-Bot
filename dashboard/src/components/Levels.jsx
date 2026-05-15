@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { apiGet, apiPatch, apiPost, apiDelete } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
 import { useSaveBar } from "../lib/SaveBarContext";
+import MessageEditor, { normalizeMessage } from "./MessageEditor";
 
 export default function Levels({ selectedGuild: guildId }) {
   const [tab, setTab] = useState("config");
@@ -51,6 +52,7 @@ export default function Levels({ selectedGuild: guildId }) {
         xp_min: cfg.xp_min ?? 15,
         xp_max: cfg.xp_max ?? 25,
         cooldown_seconds: cfg.cooldown_seconds ?? 60,
+        announcement_mode: cfg.announcement_mode || "same",
         announcement_channel_id: cfg.announcement_channel_id ?? null,
         announcement_message: cfg.announcement_message ?? null,
         stack_rewards: cfg.stack_rewards ? 1 : 0,
@@ -131,6 +133,24 @@ export default function Levels({ selectedGuild: guildId }) {
   const autodel = !!cfg?.levelup_autodelete;
   const ttl = cfg?.levelup_delete_after_seconds ?? 30;
   const willDelete = !persist || autodel;
+  const announcementMode = cfg?.announcement_mode || (cfg?.announcement_channel_id ? "channel" : "same");
+
+  const levelMessage = useMemo(() => {
+    const raw = cfg?.levelup_embed_config;
+    if (raw) {
+      try { return normalizeMessage(typeof raw === "string" ? JSON.parse(raw) : raw); } catch { /* */ }
+    }
+    return normalizeMessage({
+      enabled: true,
+      embed: {
+        title: "⭐ ¡Nivel {level}!",
+        description: "{user} ha subido al nivel **{level}**.",
+        color: "#fbbf24",
+      },
+    });
+  }, [cfg?.levelup_embed_config]);
+
+  const [lvlTab, setLvlTab] = useState("embed-content");
 
   return (
     <div className="ov-container animate-fade-in">
@@ -230,23 +250,45 @@ export default function Levels({ selectedGuild: guildId }) {
               <h3 style={{ margin: 0 }}>Anuncio de subida de nivel</h3>
             </div>
 
-            <div className="config-item">
-              <label>Canal de anuncios</label>
-              <SearchableSelect
-                value={cfg.announcement_channel_id || ""}
-                onChange={setId("announcement_channel_id")}
-                endpoint={`/api/guilds/${guildId}/channels?type=text`}
-                itemsKey="channels"
-                placeholder="Mismo canal del mensaje (default)…"
-                renderOption={renderChannel}
-                renderSelected={(opt) => (
-                  <><Icon name="channel" /> {opt.name}</>
-                )}
-              />
+            <div className="config-item" style={{ marginBottom: 0 }}>
+              <label>¿Dónde anunciar el level-up?</label>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {[
+                  ["same", "🗨️ Mismo canal del mensaje"],
+                  ["channel", "📌 Canal predeterminado"],
+                ].map(([id, lbl]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className={`tab-btn ${announcementMode === id ? "active" : ""}`}
+                    onClick={() => set("announcement_mode", id)}
+                    style={{ fontSize: "0.82rem", padding: "8px 14px" }}
+                  >
+                    {lbl}
+                  </button>
+                ))}
+              </div>
             </div>
 
+            {announcementMode === "channel" && (
+              <div className="config-item">
+                <label>Canal predeterminado</label>
+                <SearchableSelect
+                  value={cfg.announcement_channel_id || ""}
+                  onChange={setId("announcement_channel_id")}
+                  endpoint={`/api/guilds/${guildId}/channels?type=text`}
+                  itemsKey="channels"
+                  placeholder="Seleccionar canal…"
+                  renderOption={renderChannel}
+                  renderSelected={(opt) => (
+                    <><Icon name="channel" /> {opt.name}</>
+                  )}
+                />
+              </div>
+            )}
+
             <div className="config-item">
-              <label>Mensaje de subida (texto plano)</label>
+              <label>Mensaje fallback (texto plano, si el embed está vacío)</label>
               <input
                 type="text"
                 value={cfg.announcement_message || ""}
@@ -314,32 +356,20 @@ export default function Levels({ selectedGuild: guildId }) {
               />
             </div>
 
-            <div className="config-item" style={{ marginBottom: 0 }}>
-              <label>Embed personalizado (JSON, opcional)</label>
-              <textarea
-                rows={6}
-                value={cfg.levelup_embed_config || ""}
-                placeholder='{"title":"Subiste de nivel","description":"{user} ahora es nivel {level}","color":3447003}'
-                onChange={(e) =>
-                  set("levelup_embed_config", e.target.value || null)
-                }
-                spellCheck={false}
-                style={{
-                  width: "100%",
-                  padding: "10px 12px",
-                  background: "var(--panel)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--radius-md)",
-                  color: "var(--text)",
-                  fontFamily: "ui-monospace, Menlo, Consolas, monospace",
-                  fontSize: "0.82rem",
-                  resize: "vertical"}}
-              />
-              <span style={{ fontSize: "0.74rem", color: "var(--muted)" }}>
-                Si está vacío, se usa el mensaje de texto. Variables disponibles
-                en <code>title</code> y <code>description</code>.
-              </span>
-            </div>
+            <MessageEditor
+              value={levelMessage}
+              onChange={(next) => set("levelup_embed_config", JSON.stringify(next))}
+              mode="both"
+              tab={lvlTab}
+              setTab={setLvlTab}
+              variablesHelp={"Variables: {user}, {username}, {level}, {server}. Si el embed queda vacío se usa el mensaje fallback de arriba."}
+              placeholders={{
+                title: "⭐ ¡Nivel {level}!",
+                description: "{user} ha subido al nivel **{level}**.",
+                content: "Mensaje opcional fuera del embed (ej. {user})",
+              }}
+              showJson
+            />
 
             <div className="config-item inline-check" style={{ marginBottom: 0 }}>
               <div>

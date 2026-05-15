@@ -234,26 +234,136 @@ class Moderation(commands.Cog):
 
     # ── Helpers privados ──────────────────────────────────────────────────────
 
-    async def _send_log(self, guild: discord.Guild, embed: discord.Embed) -> None:
+    async def _resolve_modlog(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
+        """Resuelve el canal de modlog. Usa caché y, si falla, intenta fetch.
+
+        Devuelve ``None`` si el modlog está deshabilitado, sin configurar o
+        si el canal ya no existe / el bot no lo ve.
+        """
         srv_cfg = self.db.get_server_config(guild.id)
         if not srv_cfg.get("modlog_enabled", 1):
-            return
+            return None
 
         ch_id = srv_cfg.get("modlog_channel")
         if not ch_id:
-            return
+            return None
 
         channel = guild.get_channel(ch_id)
-        if not isinstance(channel, discord.TextChannel):
-            logger.warning("Canal de modlog inválido o no accesible en %s (%s)", guild.name, ch_id)
-            return
+        if channel is None:
+            try:
+                channel = await guild.fetch_channel(ch_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                channel = None
 
+        if not isinstance(channel, discord.TextChannel):
+            logger.warning(
+                "Canal de modlog inválido o no accesible en %s (%s)",
+                guild.name, ch_id,
+            )
+            return None
+        return channel
+
+    async def _send_log(self, guild: discord.Guild, embed: discord.Embed) -> bool:
+        """Envía un embed al canal de modlog. Devuelve True si tuvo éxito."""
+        channel = await self._resolve_modlog(guild)
+        if channel is None:
+            return False
         try:
             await channel.send(embed=embed)
+            return True
         except discord.Forbidden:
             logger.warning("Sin permisos para enviar logs en %s", guild.name)
         except discord.HTTPException as exc:
             logger.warning("No se pudo enviar modlog en %s: %s", guild.name, exc)
+        return False
+
+    async def _notify_modlog_issue(self, interaction: discord.Interaction) -> None:
+        """Avisa al moderador (ephemeral followup) que el modlog falló.
+
+        Discrimina entre: no configurado, canal inválido y sin permisos.
+        """
+        srv_cfg = self.db.get_server_config(interaction.guild_id)
+        if not srv_cfg.get("modlog_enabled", 1):
+            return
+        ch_id = srv_cfg.get("modlog_channel")
+        if not ch_id:
+            msg = (
+                "⚠️ La acción se aplicó pero **no hay canal de mod-logs**."
+                " Configúralo en el dashboard → Moderación."
+            )
+        else:
+            msg = (
+                f"⚠️ La acción se aplicó pero el canal de mod-logs <#{ch_id}>"
+                " no es accesible (borrado o sin permisos del bot)."
+                " Revisa la configuración en el dashboard."
+            )
+        try:
+            await interaction.followup.send(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+    async def _ensure_mute_role(
+        self, guild: discord.Guild,
+    ) -> Optional[discord.Role]:
+        """Devuelve el rol de mute. Si no existe, intenta crear uno.
+
+        Reglas:
+          1. Si ``config.mute_role_id`` apunta a un rol existente → devolverlo.
+          2. Si hay un rol llamado "Muted"/"Silenciado" → adoptarlo y persistir id.
+          3. Si el bot tiene ``manage_roles`` y ``manage_channels`` → crear rol
+             "Muted" + deny ``send_messages`` y ``speak`` en cada canal.
+        """
+        cfg = self.db.get_config(guild.id)
+        role_id = cfg.get("mute_role_id") or 0
+        role = guild.get_role(role_id) if role_id else None
+        if role:
+            return role
+
+        for name in ("Muted", "Silenciado", "Muteado"):
+            existing = discord.utils.find(
+                lambda r: r.name.lower() == name.lower(), guild.roles
+            )
+            if existing:
+                try:
+                    self.db.set_config(guild.id, mute_role_id=existing.id)
+                except Exception as exc:
+                    logger.warning("No se pudo persistir mute_role_id: %s", exc)
+                return existing
+
+        bot_member = guild.get_member(self.bot.user.id) if self.bot.user else None
+        if not bot_member or not bot_member.guild_permissions.manage_roles:
+            return None
+        try:
+            new_role = await guild.create_role(
+                name="Muted",
+                reason="Auto-creado para auto-mute por warns",
+                color=discord.Color.dark_grey(),
+            )
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            logger.warning("No se pudo crear rol Muted en %s: %s", guild.name, exc)
+            return None
+
+        # Aplicar overrides en canales (best-effort, silenciar errores).
+        if bot_member.guild_permissions.manage_channels:
+            overwrite = discord.PermissionOverwrite(
+                send_messages=False,
+                add_reactions=False,
+                speak=False,
+                send_messages_in_threads=False,
+                create_public_threads=False,
+                create_private_threads=False,
+            )
+            for ch in guild.channels:
+                try:
+                    await ch.set_permissions(new_role, overwrite=overwrite, reason="Auto-mute setup")
+                except (discord.Forbidden, discord.HTTPException):
+                    continue
+
+        try:
+            self.db.set_config(guild.id, mute_role_id=new_role.id)
+        except Exception as exc:
+            logger.warning("No se pudo persistir mute_role_id nuevo: %s", exc)
+        return new_role
 
     async def _dm(self, user: discord.Member, embed: discord.Embed, view: Optional[discord.ui.View] = None) -> None:
         try:
@@ -946,8 +1056,10 @@ class Moderation(commands.Cog):
         # Embed de warn (configurable)
         warn_embed = build_warn_embed(cfg, usuario, interaction.user, razon, warns)  # type: ignore
         await interaction.followup.send(embed=warn_embed)
-        await self._send_log(interaction.guild, warn_embed)
-        
+        log_ok = await self._send_log(interaction.guild, warn_embed)
+        if not log_ok:
+            await self._notify_modlog_issue(interaction)
+
         view = AppealUserView(self.bot, interaction.guild_id, "WARN", razon)
         await self._dm(usuario, warn_embed, view=view)
 
@@ -961,6 +1073,7 @@ class Moderation(commands.Cog):
         mute_on   = bool(cfg.get("warn_mute_enabled", 1))
 
         consequence_embed: Optional[discord.Embed] = None
+        consequence_warning: Optional[str] = None
 
         # Ban automático
         if ban_on and warns >= ban_thr:
@@ -978,6 +1091,10 @@ class Moderation(commands.Cog):
                 )
             except discord.Forbidden:
                 logger.warning("Sin permisos para auto-ban de %s", usuario)
+                consequence_warning = (
+                    "⚠️ Auto-ban falló: el bot no tiene permiso `Banear miembros`"
+                    " o su rol está debajo del usuario."
+                )
 
         # Kick automático (solo si no se baneó)
         elif kick_on and warns >= kick_thr:
@@ -995,11 +1112,25 @@ class Moderation(commands.Cog):
                 )
             except discord.Forbidden:
                 logger.warning("Sin permisos para auto-kick de %s", usuario)
+                consequence_warning = (
+                    "⚠️ Auto-kick falló: el bot no tiene permiso `Expulsar miembros`"
+                    " o su rol está debajo del usuario."
+                )
 
         # Mute automático (solo si no se baneó ni kickeó)
         elif mute_on and warns >= mute_thr:
-            mute_role = interaction.guild.get_role(cfg.get("mute_role_id") or 0)
-            if mute_role and mute_role not in usuario.roles:
+            mute_role = await self._ensure_mute_role(interaction.guild)
+            if not mute_role:
+                consequence_warning = (
+                    f"⚠️ Auto-mute en {warns} warns no se aplicó: no hay rol de mute"
+                    " y el bot no puede crearlo (falta permiso `Gestionar roles`)."
+                    " Configúralo manualmente en el dashboard → Moderación."
+                )
+            elif mute_role in usuario.roles:
+                consequence_warning = (
+                    f"ℹ️ {usuario.mention} ya tenía el rol de mute; no se re-aplicó."
+                )
+            else:
                 dur = cfg.get("warn_mute_duration", 3600)
                 try:
                     await usuario.add_roles(
@@ -1021,12 +1152,22 @@ class Moderation(commands.Cog):
                     )
                 except discord.Forbidden:
                     logger.warning("Sin permisos para auto-mute de %s", usuario)
-            elif not mute_role:
-                logger.warning("Auto-mute ignorado: no hay rol de mute configurado")
+                    consequence_warning = (
+                        "⚠️ Auto-mute falló: el rol del bot está debajo del rol de mute"
+                        " o falta permiso `Gestionar roles`."
+                    )
 
         if consequence_embed:
             await interaction.followup.send(embed=consequence_embed)
-            await self._send_log(interaction.guild, consequence_embed)
+            log_ok = await self._send_log(interaction.guild, consequence_embed)
+            if not log_ok:
+                await self._notify_modlog_issue(interaction)
+
+        if consequence_warning:
+            try:
+                await interaction.followup.send(consequence_warning, ephemeral=True)
+            except discord.HTTPException:
+                pass
 
     @warn.error
     async def warn_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1133,7 +1274,7 @@ class Moderation(commands.Cog):
     # /purge
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="purge", description="Elimina mensajes en masa del canal actual")
+    @app_commands.command(name="purgar", description="Elimina mensajes en masa del canal actual")
     @app_commands.describe(
         cantidad="Número de mensajes a eliminar (1-1000)",
         usuario="Eliminar solo mensajes de este usuario (opcional)",
@@ -1276,40 +1417,62 @@ class AppealUserModal(discord.ui.Modal, title="Apelar Sanción"):
         appeal_id = db.create_appeal(
             self.guild_id, interaction.user.id, self.action_type, self.reason, self.appeal_text.value
         )
-        await interaction.response.send_message("✅ Tu apelación ha sido enviada al equipo de moderación. Recibirás un DM con la respuesta.", ephemeral=True)
 
         guild = self.bot.get_guild(self.guild_id)
         if not guild:
-            logger.warning("No se pudo registrar apelación %s: guild %s no disponible", appeal_id, self.guild_id)
-            return
-
-        srv_cfg = db.get_server_config(self.guild_id)
-        modlog_id = srv_cfg.get("modlog_channel")
-        if not modlog_id:
-            logger.warning("No se pudo registrar apelación %s: modlog_channel no configurado", appeal_id)
-            return
-
-        modlog = guild.get_channel(modlog_id)
-        if not isinstance(modlog, discord.TextChannel):
-            logger.warning("No se pudo registrar apelación %s: modlog_channel inválido (%s)", appeal_id, modlog_id)
+            await interaction.response.send_message(
+                "⚠️ Tu apelación quedó registrada pero el bot no puede ver el servidor en este momento.",
+                ephemeral=True,
+            )
+            logger.warning("No se pudo publicar apelación %s: guild %s no disponible", appeal_id, self.guild_id)
             return
 
         embed = discord.Embed(
             title="Nueva Apelación Recibida",
             color=discord.Color.blue(),
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="Usuario", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
         embed.add_field(name="Sanción", value=self.action_type, inline=True)
         embed.add_field(name="Razón Original", value=self.reason, inline=True)
         embed.add_field(name="Defensa del Usuario", value=self.appeal_text.value, inline=False)
         embed.set_footer(text=f"ID Apelación: {appeal_id}")
-        
+
+        cog = self.bot.get_cog("Moderation")
+        modlog = await cog._resolve_modlog(guild) if cog else None
+
+        if modlog is None:
+            await interaction.response.send_message(
+                "✅ Tu apelación quedó registrada. El equipo la revisará desde el dashboard.\n"
+                "ℹ️ Aviso al staff: el canal de mod-logs no está configurado o no es accesible.",
+                ephemeral=True,
+            )
+            logger.warning(
+                "Apelación %s guardada pero no publicada: modlog inaccesible en guild %s",
+                appeal_id, self.guild_id,
+            )
+            return
+
         try:
-            await modlog.send(embed=embed, view=AppealModView(self.bot, appeal_id, interaction.user.id, self.action_type))
+            await modlog.send(
+                embed=embed,
+                view=AppealModView(self.bot, appeal_id, interaction.user.id, self.action_type),
+            )
+            await interaction.response.send_message(
+                "✅ Tu apelación ha sido enviada al equipo de moderación. Recibirás un DM con la respuesta.",
+                ephemeral=True,
+            )
         except discord.Forbidden:
+            await interaction.response.send_message(
+                "⚠️ Tu apelación quedó registrada pero el bot no pudo publicarla en el canal de mod-logs (sin permisos).",
+                ephemeral=True,
+            )
             logger.warning("Sin permisos para publicar apelación %s en modlog", appeal_id)
         except discord.HTTPException as exc:
+            await interaction.response.send_message(
+                "⚠️ Tu apelación quedó registrada pero hubo un error publicándola en mod-logs.",
+                ephemeral=True,
+            )
             logger.warning("Error enviando apelación %s a modlog: %s", appeal_id, exc)
 
 

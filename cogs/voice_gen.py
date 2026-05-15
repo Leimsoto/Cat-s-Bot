@@ -377,16 +377,18 @@ class VoiceGen(commands.Cog):
         """
         Envía el panel de control al canal de panel configurado.
 
-        Personalizable vía config del guild:
-          panel_title       — título del embed (default: "Tu canal de voz está listo")
-          panel_description — descripción (acepta {channel}, {owner})
-          panel_color       — color hex (e.g. "#7c3aed")
+        Toma la configuración en este orden:
+          1. ``panel_embed_data``: JSON con la forma de MessageEditor
+             ({content, enabled, embed: {...}}). Es la fuente canónica si está
+             presente.
+          2. Fallback a los campos sueltos: ``panel_title``,
+             ``panel_description``, ``panel_color``.
 
-        Si `force=False`, respeta `auto_send_panel`. `force=True` lo manda igual
-        (usado por el endpoint resend-panel desde el dashboard).
+        Si ``force=False``, respeta ``auto_send_panel``. ``force=True`` lo manda
+        igual (usado por el endpoint ``resend-panel`` desde el dashboard).
 
-        Devuelve True si se envió, False si no se pudo (canal no configurado,
-        sin permisos, etc.).
+        Variables soportadas en title/description/footer/author:
+          ``{channel}``, ``{owner}``, ``{guild}``, ``{channel_id}``.
         """
         cfg = self.db.get_voice_gen_config(guild.id)
         panel_ch_id = cfg.get("panel_channel_id")
@@ -394,32 +396,94 @@ class VoiceGen(commands.Cog):
         if not panel_ch or not isinstance(panel_ch, discord.TextChannel):
             return False
 
-        # Resolver el dueño desde la tabla (no asumimos que sea el primer miembro).
+        # Resolver el dueño desde la tabla.
         row = self.db.get_voice_gen_channel(vc.id) or {}
         owner_id = int(row.get("owner_id", 0)) or 0
         owner = guild.get_member(owner_id) if owner_id else None
+        owner_str = owner.mention if owner else (f"<@{owner_id}>" if owner_id else "el dueño")
 
-        title = cfg.get("panel_title") or "Tu canal de voz está listo"
-        desc_template = cfg.get("panel_description") or (
-            "**{owner}** — Bienvenido a **{channel}**\n\n"
-            "Usa los botones de abajo para configurar tu canal.\n"
-            "El canal se eliminará automáticamente cuando esté vacío."
-        )
-        desc = desc_template.format(
-            channel=vc.name,
-            owner=(owner.mention if owner else f"<@{owner_id}>" if owner_id else "el dueño"),
-        )
+        variables = {
+            "channel": vc.name,
+            "channel_id": vc.id,
+            "owner": owner_str,
+            "guild": guild.name,
+        }
 
-        color_str = (cfg.get("panel_color") or "").strip()
+        def fmt(text):
+            if not text:
+                return text
+            try:
+                return text.format(**variables)
+            except (KeyError, IndexError, ValueError):
+                return text
+
+        # ── Parsear panel_embed_data si existe ─────────────────────────────
+        import json as _json
+        raw_data = cfg.get("panel_embed_data")
+        msg_data = None
+        if raw_data:
+            try:
+                parsed = _json.loads(raw_data) if isinstance(raw_data, str) else raw_data
+                if isinstance(parsed, dict):
+                    msg_data = parsed
+            except _json.JSONDecodeError:
+                logger.warning("panel_embed_data inválido para guild %s", guild.id)
+
+        content = None
+        embed = None
+        if msg_data and msg_data.get("enabled", True):
+            emb = msg_data.get("embed") or {}
+            color_str = (emb.get("color") or "").lstrip("#").strip()
+            try:
+                color = int(color_str, 16) if color_str else 0x7c3aed
+            except ValueError:
+                color = 0x7c3aed
+            embed = discord.Embed(
+                title=fmt(emb.get("title")) or None,
+                description=fmt(emb.get("description")) or None,
+                color=color,
+            )
+            if emb.get("author"):
+                embed.set_author(
+                    name=fmt(emb["author"]),
+                    icon_url=emb.get("author_icon") or None,
+                    url=emb.get("author_url") or None,
+                )
+            if emb.get("footer") or emb.get("footer_icon"):
+                embed.set_footer(
+                    text=fmt(emb.get("footer") or f"ID del canal: {vc.id}"),
+                    icon_url=emb.get("footer_icon") or None,
+                )
+            else:
+                embed.set_footer(text=f"ID del canal: {vc.id}")
+            if emb.get("image"):
+                embed.set_image(url=emb["image"])
+            if emb.get("thumbnail"):
+                embed.set_thumbnail(url=emb["thumbnail"])
+            content = fmt(msg_data.get("content")) or None
+        elif msg_data and not msg_data.get("enabled", True):
+            # Modo "solo texto": no enviar embed.
+            content = fmt(msg_data.get("content")) or None
+
+        if embed is None and content is None:
+            # Fallback legacy.
+            title = cfg.get("panel_title") or "Tu canal de voz está listo"
+            desc_template = cfg.get("panel_description") or (
+                "**{owner}** — Bienvenido a **{channel}**\n\n"
+                "Usa los botones de abajo para configurar tu canal.\n"
+                "El canal se eliminará automáticamente cuando esté vacío."
+            )
+            desc = fmt(desc_template)
+            color_str = (cfg.get("panel_color") or "").lstrip("#").strip()
+            try:
+                color = int(color_str, 16) if color_str else 0x7c3aed
+            except ValueError:
+                color = 0x7c3aed
+            embed = discord.Embed(title=fmt(title), description=desc, color=color)
+            embed.set_footer(text=f"ID del canal: {vc.id}")
+
         try:
-            color = int(color_str.lstrip("#"), 16) if color_str else 0x7c3aed
-        except ValueError:
-            color = 0x7c3aed
-
-        embed = discord.Embed(title=title, description=desc, color=color)
-        embed.set_footer(text=f"ID del canal: {vc.id}")
-        try:
-            await panel_ch.send(embed=embed, view=VCControlView(self))
+            await panel_ch.send(content=content, embed=embed, view=VCControlView(self))
             return True
         except discord.Forbidden:
             logger.warning("VoiceGen: sin permisos para enviar panel en %s", panel_ch)

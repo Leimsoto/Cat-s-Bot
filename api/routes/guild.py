@@ -562,6 +562,44 @@ async def patch_moderation_config(
     return {"status": "ok", "updated_keys": updated}
 
 
+@router.post("/{guild_id}/moderation/mute-role")
+async def create_mute_role(
+    guild_id: int,
+    db=Depends(get_db),
+    bot=Depends(get_bot),
+    _user=Depends(require_guild_admin),
+):
+    """Crea (o adopta) un rol de mute para el servidor.
+
+    Si ya existe un rol llamado ``Muted``/``Silenciado`` lo reutiliza.
+    Si no, crea uno nuevo y aplica overrides ``deny send_messages`` en cada
+    canal donde el bot pueda gestionar permisos.
+    """
+    if bot is None:
+        raise HTTPException(503, "Bot no conectado")
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        raise HTTPException(404, "Servidor no encontrado")
+
+    cog = bot.get_cog("Moderation")
+    if cog is None or not hasattr(cog, "_ensure_mute_role"):
+        raise HTTPException(503, "Cog de moderación no disponible")
+
+    role = await cog._ensure_mute_role(guild)
+    if role is None:
+        raise HTTPException(
+            403,
+            "No se pudo crear el rol. Verifica que el bot tenga el permiso "
+            "`Gestionar roles` y que su rol esté arriba del nuevo rol Muted.",
+        )
+
+    return {
+        "id": role.id,
+        "name": role.name,
+        "created": True,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # /api/guilds/{id}/automod — config automoderación
 # ─────────────────────────────────────────────────────────────────────────────
@@ -638,6 +676,7 @@ async def patch_levels_config(
         "levelup_autodelete",
         "levelup_delete_after_seconds",
         "levelup_embed_config",
+        "announcement_mode",
     }
     filtered = {k: v for k, v in body.items() if k in allowed}
     if filtered:

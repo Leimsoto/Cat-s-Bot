@@ -34,33 +34,53 @@ async def create_custom_command(
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
 ):
-    """Crear un comando personalizado."""
+    """Crear un comando personalizado.
+
+    Body soportado:
+      name (str)              requerido
+      response_data (str)     JSON serializado MessageEditor (preferido)
+      permission_data (dict)  ``{everyone: bool, role_ids: [int]}``
+      delete_invocation (bool)
+      actions (list)          legacy fallback
+      conditions (dict)       legacy
+    """
     body = await request.json()
-    name = body.get("name", "").strip()
-    trigger_type = body.get("trigger_type", "prefix")
-    trigger_value = body.get("trigger_value", "").strip()
-    actions = body.get("actions", [])
-    conditions = body.get("conditions", {})
+    name = (body.get("name") or "").strip().lower()
+    response_data = body.get("response_data")
+    actions = body.get("actions") or []
+    conditions = body.get("conditions") or {}
+    permission_data = body.get("permission_data") or {"everyone": True, "role_ids": []}
+    delete_invocation = 1 if body.get("delete_invocation") else 0
     creator_id = _user.get("user_id", 0)
 
-    if not name:
-        raise HTTPException(400, "name es requerido")
-    if not trigger_value:
-        raise HTTPException(400, "trigger_value es requerido")
+    if not name or " " in name:
+        raise HTTPException(400, "name es requerido y sin espacios")
+    if not response_data and not actions:
+        raise HTTPException(400, "Debes proporcionar response_data o actions")
 
-    # DB espera JSON strings para conditions y actions
     actions_str = json.dumps(actions, ensure_ascii=False) if isinstance(actions, (list, dict)) else str(actions)
     conditions_str = json.dumps(conditions, ensure_ascii=False) if isinstance(conditions, (list, dict)) else str(conditions)
+    permission_str = json.dumps(permission_data, ensure_ascii=False)
 
     result = db.create_custom_command(
         guild_id=guild_id,
         name=name,
-        trigger_type=trigger_type,
-        trigger_value=trigger_value,
+        trigger_type="prefix",
+        trigger_value=name,
         actions=actions_str,
         conditions=conditions_str,
         creator_id=creator_id,
     )
+    # Persistir nuevas columnas con update.
+    try:
+        db.update_custom_command(
+            guild_id, name,
+            response_data=response_data,
+            permission_data=permission_str,
+            delete_invocation=delete_invocation,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"status": "ok", "command": result}
 
 
@@ -74,20 +94,27 @@ async def update_custom_command(
 ):
     """Actualizar un comando personalizado."""
     body = await request.json()
-    allowed = {"trigger_type", "trigger_value", "actions", "conditions", "enabled"}
+    allowed = {
+        "trigger_type", "trigger_value", "actions", "conditions",
+        "enabled", "response_data", "permission_data", "delete_invocation",
+    }
     filtered = {}
     for k, v in body.items():
         if k not in allowed:
             continue
-        # Serializar listas/dicts a JSON string para la DB
-        if k in ("actions", "conditions") and isinstance(v, (list, dict)):
+        if k in ("actions", "conditions", "permission_data") and isinstance(v, (list, dict)):
             filtered[k] = json.dumps(v, ensure_ascii=False)
+        elif k == "delete_invocation":
+            filtered[k] = 1 if v else 0
         else:
             filtered[k] = v
 
     if not filtered:
         return {"status": "noop"}
-    db.update_custom_command(guild_id, name, **filtered)
+    try:
+        db.update_custom_command(guild_id, name.lower(), **filtered)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"status": "ok", "updated": list(filtered.keys())}
 
 

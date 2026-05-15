@@ -91,7 +91,7 @@ class ServerUtils(commands.Cog):
         ms = round(self.bot.latency * 1000)
         await interaction.response.send_message(f"🏓 Pong! Latencia API: `{ms}ms`")
 
-    @app_commands.command(name="botinfo", description="Información general del bot")
+    @app_commands.command(name="bot_info", description="Información general del bot")
     async def botinfo(self, interaction: discord.Interaction):
         delta = discord.utils.utcnow() - self.bot.start_time
         total_sec = int(delta.total_seconds())
@@ -117,7 +117,7 @@ class ServerUtils(commands.Cog):
         embed.set_image(url=target.display_avatar.url)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="servericon", description="Ver el icono del servidor")
+    @app_commands.command(name="icono_servidor", description="Ver el icono del servidor")
     async def servericon(self, interaction: discord.Interaction):
         if not interaction.guild or not interaction.guild.icon:
             return await interaction.response.send_message("❌ Este servidor no tiene icono.", ephemeral=True)
@@ -129,7 +129,7 @@ class ServerUtils(commands.Cog):
     # /serverinfo
     # ─────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="serverinfo", description="Información detallada del servidor")
+    @app_commands.command(name="servidor_info", description="Información detallada del servidor")
     async def serverinfo(self, interaction: discord.Interaction):
         g = interaction.guild
         if g is None:
@@ -193,7 +193,7 @@ class ServerUtils(commands.Cog):
     # /serverlogs — Configuración de eventos
     # ─────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="serverlogs", description="Configura los logs del servidor en tiempo real")
+    @app_commands.command(name="servidor_logs", description="Configura los logs del servidor en tiempo real")
     @app_commands.checks.has_permissions(administrator=True)
     async def serverlogs(self, interaction: discord.Interaction):
         if interaction.guild is None:

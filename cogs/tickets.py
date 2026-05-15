@@ -414,7 +414,7 @@ class Tickets(commands.Cog):
         except discord.NotFound:
             pass
 
-    @app_commands.command(name="adduser", description="Añade a un usuario al ticket actual")
+    @app_commands.command(name="añadir_usuario", description="Añade a un usuario al ticket actual")
     @app_commands.describe(usuario="El usuario a añadir")
     async def add_user(self, interaction: discord.Interaction, usuario: discord.Member):
         ticket = self.db.get_ticket_by_channel(interaction.channel.id)

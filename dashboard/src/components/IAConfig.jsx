@@ -5,14 +5,12 @@ import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
 import { useSaveBar } from "../lib/SaveBarContext";
 
-// Modelos válidos. Debe mantenerse sincronizado con CHAT_MODELS en cogs/ia.py.
-// Si añades/quitas modelos del cog, actualizar también esta lista.
+// Solo Gemma 4 vía la API de Gemini. Mantén sincronizado con CHAT_MODELS en
+// cogs/ia.py. Cuotas: RPM (peticiones/min) · TPM (tokens/min) · RPD
+// (peticiones/día) — todos en el plan gratuito.
 const MODELS = [
-  { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", subtitle: "Default" },
-  { id: "gemini-2.5-flash-lite", name: "Gemini 2.5 Flash-Lite", subtitle: "Rápido" },
-  { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", subtitle: "Calidad" },
-  { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash", subtitle: "Estable" },
-  { id: "gemma-3-27b-it", name: "Gemma 3 (27B)", subtitle: "Open" },
+  { id: "gemma-4-26b-it", name: "Gemma 4 · 26B", subtitle: "Default · 15/min · 1.5K/día · TPM ilimitado" },
+  { id: "gemma-4-31b-it", name: "Gemma 4 · 31B", subtitle: "XL razonamiento · 15/min · 1.5K/día · TPM ilimitado" },
 ];
 
 export default function IAConfig({ selectedGuild: guildId }) {

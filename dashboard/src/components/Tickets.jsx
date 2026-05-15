@@ -1,16 +1,94 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { apiGet, apiPatch, apiPost, apiDelete, apiPut } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
 import { useSaveBar } from "../lib/SaveBarContext";
+import MessageEditor, { EMPTY_MESSAGE, normalizeMessage } from "./MessageEditor";
+import EmojiPicker from "./EmojiPicker";
 
 const TEMPLATE_PRESETS = [
-  { key: "panel_select", name: "Panel de selección", desc: "Embed mostrado en el canal del panel para elegir categoría" },
-  { key: "panel_inside", name: "Panel dentro del ticket", desc: "Embed inicial al abrir el ticket" },
-  { key: "msg_open", name: "Mensaje al abrir", desc: "Mensaje automático al crear el ticket" },
-  { key: "msg_close", name: "Mensaje al cerrar", desc: "Mensaje automático al cerrar" },
+  {
+    key: "panel_select",
+    name: "Panel de selección",
+    desc: "Embed que verá el usuario en el canal del panel para elegir categoría de ticket.",
+    seed: {
+      content: "",
+      enabled: true,
+      embed: {
+        title: "🎫 Crear un ticket",
+        description: "Selecciona una categoría en el menú de abajo para abrir un ticket. El staff te atenderá en breve.",
+        color: "#6366f1",
+      },
+    },
+  },
+  {
+    key: "panel_inside",
+    name: "Panel dentro del ticket",
+    desc: "Embed inicial que aparece dentro del ticket recién creado, con el resumen y los botones del staff.",
+    seed: {
+      content: "",
+      enabled: true,
+      embed: {
+        title: "Ticket abierto",
+        description: "Hola {username}, gracias por abrir un ticket en **{server}**. Un miembro del staff llegará pronto.",
+        color: "#22c55e",
+      },
+    },
+  },
+  {
+    key: "msg_open",
+    name: "Mensaje al abrir",
+    desc: "Mensaje automático extra que se envía justo después de crear el ticket (texto plano o embed).",
+    seed: {
+      content: "@here Nuevo ticket de {username}",
+      enabled: false,
+      embed: EMPTY_MESSAGE.embed,
+    },
+  },
+  {
+    key: "msg_close",
+    name: "Mensaje al cerrar",
+    desc: "Mensaje que se enviará al cerrar el ticket (útil para encuesta de satisfacción o despedida).",
+    seed: {
+      content: "",
+      enabled: true,
+      embed: {
+        title: "Ticket cerrado",
+        description: "Gracias por contactar al staff. Si necesitas algo más, abre otro ticket.",
+        color: "#ef4444",
+      },
+    },
+  },
 ];
+
+function templateToMessage(json) {
+  try {
+    const parsed = typeof json === "string" ? JSON.parse(json) : json;
+    if (!parsed || typeof parsed !== "object") return normalizeMessage(EMPTY_MESSAGE);
+    // Acepta formato MessageEditor o formato Discord embed crudo.
+    if (parsed.embed || parsed.content) return normalizeMessage(parsed);
+    // Embed crudo (Discord shape): mapear top-level a {embed:…}.
+    return normalizeMessage({
+      content: "",
+      enabled: true,
+      embed: {
+        title: parsed.title || "",
+        description: parsed.description || "",
+        color: typeof parsed.color === "number" ? "#" + parsed.color.toString(16).padStart(6, "0") : parsed.color || "#6366f1",
+        footer: parsed.footer?.text || parsed.footer || "",
+        footer_icon: parsed.footer?.icon_url || "",
+        image: parsed.image?.url || parsed.image || "",
+        thumbnail: parsed.thumbnail?.url || parsed.thumbnail || "",
+        author: parsed.author?.name || parsed.author || "",
+        author_icon: parsed.author?.icon_url || "",
+        author_url: parsed.author?.url || "",
+      },
+    });
+  } catch {
+    return normalizeMessage(EMPTY_MESSAGE);
+  }
+}
 
 const DEFAULT_CAT = {
   name: "",
@@ -192,6 +270,23 @@ export default function Tickets({ selectedGuild: guildId }) {
       key: tpl.template_key,
       name: tpl.name || "",
       json: JSON.stringify(tpl.embed_data || {}, null, 2)});
+  };
+
+  // Mensaje renderizado desde el JSON crudo (para MessageEditor).
+  const draftMessage = useMemo(() => templateToMessage(tplDraft.json), [tplDraft.json]);
+  const [tplEditorTab, setTplEditorTab] = useState("embed-content");
+
+  const setDraftMessage = (next) => {
+    setTplDraft((p) => ({ ...p, json: JSON.stringify(next) }));
+  };
+
+  const applyPreset = (preset) => {
+    setTplDraft({
+      key: preset.key,
+      name: preset.name,
+      json: JSON.stringify(preset.seed, null, 2),
+    });
+    setTplEditorTab(preset.seed.enabled ? "embed-content" : "content");
   };
 
   // ── Panel ──────────────────────────────────────────────────────────────────
@@ -451,12 +546,10 @@ export default function Tickets({ selectedGuild: guildId }) {
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Emoji</label>
-                <input
-                  type="text"
+                <EmojiPicker
+                  guildId={guildId}
                   value={newCat.emoji}
-                  placeholder=""
-                  maxLength={4}
-                  onChange={(e) => setNewCat({ ...newCat, emoji: e.target.value })}
+                  onChange={(v) => setNewCat({ ...newCat, emoji: v })}
                 />
               </div>
               <div className="config-item" style={{ marginBottom: 0 }}>
@@ -591,29 +684,48 @@ export default function Tickets({ selectedGuild: guildId }) {
               </div>
             </div>
 
-            <div className="config-item" style={{ marginBottom: 0 }}>
-              <label>Embed (JSON)</label>
-              <textarea
-                rows={12}
-                value={tplDraft.json}
-                onChange={(e) => setTplDraft({ ...tplDraft, json: e.target.value })}
-                spellCheck={false}
-                style={{
-                  width: "100%",
-                  padding: "10px 12px",
-                  background: "var(--panel)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--radius-md)",
-                  color: "var(--text)",
-                  fontFamily: "ui-monospace, Menlo, Consolas, monospace",
-                  fontSize: "0.82rem",
-                  resize: "vertical"}}
-              />
-              <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>
-                Formato Discord embed JSON. Variables disponibles en runtime:{" "}
-                <code>{"{username}"}</code> <code>{"{number}"}</code>
-              </span>
+            <div style={{ background: "rgba(99,102,241,0.06)", border: "1px solid rgba(139,92,246,0.18)", padding: 12, borderRadius: 12 }}>
+              <div style={{ fontSize: "0.78rem", color: "var(--muted)", marginBottom: 8 }}>
+                💡 Plantillas predefinidas — pulsa para cargar una base profesional y editarla:
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {TEMPLATE_PRESETS.map((p) => (
+                  <button
+                    key={p.key}
+                    type="button"
+                    title={p.desc}
+                    onClick={() => applyPreset(p)}
+                    className="btn-secondary"
+                    style={{ fontSize: "0.76rem", padding: "5px 12px" }}
+                  >
+                    📋 {p.name}
+                  </button>
+                ))}
+              </div>
+              <div style={{ marginTop: 6, fontSize: "0.72rem", color: "var(--muted)" }}>
+                <strong style={{ color: "var(--text)" }}>
+                  {TEMPLATE_PRESETS.find((p) => p.key === tplDraft.key)?.name || "Plantilla personalizada"}
+                </strong>
+                {" — "}
+                {TEMPLATE_PRESETS.find((p) => p.key === tplDraft.key)?.desc ||
+                  "Usa una clave libre (ej. custom_*) para plantillas adicionales."}
+              </div>
             </div>
+
+            <MessageEditor
+              value={draftMessage}
+              onChange={setDraftMessage}
+              mode="both"
+              tab={tplEditorTab}
+              setTab={setTplEditorTab}
+              variablesHelp={"Variables: {username}, {number}, {server}, {channel}. Usa el modo 'Mensaje' para texto plano fuera del embed."}
+              placeholders={{
+                title: "Título del embed",
+                description: "Descripción enriquecida…",
+                content: "Mensaje opcional fuera del embed (ej. @here)",
+              }}
+              showJson
+            />
 
             <div>
               <button

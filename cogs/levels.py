@@ -101,50 +101,52 @@ class Levels(commands.Cog):
 
     async def _announce_levelup(self, message: discord.Message, new_level: int, cfg: dict):
         """
-        Anuncia subida de nivel respetando las opciones de Fase 9:
-          • levelup_persist (1)            → no autoeliminar nada
-          • levelup_autodelete (0)         → si 1, aplica delete_after
-          • levelup_delete_after_seconds   → segundos antes de borrar
-          • levelup_embed_config (JSON)    → si está, usa embed; sino texto plano
+        Anuncia subida de nivel respetando las opciones de configuración:
+          • announcement_mode ("same"|"channel")  → dónde anunciar.
+              "same"    = canal donde el usuario subió de nivel.
+              "channel" = canal predeterminado (announcement_channel_id).
+              Sin configurar: si hay announcement_channel_id → "channel", si no → "same".
+          • levelup_persist (1)            → no autoeliminar.
+          • levelup_autodelete (0)         → si 1, aplica delete_after.
+          • levelup_delete_after_seconds   → segundos antes de borrar.
+          • levelup_embed_config (JSON)    → forma MessageEditor (content + embed)
+            o legacy (campos sueltos). Si está vacío → texto plano legacy.
         """
+        from cogs._message_payload import render_message_payload
+
         voice = getattr(self.bot, "catbot_voice", None)
         star = voice.get("star") if voice else "⭐"
         default_msg = f"{star} ¡{{user}} acaba de subir al **nivel {{level}}**! El gato está orgulloso."
-        custom_msg = cfg.get("announcement_message") or default_msg
-        text = (
-            custom_msg
-            .replace("{user}", message.author.mention)
-            .replace("{level}", str(new_level))
-            .replace("{username}", message.author.display_name)
-        )
 
-        # Si hay embed JSON, intentamos construirlo; en caso contrario, fallback a texto.
+        variables = {
+            "user": message.author.mention,
+            "username": message.author.display_name,
+            "level": str(new_level),
+            "server": message.guild.name,
+        }
+
         embed = None
+        content = None
         embed_raw = cfg.get("levelup_embed_config")
         if embed_raw:
-            try:
-                from cogs.embeds import EmbedBuilder
-                builder = EmbedBuilder.from_json(embed_raw)
-                embed = builder.build()
-                if embed.title:
-                    embed.title = (
-                        embed.title
-                        .replace("{user}", message.author.display_name)
-                        .replace("{username}", message.author.display_name)
-                        .replace("{level}", str(new_level))
-                    )
-                if embed.description:
-                    embed.description = (
-                        embed.description
-                        .replace("{user}", message.author.mention)
-                        .replace("{username}", message.author.display_name)
-                        .replace("{level}", str(new_level))
-                    )
-            except Exception as e:
-                logger.warning("levelup_embed_config inválido, usando texto: %s", e)
-                embed = None
+            payload = render_message_payload(
+                embed_raw, variables, member=message.author,
+                default_color=int(discord.Color.gold()),
+            )
+            content = payload["content"]
+            embed = payload["embed"]
 
-        # Calcular delete_after a partir de las flags (persist=0 fuerza autodelete).
+        if embed is None and not content:
+            # Fallback: texto plano configurable.
+            custom_msg = cfg.get("announcement_message") or default_msg
+            content = (
+                custom_msg
+                .replace("{user}", message.author.mention)
+                .replace("{level}", str(new_level))
+                .replace("{username}", message.author.display_name)
+            )
+
+        # Calcular delete_after a partir de las flags.
         persist = int(cfg.get("levelup_persist", 1) or 0)
         autodel = int(cfg.get("levelup_autodelete", 0) or 0)
         ttl = int(cfg.get("levelup_delete_after_seconds", 30) or 30)
@@ -155,13 +157,17 @@ class Levels(commands.Cog):
         send_kwargs = {}
         if embed is not None:
             send_kwargs["embed"] = embed
-        else:
-            send_kwargs["content"] = text
+        if content:
+            send_kwargs["content"] = content
         if delete_after is not None:
             send_kwargs["delete_after"] = delete_after
 
+        mode = (cfg.get("announcement_mode") or "").strip().lower()
         ann_ch_id = cfg.get("announcement_channel_id")
-        if ann_ch_id:
+        if not mode:
+            mode = "channel" if ann_ch_id else "same"
+
+        if mode == "channel" and ann_ch_id:
             channel = message.guild.get_channel(int(ann_ch_id))
             if channel and isinstance(channel, discord.TextChannel):
                 try:
@@ -169,6 +175,7 @@ class Levels(commands.Cog):
                     return
                 except discord.Forbidden:
                     pass
+
         try:
             await message.channel.send(**send_kwargs)
         except discord.Forbidden:
@@ -201,7 +208,7 @@ class Levels(commands.Cog):
     #       /xp reward add/remove/list han sido eliminados.
     #       Usa el Dashboard Web → Módulo Niveles para configurar el sistema.
 
-    @app_commands.command(name="rank", description="Muestra tu rango o el de otro usuario")
+    @app_commands.command(name="rango", description="Muestra tu rango o el de otro usuario")
     @app_commands.describe(usuario="Usuario del que ver el rango (opcional)")
     async def rank(self, interaction: discord.Interaction, usuario: Optional[discord.Member] = None):
         target = usuario or interaction.user
@@ -229,7 +236,7 @@ class Levels(commands.Cog):
         embed.set_footer(text=f"Mensajes totales: {data['message_count']:,}")
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="leaderboard", description="Top 10 del servidor por XP")
+    @app_commands.command(name="clasificacion", description="Top 10 del servidor por XP")
     async def leaderboard(self, interaction: discord.Interaction):
         await interaction.response.defer()
         rows = self.db.get_leaderboard(interaction.guild_id, limit=10)

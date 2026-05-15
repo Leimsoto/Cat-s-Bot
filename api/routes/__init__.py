@@ -4,6 +4,7 @@ from . import (
     giveaways, autoroles, radio, embeds, channels,
     voice_gen, welcome, suggestions_route, invites_route,
     ai_keys, public_stats, autoresponses, custom_commands,
+    emojis,
 )
 
 __all__ = [
@@ -12,5 +13,5 @@ __all__ = [
     "autoroles", "radio", "embeds", "channels",
     "voice_gen", "welcome", "suggestions_route",
     "invites_route", "ai_keys", "public_stats",
-    "autoresponses", "custom_commands",
+    "autoresponses", "custom_commands", "emojis",
 ]

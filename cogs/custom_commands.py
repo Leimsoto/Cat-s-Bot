@@ -1,17 +1,22 @@
 """
 cogs/custom_commands.py
 ───────────────────────
-Sistema de Custom Commands — comandos personalizados con acciones.
+Sistema de Custom Commands — comandos personalizados con respuesta tipo embed
+y control de permisos.
 
-Comandos slash:
-  /customcommand create <name> <content>        — Crear comando simple
-  /customcommand delete <name>                  — Eliminar comando
-  /customcommand list                            — Listar comandos
-  /customcommand info <name>                     — Información del comando
-  /customcommand variable get <key>              — Obtener variable
-  /customcommand variable set <key> <value>      — Establecer variable
+  • Prefijo fijo "!" (no se puede cambiar — el dashboard expone el resto).
+  • Cada comando puede tener:
+      - response_data: JSON del MessageEditor (content + embed).
+      - actions/content (legacy): fallback si no hay response_data.
+      - permission_data: {everyone:bool, role_ids:[…]}.
+      - delete_invocation: si 1, el bot borra el mensaje que invocó el comando.
+  • Variables soportadas en title/description/footer/content:
+      {user} {username} {display_name} {id} {server} {channel}
+      {args} {1} {2} … {N}
 
-Triggers por prefijo (por defecto "!").
+Comandos slash (solo inspección — todo se gestiona en el dashboard):
+  /customcommand list
+  /customcommand info <name>
 """
 
 import json
@@ -23,16 +28,45 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-logger = logging.getLogger(__name__)
+from cogs._message_payload import render_message_payload
 
-DEFAULT_PREFIX = "!"
-MAX_COMMANDS = 100
+logger = logging.getLogger("CustomCommands")
 
+# Prefijo fijo por requisito de producto.
+PREFIX = "!"
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _can_manage(member: discord.Member) -> bool:
-    return member.guild_permissions.administrator or member.guild_permissions.manage_guild
+    return (
+        member.guild_permissions.administrator
+        or member.guild_permissions.manage_guild
+    )
+
+
+def _user_can_use(member: discord.Member, permission_data: Optional[str]) -> bool:
+    """Devuelve True si el miembro puede ejecutar el comando.
+
+    Reglas:
+      • permission_data vacío o everyone=true → cualquiera.
+      • role_ids no vacío y el miembro NO tiene ninguno → False.
+      • Administradores siempre pueden.
+    """
+    if member.guild_permissions.administrator:
+        return True
+    if not permission_data:
+        return True
+    try:
+        data = json.loads(permission_data) if isinstance(permission_data, str) else permission_data
+    except (json.JSONDecodeError, TypeError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    if data.get("everyone", True):
+        return True
+    allowed = set(data.get("role_ids") or [])
+    if not allowed:
+        return True
+    return any(r.id in allowed for r in member.roles)
 
 
 async def _cc_autocomplete(interaction: discord.Interaction, current: str):
@@ -43,218 +77,118 @@ async def _cc_autocomplete(interaction: discord.Interaction, current: str):
     ][:25]
 
 
-# ── Cog ───────────────────────────────────────────────────────────────────────
-
 class CustomCommands(commands.Cog):
-    """Comandos personalizados del servidor con acciones configurables."""
+    """Comandos personalizados del servidor con respuesta embed y permisos."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.db = bot.db  # type: ignore
+        self.db = bot.db
 
     cc_group = app_commands.Group(
         name="customcommand",
-        description="Gestiona los comandos personalizados del servidor",
+        description="Inspecciona los comandos personalizados (gestiona desde el dashboard)",
+        default_permissions=discord.Permissions(manage_guild=True),
     )
-
-    # ── Listeners ──────────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
-
-        guild_id = message.guild.id
-        prefix = await self._get_prefix(guild_id)
-
-        if not message.content.startswith(prefix):
+        if not message.content.startswith(PREFIX):
             return
 
-        after_prefix = message.content[len(prefix):].strip()
+        after_prefix = message.content[len(PREFIX):].strip()
         if not after_prefix:
             return
 
         parts = after_prefix.split()
         cmd_name = parts[0].lower()
+        args = parts[1:]
 
-        command = self.db.get_custom_command(guild_id, cmd_name)
-        if not command or not command["enabled"]:
+        command = self.db.get_custom_command(message.guild.id, cmd_name)
+        if not command or not command.get("enabled", 1):
             return
 
-        self.db.increment_cc_uses(guild_id, cmd_name)
-
-        actions = self._parse_actions(command["actions"])
-        if not actions:
+        if not _user_can_use(message.author, command.get("permission_data")):
             return
 
-        args = parts[1:] if len(parts) > 1 else []
-        await self._execute_actions(
-            message.channel, actions,
-            author=message.author,
-            guild=message.guild,
-            args=args,
-        )
+        self.db.increment_cc_uses(message.guild.id, cmd_name)
 
-    # ── Internals ──────────────────────────────────────────────────────────
+        # Auto-delete del mensaje de invocación si está activado.
+        if command.get("delete_invocation"):
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
-    async def _get_prefix(self, guild_id: int) -> str:
-        raw = self.db.get_cc_variable(guild_id, "cc_prefix")
-        return raw or DEFAULT_PREFIX
+        variables = {
+            "user": message.author.mention,
+            "username": str(message.author),
+            "display_name": message.author.display_name,
+            "id": str(message.author.id),
+            "server": message.guild.name,
+            "channel": message.channel.mention,
+            "args": " ".join(args),
+        }
+        for i, arg in enumerate(args, 1):
+            variables[str(i)] = arg
 
-    def _parse_actions(self, raw: str) -> List[Dict[str, Any]]:
+        response_data = command.get("response_data")
+        if response_data:
+            try:
+                payload = render_message_payload(
+                    response_data, variables, member=message.author,
+                )
+                await message.channel.send(
+                    content=payload["content"],
+                    embed=payload["embed"],
+                )
+                return
+            except Exception as exc:
+                logger.warning("Error renderizando response_data: %s", exc)
+
+        # Fallback legacy: actions JSON.
+        actions = self._parse_actions(command.get("actions"))
+        for action in actions:
+            if action.get("type") == "send_message":
+                content = action.get("content", "")
+                for k, v in variables.items():
+                    content = content.replace("{" + k + "}", str(v))
+                try:
+                    await message.channel.send(content)
+                except discord.HTTPException as exc:
+                    logger.warning("Error enviando custom command: %s", exc)
+                break
+
+    def _parse_actions(self, raw) -> List[Dict[str, Any]]:
         try:
             data = json.loads(raw) if isinstance(raw, str) else raw
             return data if isinstance(data, list) else []
         except (json.JSONDecodeError, TypeError):
-            logger.warning("Error parseando actions JSON")
             return []
-
-    async def _execute_actions(
-        self,
-        channel: discord.TextChannel,
-        actions: List[Dict[str, Any]],
-        **ctx: Any,
-    ) -> None:
-        author: discord.Member = ctx.get("author")
-        args: List[str] = ctx.get("args", [])
-
-        for action in actions:
-            action_type = action.get("type", "")
-            if action_type == "send_message":
-                content = action.get("content", "")
-                content = self._format_content(content, author, args)
-                try:
-                    await channel.send(content)
-                except discord.Forbidden:
-                    logger.warning("Sin permisos para enviar mensaje en %s", channel)
-                except discord.HTTPException as exc:
-                    logger.warning("Error enviando mensaje CC en %s: %s", channel, exc)
-
-    def _format_content(self, content: str, author: Optional[discord.Member], args: List[str]) -> str:
-        if author:
-            content = content.replace("{user}", author.mention)
-            content = content.replace("{username}", str(author))
-            content = content.replace("{display_name}", author.display_name)
-            content = content.replace("{id}", str(author.id))
-        for i, arg in enumerate(args, 1):
-            content = content.replace(f"{{{i}}}", arg)
-        content = content.replace("{args}", " ".join(args))
-        return content
-
-    # ── /customcommand create ──────────────────────────────────────────────
-
-    @cc_group.command(name="create", description="Crea un comando personalizado de texto")
-    @app_commands.describe(
-        name="Nombre del comando (sin prefijo)",
-        content="Contenido que responderá el comando",
-    )
-    async def cc_create(self, interaction: discord.Interaction, name: str, content: str):
-        if not _can_manage(interaction.user):
-            return await interaction.response.send_message(
-                "❌ Necesitas el permiso **Gestionar Servidor** para crear comandos.",
-                ephemeral=True,
-            )
-
-        name = name.strip().lower()
-        if not name.isidentifier() and " " in name:
-            return await interaction.response.send_message(
-                "❌ El nombre no puede contener espacios.", ephemeral=True,
-            )
-
-        existing = self.db.get_custom_commands(interaction.guild_id)
-        if len(existing) >= MAX_COMMANDS:
-            return await interaction.response.send_message(
-                f"❌ Este servidor ya tiene el máximo de {MAX_COMMANDS} comandos.",
-                ephemeral=True,
-            )
-
-        if self.db.get_custom_command(interaction.guild_id, name):
-            return await interaction.response.send_message(
-                f"❌ Ya existe un comando llamado **{name}**.",
-                ephemeral=True,
-            )
-
-        actions = json.dumps([{"type": "send_message", "content": content}], ensure_ascii=False)
-
-        self.db.create_custom_command(
-            guild_id=interaction.guild_id,
-            name=name,
-            trigger_type="prefix",
-            trigger_value=name,
-            conditions="{}",
-            actions=actions,
-            creator_id=interaction.user.id,
-        )
-
-        embed = discord.Embed(
-            title="✅ Comando creado",
-            description=f"**{name}** responderá con el contenido especificado.",
-            color=discord.Color.green(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        embed.add_field(name="Contenido", value=content[:1000], inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ── /customcommand delete ──────────────────────────────────────────────
-
-    @cc_group.command(name="delete", description="Elimina un comando personalizado")
-    @app_commands.describe(name="Nombre del comando a eliminar")
-    @app_commands.autocomplete(name=_cc_autocomplete)
-    async def cc_delete(self, interaction: discord.Interaction, name: str):
-        if not _can_manage(interaction.user):
-            return await interaction.response.send_message(
-                "❌ Necesitas el permiso **Gestionar Servidor** para eliminar comandos.",
-                ephemeral=True,
-            )
-
-        name = name.strip().lower()
-        command = self.db.get_custom_command(interaction.guild_id, name)
-        if not command:
-            return await interaction.response.send_message(
-                f"❌ No existe ningún comando llamado **{name}**.", ephemeral=True,
-            )
-
-        self.db.delete_custom_command(interaction.guild_id, name)
-
-        embed = discord.Embed(
-            title="🗑️ Comando eliminado",
-            description=f"El comando **{name}** fue eliminado.",
-            color=discord.Color.red(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ── /customcommand list ────────────────────────────────────────────────
 
     @cc_group.command(name="list", description="Lista todos los comandos personalizados del servidor")
     async def cc_list(self, interaction: discord.Interaction):
-        commands = self.db.get_custom_commands(interaction.guild_id)
-        if not commands:
+        cmds = self.db.get_custom_commands(interaction.guild_id)
+        if not cmds:
             return await interaction.response.send_message(
-                "📭 Este servidor no tiene comandos personalizados todavía.\n"
-                "Crea uno con `/customcommand create`.",
+                f"📭 Este servidor no tiene comandos personalizados.\n"
+                f"Configura desde el dashboard. Prefijo: `{PREFIX}`",
                 ephemeral=True,
             )
 
-        lines = []
-        for cmd in commands:
-            status = "✅" if cmd["enabled"] else "❌"
-            lines.append(f"{status} **{cmd['name']}** — {cmd['uses']} uso(s)")
-
-        description = "\n".join(lines)
-        if len(description) > 4000:
-            description = description[:4000] + "\n..."
-
         embed = discord.Embed(
             title=f"⚙️ Comandos personalizados — {interaction.guild.name}",
-            description=description,
             color=discord.Color.blurple(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_footer(text=f"{len(commands)}/{MAX_COMMANDS} comandos")
+        lines = []
+        for cmd in cmds[:25]:
+            status = "✅" if cmd.get("enabled", 1) else "❌"
+            lines.append(f"{status} `{PREFIX}{cmd['name']}` — {cmd.get('uses', 0)} uso(s)")
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"{len(cmds)} comandos · prefijo {PREFIX} · edita en dashboard")
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ── /customcommand info ────────────────────────────────────────────────
 
     @cc_group.command(name="info", description="Muestra información detallada de un comando")
     @app_commands.describe(name="Nombre del comando")
@@ -269,68 +203,40 @@ class CustomCommands(commands.Cog):
 
         creator = interaction.guild.get_member(int(cmd["creator_id"]))
         creator_text = creator.mention if creator else f"ID: {cmd['creator_id']}"
-
-        actions = self._parse_actions(cmd["actions"])
-        preview = ""
-        for a in actions:
-            if a.get("type") == "send_message":
-                preview = a.get("content", "")[:500]
-                break
-
         embed = discord.Embed(
-            title=f"⚙️ Info: {cmd['name']}",
+            title=f"⚙️ {PREFIX}{cmd['name']}",
             color=discord.Color.blurple(),
             timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="Creador", value=creator_text, inline=True)
-        embed.add_field(name="Usos", value=str(cmd["uses"]), inline=True)
-        embed.add_field(name="Creado", value=f"`{cmd['created_at'][:10]}`", inline=True)
-        embed.add_field(name="Habilitado", value="✅ Sí" if cmd["enabled"] else "❌ No", inline=True)
-        if preview:
-            embed.add_field(name="Respuesta", value=preview, inline=False)
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ── /customcommand variable group ──────────────────────────────────────
-
-    cc_variable_group = app_commands.Group(
-        name="variable",
-        description="Gestiona variables persistentes de comandos personalizados",
-        parent=cc_group,
-    )
-
-    @cc_variable_group.command(name="get", description="Obtiene el valor de una variable persistente")
-    @app_commands.describe(key="Nombre de la variable")
-    async def cc_variable_get(self, interaction: discord.Interaction, key: str):
-        value = self.db.get_cc_variable(interaction.guild_id, key)
-        if value is None:
-            return await interaction.response.send_message(
-                f"❌ La variable **{key}** no existe.", ephemeral=True,
-            )
-
-        embed = discord.Embed(
-            title="📦 Variable",
-            description=f"**{key}** = `{value}`",
-            color=discord.Color.blurple(),
+        embed.add_field(name="Usos", value=str(cmd.get("uses", 0)), inline=True)
+        embed.add_field(
+            name="Auto-borra invocación",
+            value="✅" if cmd.get("delete_invocation") else "❌",
+            inline=True,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @cc_variable_group.command(name="set", description="Establece el valor de una variable persistente")
-    @app_commands.describe(key="Nombre de la variable", value="Valor a asignar")
-    async def cc_variable_set(self, interaction: discord.Interaction, key: str, value: str):
-        if not _can_manage(interaction.user):
-            return await interaction.response.send_message(
-                "❌ Necesitas el permiso **Gestionar Servidor** para establecer variables.",
-                ephemeral=True,
-            )
+        # Resumen permisos
+        perm_data = cmd.get("permission_data")
+        perm_text = "@everyone"
+        if perm_data:
+            try:
+                pd = json.loads(perm_data) if isinstance(perm_data, str) else perm_data
+                if not pd.get("everyone", True):
+                    roles = pd.get("role_ids") or []
+                    perm_text = ", ".join(f"<@&{rid}>" for rid in roles) or "@everyone"
+            except (json.JSONDecodeError, TypeError):
+                pass
+        embed.add_field(name="Permisos", value=perm_text, inline=False)
 
-        self.db.set_cc_variable(interaction.guild_id, key, value)
+        if cmd.get("response_data"):
+            try:
+                rd = json.loads(cmd["response_data"]) if isinstance(cmd["response_data"], str) else cmd["response_data"]
+                preview = rd.get("content") or (rd.get("embed") or {}).get("description", "(embed)")
+                embed.add_field(name="Respuesta", value=str(preview)[:500], inline=False)
+            except (json.JSONDecodeError, TypeError):
+                pass
 
-        embed = discord.Embed(
-            title="✅ Variable actualizada",
-            description=f"**{key}** = `{value}`",
-            color=discord.Color.green(),
-        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

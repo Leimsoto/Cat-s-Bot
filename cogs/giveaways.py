@@ -145,7 +145,7 @@ class Giveaways(commands.Cog):
         except Exception as e:
             logger.error(f"Error terminando sorteo: {e}")
 
-    @app_commands.command(name="giveaway", description="Crea un sorteo interactivo")
+    @app_commands.command(name="sorteo", description="Crea un sorteo interactivo")
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
         premio="Qué se va a sortear", 
@@ -201,7 +201,7 @@ class Giveaways(commands.Cog):
 
     # ── Comandos de gestión ──────────────────────────────────────────────────
 
-    @app_commands.command(name="giveaway_end", description="Termina un sorteo activo inmediatamente y elige ganadores")
+    @app_commands.command(name="sorteo_terminar", description="Termina un sorteo activo inmediatamente y elige ganadores")
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(id_mensaje="ID del mensaje del sorteo")
     @app_commands.checks.has_permissions(administrator=True)
@@ -249,7 +249,7 @@ class Giveaways(commands.Cog):
                     pass
         return winners_ids
 
-    @app_commands.command(name="giveaway_cancel", description="Cancela un sorteo sin elegir ganadores")
+    @app_commands.command(name="sorteo_cancelar", description="Cancela un sorteo sin elegir ganadores")
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(id_mensaje="ID del mensaje del sorteo")
     @app_commands.checks.has_permissions(administrator=True)
@@ -284,7 +284,7 @@ class Giveaways(commands.Cog):
                     pass
         await interaction.followup.send("✅ Sorteo cancelado sin elegir ganadores.", ephemeral=True)
 
-    @app_commands.command(name="giveaway_reroll", description="Vuelve a elegir ganadores de un sorteo ya terminado")
+    @app_commands.command(name="sorteo_rerollear", description="Vuelve a elegir ganadores de un sorteo ya terminado")
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(id_mensaje="ID del mensaje del sorteo")
     @app_commands.checks.has_permissions(administrator=True)
@@ -306,7 +306,7 @@ class Giveaways(commands.Cog):
             return await interaction.followup.send("❌ No hubo participantes en este sorteo.", ephemeral=True)
         await interaction.followup.send("✅ Nuevos ganadores elegidos y anunciados.", ephemeral=True)
 
-    @app_commands.command(name="giveaway_list", description="Lista los sorteos activos en este servidor")
+    @app_commands.command(name="sorteo_lista", description="Lista los sorteos activos en este servidor")
     async def giveaway_list(self, interaction: discord.Interaction):
         active = self.db.get_active_giveaways()
         guild_gws = [g for g in active if int(g["guild_id"]) == interaction.guild_id]

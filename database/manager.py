@@ -1697,7 +1697,57 @@ class DatabaseManager:
             ("levelup_autodelete", "INTEGER DEFAULT 0"),
             ("levelup_delete_after_seconds", "INTEGER DEFAULT 30"),
             ("levelup_embed_config", "TEXT"),
+            # "same" (canal del mensaje) | "channel" (canal predeterminado).
+            ("announcement_mode", "TEXT"),
         ]
+
+        # Autorespuestas: trigger avanzado + response embed.
+        ar_cols = [
+            # "contains" | "exact" | "word" | "starts_with" | "regex"
+            ("match_type", "TEXT DEFAULT 'contains'"),
+            ("case_sensitive", "INTEGER DEFAULT 0"),
+            # JSON con la forma de MessageEditor para respuestas con embed.
+            ("response_data", "TEXT"),
+            ("enabled", "INTEGER DEFAULT 1"),
+        ]
+        for col, col_def in ar_cols:
+            try:
+                self.ensure_column("autoresponses", col, col_def)
+            except Exception as e:
+                logger.warning("ensure_column autoresponses.%s: %s", col, e)
+
+        # Custom commands: permisos por rol + auto-delete invocación + embed response.
+        cc_cols = [
+            # JSON: {role_ids: [ids permitidos], everyone: bool}
+            ("permission_data", "TEXT"),
+            ("delete_invocation", "INTEGER DEFAULT 0"),
+            # JSON con la forma de MessageEditor.
+            ("response_data", "TEXT"),
+        ]
+        for col, col_def in cc_cols:
+            try:
+                self.ensure_column("custom_commands", col, col_def)
+            except Exception as e:
+                logger.warning("ensure_column custom_commands.%s: %s", col, e)
+
+        # Scheduled messages: modo cron por zona horaria + embed editor.
+        sch_cols = [
+            # "interval" (cada N seg) | "cron" (hora local en timezone).
+            ("schedule_mode", "TEXT DEFAULT 'interval'"),
+            ("cron_hour", "INTEGER"),
+            ("cron_minute", "INTEGER"),
+            # JSON list [0..6] (0=lunes); NULL = todos los días.
+            ("cron_weekdays", "TEXT"),
+            # IANA tz name (ej. "America/Mexico_City"). NULL = UTC.
+            ("timezone", "TEXT"),
+            # JSON con la forma de MessageEditor (override del campo content legacy).
+            ("message_data", "TEXT"),
+        ]
+        for col, col_def in sch_cols:
+            try:
+                self.ensure_column("scheduled_messages", col, col_def)
+            except Exception as e:
+                logger.warning("ensure_column scheduled_messages.%s: %s", col, e)
         for col, col_def in xp_cols:
             try:
                 self.ensure_column("xp_config", col, col_def)
@@ -2606,17 +2656,46 @@ class DatabaseManager:
 
     # ── Auto-Responses ────────────────────────────────────────────────────────
 
-    def add_autoresponse(self, guild_id: int, channel_id: Optional[int], trigger: str, response: str) -> int:
+    def add_autoresponse(
+        self,
+        guild_id: int,
+        channel_id: Optional[int],
+        trigger: str,
+        response: str,
+        match_type: str = "contains",
+        case_sensitive: int = 0,
+        response_data: Optional[str] = None,
+        enabled: int = 1,
+    ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         self._execute(
-            "INSERT INTO autoresponses (guild_id, channel_id, trigger, response, created_at) VALUES (?, ?, ?, ?, ?)",
-            (guild_id, channel_id, trigger, response, now),
+            "INSERT INTO autoresponses (guild_id, channel_id, trigger, response, match_type, "
+            "case_sensitive, response_data, enabled, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                guild_id, channel_id, trigger, response, match_type,
+                int(case_sensitive), response_data, int(enabled), now,
+            ),
         )
         row = self._fetchone(
             "SELECT id FROM autoresponses WHERE guild_id = ? ORDER BY id DESC LIMIT 1",
             (guild_id,),
         )
         return row["id"] if row else 0
+
+    def update_autoresponse(self, response_id: int, **kwargs) -> None:
+        allowed = {"channel_id", "trigger", "response", "match_type",
+                   "case_sensitive", "response_data", "enabled"}
+        invalid = set(kwargs) - allowed
+        if invalid:
+            raise ValueError(f"Columnas inválidas: {invalid}")
+        if not kwargs:
+            return
+        ops = [
+            (f"UPDATE autoresponses SET {col} = ? WHERE id = ?", (val, response_id))
+            for col, val in kwargs.items()
+        ]
+        self._executemany(ops)
 
     def remove_autoresponse(self, response_id: int) -> None:
         self._execute("DELETE FROM autoresponses WHERE id = ?", (response_id,))
@@ -3249,12 +3328,23 @@ class DatabaseManager:
         content: str,
         interval_seconds: int,
         created_by: int,
+        schedule_mode: str = "interval",
+        cron_hour: Optional[int] = None,
+        cron_minute: Optional[int] = None,
+        cron_weekdays: Optional[str] = None,
+        timezone_name: Optional[str] = None,
+        message_data: Optional[str] = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         self._execute(
-            "INSERT INTO scheduled_messages (guild_id, name, channel_id, content, interval_seconds, created_by, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (guild_id, name, channel_id, content, interval_seconds, created_by, now),
+            "INSERT INTO scheduled_messages "
+            "(guild_id, name, channel_id, content, interval_seconds, created_by, created_at, "
+            " schedule_mode, cron_hour, cron_minute, cron_weekdays, timezone, message_data) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                guild_id, name, channel_id, content, interval_seconds, created_by, now,
+                schedule_mode, cron_hour, cron_minute, cron_weekdays, timezone_name, message_data,
+            ),
         )
 
     def get_schedules(self, guild_id: int) -> List[Dict]:
@@ -3268,7 +3358,11 @@ class DatabaseManager:
 
     def update_schedule(self, schedule_id: int, **kwargs) -> None:
         valid = frozenset(
-            {"enabled", "channel_id", "content", "interval_seconds", "last_sent"}
+            {
+                "enabled", "channel_id", "content", "interval_seconds", "last_sent",
+                "schedule_mode", "cron_hour", "cron_minute", "cron_weekdays",
+                "timezone", "message_data",
+            }
         )
         invalid = set(kwargs) - valid
         if invalid:
@@ -3592,6 +3686,9 @@ class DatabaseManager:
                 "actions",
                 "uses",
                 "last_used",
+                "permission_data",
+                "delete_invocation",
+                "response_data",
             }
         )
         invalid = set(kwargs) - valid
@@ -3712,6 +3809,9 @@ class DatabaseManager:
             self.ensure_column("voice_gen_config", "panel_description", "TEXT")
             self.ensure_column("voice_gen_config", "panel_color", "TEXT")
             self.ensure_column("voice_gen_config", "auto_send_panel", "INTEGER DEFAULT 1")
+            # JSON serializado con la forma de MessageEditor (content + embed).
+            # Si está presente toma precedencia sobre las columnas sueltas.
+            self.ensure_column("voice_gen_config", "panel_embed_data", "TEXT")
         except Exception as e:
             logger.warning("ensure_column en voice_gen_config falló: %s", e)
         self._execute("""

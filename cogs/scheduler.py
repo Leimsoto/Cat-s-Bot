@@ -16,15 +16,23 @@ Restricciones:
   - Máximo 10 schedules por servidor
 """
 
+import json
 import logging
 import asyncio
 from datetime import datetime, timezone
+
+try:
+    from zoneinfo import ZoneInfo  # stdlib desde Python 3.9
+except ImportError:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-logger = logging.getLogger(__name__)
+from cogs._message_payload import render_message_payload
+
+logger = logging.getLogger("Scheduler")
 
 MIN_INTERVAL = 600       # 10 minutos en segundos
 MAX_INTERVAL = 2_592_000 # 30 días en segundos
@@ -145,7 +153,7 @@ class Scheduler(commands.Cog):
 
     @tasks.loop(seconds=60)
     async def cron_runner(self):
-        now = datetime.now(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
         try:
             schedules = self.db.get_all_active_schedules()
         except Exception as e:
@@ -154,14 +162,10 @@ class Scheduler(commands.Cog):
 
         for sched in schedules:
             try:
-                interval = int(sched["interval_seconds"])
-                last_sent_str = sched.get("last_sent")
-
-                if last_sent_str:
-                    last_sent = datetime.fromisoformat(last_sent_str)
-                    elapsed = (now - last_sent).total_seconds()
-                    if elapsed < interval:
-                        continue
+                mode = (sched.get("schedule_mode") or "interval").lower()
+                should_send = self._should_send(sched, now_utc, mode)
+                if not should_send:
+                    continue
 
                 guild = self.bot.get_guild(int(sched["guild_id"]))
                 if not guild:
@@ -170,11 +174,90 @@ class Scheduler(commands.Cog):
                 if not channel or not isinstance(channel, discord.TextChannel):
                     continue
 
-                await channel.send(sched["content"])
-                self.db.update_schedule(int(sched["id"]), last_sent=now.isoformat())
-                logger.info(f"Schedule '{sched['name']}' enviado en {guild.name}#{channel.name}")
+                await self._send_scheduled_message(channel, sched, guild)
+                self.db.update_schedule(int(sched["id"]), last_sent=now_utc.isoformat())
+                logger.info(
+                    "Schedule '%s' enviado en %s#%s (modo %s)",
+                    sched["name"], guild.name, channel.name, mode,
+                )
             except Exception as e:
                 logger.warning(f"Error en schedule '{sched.get('name', '?')}': {e}")
+
+    def _should_send(self, sched: dict, now_utc: datetime, mode: str) -> bool:
+        """Decide si toca enviar este schedule en este tick."""
+        last_sent_str = sched.get("last_sent")
+        last_sent = None
+        if last_sent_str:
+            try:
+                last_sent = datetime.fromisoformat(last_sent_str)
+                if last_sent.tzinfo is None:
+                    last_sent = last_sent.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                last_sent = None
+
+        if mode == "cron":
+            tz_name = sched.get("timezone") or "UTC"
+            tz = ZoneInfo(tz_name) if ZoneInfo else timezone.utc
+            try:
+                local_now = now_utc.astimezone(tz) if ZoneInfo else now_utc
+            except Exception:
+                local_now = now_utc
+            target_h = sched.get("cron_hour")
+            target_m = sched.get("cron_minute")
+            if target_h is None or target_m is None:
+                return False
+            if local_now.hour != int(target_h) or local_now.minute != int(target_m):
+                return False
+            # Weekdays opcional (0=lunes según ISO weekday-1).
+            weekdays_raw = sched.get("cron_weekdays")
+            if weekdays_raw:
+                try:
+                    allowed = json.loads(weekdays_raw) if isinstance(weekdays_raw, str) else weekdays_raw
+                    if isinstance(allowed, list) and allowed:
+                        # ISO: Monday=1..Sunday=7; almacenamos 0=Monday..6=Sunday.
+                        today = local_now.isoweekday() - 1
+                        if today not in [int(x) for x in allowed]:
+                            return False
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            # Evita enviar dos veces en el mismo minuto.
+            if last_sent and (now_utc - last_sent).total_seconds() < 90:
+                return False
+            return True
+
+        # Modo interval (legacy).
+        interval = int(sched.get("interval_seconds") or 0)
+        if interval <= 0:
+            return False
+        if last_sent is None:
+            return True
+        return (now_utc - last_sent).total_seconds() >= interval
+
+    async def _send_scheduled_message(
+        self,
+        channel: discord.TextChannel,
+        sched: dict,
+        guild: discord.Guild,
+    ) -> None:
+        """Envía el mensaje del schedule. Prefiere `message_data` (embed)."""
+        message_data = sched.get("message_data")
+        variables = {
+            "server": guild.name,
+            "channel": channel.mention,
+        }
+        if message_data:
+            try:
+                payload = render_message_payload(message_data, variables)
+                if payload["content"] or payload["embed"] is not None:
+                    await channel.send(content=payload["content"], embed=payload["embed"])
+                    return
+            except Exception as exc:
+                logger.warning("message_data inválido para schedule %s: %s", sched.get("name"), exc)
+        content = sched.get("content") or ""
+        for k, v in variables.items():
+            content = content.replace("{" + k + "}", str(v))
+        if content:
+            await channel.send(content)
 
     @cron_runner.before_loop
     async def before_cron(self):
@@ -257,10 +340,14 @@ class Scheduler(commands.Cog):
         if not channel or not isinstance(channel, discord.TextChannel):
             return await interaction.response.send_message("❌ Canal no encontrado.", ephemeral=True)
         try:
-            await channel.send(sched["content"])
-            await interaction.response.send_message(f"✅ Mensaje de prueba enviado a {channel.mention}.", ephemeral=True)
+            await self._send_scheduled_message(channel, sched, interaction.guild)
+            await interaction.response.send_message(
+                f"✅ Mensaje de prueba enviado a {channel.mention}.", ephemeral=True
+            )
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Sin permisos para enviar en ese canal.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Sin permisos para enviar en ese canal.", ephemeral=True
+            )
 
 
 async def setup(bot: commands.Bot):

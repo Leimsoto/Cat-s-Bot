@@ -16,11 +16,12 @@
  *   GET  /api/guilds/{g}/invites          (leaderboard enriquecido)
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiGet, apiPatch } from "../lib/api";
 import SearchableSelect from "./ui/SearchableSelect";
 import { Icon } from "../lib/icons";
 import { useSaveBar } from "../lib/SaveBarContext";
+import MessageEditor, { normalizeMessage } from "./MessageEditor";
 
 const TABS = [
   { id: "welcome", label: "Bienvenidas", icon: "welcome" },
@@ -82,6 +83,39 @@ export default function Welcome({ selectedGuild: guildId, onToast }) {
   const setB = (k, v) => { setData((p) => ({ ...p, boost: { ...(p?.boost || {}), [k]: v } })); setDirty(true); };
   const setI = (k, v) => { setData((p) => ({ ...p, invites: { ...(p?.invites || {}), [k]: v } })); setDirty(true); };
 
+  const welcomeMessage = useMemo(() => {
+    const raw = data?.welcome?.embed_data;
+    if (raw) {
+      try { return normalizeMessage(typeof raw === "string" ? JSON.parse(raw) : raw); } catch { /* */ }
+    }
+    return normalizeMessage({
+      enabled: true,
+      embed: {
+        title: "👋 ¡Bienvenido a {server}!",
+        description: "{user}, eres el miembro número **{count}**.",
+        color: "#5865f2",
+      },
+    });
+  }, [data?.welcome?.embed_data]);
+
+  const boostMessage = useMemo(() => {
+    const raw = data?.boost?.embed_data;
+    if (raw) {
+      try { return normalizeMessage(typeof raw === "string" ? JSON.parse(raw) : raw); } catch { /* */ }
+    }
+    return normalizeMessage({
+      enabled: true,
+      embed: {
+        title: "💜 ¡Nuevo Booster!",
+        description: "Gracias {user} por mejorar nuestro servidor.",
+        color: "#f47fff",
+      },
+    });
+  }, [data?.boost?.embed_data]);
+
+  const [wTab, setWTab] = useState("embed-content");
+  const [bTab, setBTab] = useState("embed-content");
+
   useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
   if (loading) return <div className="loader">Cargando bienvenidas…</div>;
@@ -89,7 +123,7 @@ export default function Welcome({ selectedGuild: guildId, onToast }) {
   return (
     <div className="ov-container animate-fade-in">
       <div className="section-header">
-        <h2 className="glow-text" style={{ margin: 0 }}>Bienvenidas, Boosters & Invitaciones</h2>
+        <h2 className="glow-text" style={{ margin: 0 }}>Mensajes — Bienvenidas, Boosters e Invitaciones</h2>
         <p className="subtitle" style={{ margin: "4px 0 0" }}>
           Configura los mensajes de entrada, agradecimiento a boosters y el canal de log de invitaciones.
         </p>
@@ -135,10 +169,20 @@ export default function Welcome({ selectedGuild: guildId, onToast }) {
               renderSelected={(o) => <span>#{o.name}</span>}
             />
           </div>
-          <div className="callout">
-            <Icon name="info" /> El embed se configura con <code>/configurar bienvenidas</code>.
-            Variables: <code>{"{user}"}</code>, <code>{"{server}"}</code>, <code>{"{count}"}</code>.
-          </div>
+          <MessageEditor
+            value={welcomeMessage}
+            onChange={(next) => setW("embed_data", JSON.stringify(next))}
+            mode="both"
+            tab={wTab}
+            setTab={setWTab}
+            variablesHelp={"Variables: {user}, {username}, {server}, {count}."}
+            placeholders={{
+              title: "👋 ¡Bienvenido a {server}!",
+              description: "{user}, eres el miembro número **{count}**.",
+              content: "Mensaje opcional fuera del embed (ej. {user})",
+            }}
+            showJson
+          />
         </div>
       )}
 
@@ -180,10 +224,20 @@ export default function Welcome({ selectedGuild: guildId, onToast }) {
             />
             <span className="hint">Se mostrará en el mensaje de agradecimiento</span>
           </div>
-          <div className="callout">
-            <Icon name="info" /> El diseño se configura con <code>/configurar boosters</code>.
-            Variable: <code>{"{user}"}</code>.
-          </div>
+          <MessageEditor
+            value={boostMessage}
+            onChange={(next) => setB("embed_data", JSON.stringify(next))}
+            mode="both"
+            tab={bTab}
+            setTab={setBTab}
+            variablesHelp={"Variables: {user}, {username}, {server}. El GIF de arriba sobreescribe la imagen del embed."}
+            placeholders={{
+              title: "💜 ¡Nuevo Booster!",
+              description: "Gracias {user} por mejorar nuestro servidor.",
+              content: "Mensaje opcional fuera del embed",
+            }}
+            showJson
+          />
         </div>
       )}
 

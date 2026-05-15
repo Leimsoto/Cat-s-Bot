@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { apiGet, apiPatch, apiPost } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
 import { useSaveBar } from "../lib/SaveBarContext";
+import MessageEditor, { normalizeMessage, EMPTY_MESSAGE } from "./MessageEditor";
 
 export default function VoiceGen({ selectedGuild: guildId }) {
   const [cfg, setCfg] = useState(null);
@@ -48,8 +49,6 @@ export default function VoiceGen({ selectedGuild: guildId }) {
   const save = async () => {
     setSaving(true);
     try {
-      // Solo columnas válidas. Cualquier extra se ignora server-side, pero
-      // mantenerlo limpio evita confusión.
       const payload = {
         enabled: cfg?.enabled ? 1 : 0,
         generator_channel_id: cfg?.generator_channel_id ?? null,
@@ -57,9 +56,12 @@ export default function VoiceGen({ selectedGuild: guildId }) {
         panel_channel_id: cfg?.panel_channel_id ?? null,
         name_template: cfg?.name_template ?? null,
         default_limit: cfg?.default_limit ?? 0,
+        // Legacy: se siguen guardando para retrocompatibilidad si alguien
+        // editaba antes; el cog prefiere panel_embed_data si está presente.
         panel_title: cfg?.panel_title ?? null,
         panel_description: cfg?.panel_description ?? null,
         panel_color: cfg?.panel_color ?? null,
+        panel_embed_data: cfg?.panel_embed_data ?? null,
         auto_send_panel: cfg?.auto_send_panel ? 1 : 0};
       await apiPatch(`/api/guilds/${guildId}/voice-gen/config`, payload);
       setDirty(false);
@@ -69,6 +71,34 @@ export default function VoiceGen({ selectedGuild: guildId }) {
     } finally {
       setSaving(false);
     }
+  };
+
+  // Parsea panel_embed_data → forma de MessageEditor.
+  // Si está vacío, sintetiza desde campos legacy (title/description/color) para
+  // que el editor arranque con algo razonable y migre al primer guardado.
+  const panelMessage = useMemo(() => {
+    const raw = cfg?.panel_embed_data;
+    if (raw) {
+      try {
+        return normalizeMessage(typeof raw === "string" ? JSON.parse(raw) : raw);
+      } catch {
+        /* cae al sintetizado */
+      }
+    }
+    return normalizeMessage({
+      content: "",
+      enabled: true,
+      embed: {
+        title: cfg?.panel_title || "",
+        description: cfg?.panel_description || "",
+        color: cfg?.panel_color || "#7c3aed",
+      },
+    });
+  }, [cfg?.panel_embed_data, cfg?.panel_title, cfg?.panel_description, cfg?.panel_color]);
+
+  const [panelEditorTab, setPanelEditorTab] = useState("embed-content");
+  const handlePanelMessage = (next) => {
+    set("panel_embed_data", JSON.stringify(next));
   };
 
   const resendPanel = async (channel_id) => {
@@ -364,48 +394,20 @@ export default function VoiceGen({ selectedGuild: guildId }) {
             </label>
           </div>
 
-          <div className="config-item" style={{ marginBottom: 0 }}>
-            <label>Título del panel</label>
-            <input
-              type="text"
-              value={cfg?.panel_title || ""}
-              placeholder="Tu canal de voz está listo"
-              onChange={(e) => set("panel_title", e.target.value)}
-            />
-          </div>
-
-          <div className="config-item" style={{ marginBottom: 0 }}>
-            <label>Descripción</label>
-            <textarea
-              rows={4}
-              value={cfg?.panel_description || ""}
-              placeholder="**{owner}** — Bienvenido a **{channel}**…"
-              onChange={(e) => set("panel_description", e.target.value)}
-              style={{
-                width: "100%",
-                resize: "vertical",
-                padding: "10px 12px",
-                background: "var(--panel)",
-                border: "1px solid var(--border)",
-                borderRadius: "var(--radius-md)",
-                color: "var(--text)",
-                fontFamily: "var(--font-main)",
-                fontSize: "0.9rem"}}
-            />
-            <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>
-              Variables: <code>{"{channel}"}</code> <code>{"{owner}"}</code>
-            </span>
-          </div>
-
-          <div className="config-item" style={{ marginBottom: 0, maxWidth: 200 }}>
-            <label>Color (hex)</label>
-            <input
-              type="text"
-              value={cfg?.panel_color || ""}
-              placeholder="#7c3aed"
-              onChange={(e) => set("panel_color", e.target.value)}
-            />
-          </div>
+          <MessageEditor
+            value={panelMessage}
+            onChange={handlePanelMessage}
+            mode="both"
+            tab={panelEditorTab}
+            setTab={setPanelEditorTab}
+            variablesHelp={"Variables disponibles: {channel}, {channel_id}, {owner}, {guild}."}
+            placeholders={{
+              title: "Tu canal de voz está listo",
+              description: "**{owner}** — Bienvenido a **{channel}**…",
+              content: "Mensaje opcional fuera del embed…",
+            }}
+            showJson
+          />
         </div>
       )}
 

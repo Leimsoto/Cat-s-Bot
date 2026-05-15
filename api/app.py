@@ -102,6 +102,9 @@ def create_app(db=None, bot=None) -> FastAPI:
     app.include_router(autoresponses.router)
     app.include_router(custom_commands.router)
 
+    from api.routes.emojis import router as emojis_router
+    app.include_router(emojis_router)
+
     from api.routes.invites_route import router as invites_router
     from api.routes.suggestions_route import router as suggestions_router
     from api.routes.welcome import router as welcome_router

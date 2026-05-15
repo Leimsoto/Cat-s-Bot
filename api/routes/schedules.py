@@ -31,15 +31,29 @@ MAX_INTERVAL = 2_592_000
 class ScheduleCreate(BaseModel):
     name:             str
     channel_id:       int
-    content:          str
-    interval_seconds: int = Field(..., ge=MIN_INTERVAL, le=MAX_INTERVAL)
+    content:          str = ""
+    interval_seconds: int = Field(MIN_INTERVAL, ge=0, le=MAX_INTERVAL)
+    schedule_mode:    Optional[str] = None  # "interval" | "cron"
+    cron_hour:        Optional[int] = Field(None, ge=0, le=23)
+    cron_minute:      Optional[int] = Field(None, ge=0, le=59)
+    # JSON list serializada (e.g. "[0,1,2,3,4]"). 0=lunes…6=domingo.
+    cron_weekdays:    Optional[str] = None
+    timezone:         Optional[str] = None
+    # JSON serializado MessageEditor (override de content cuando está presente).
+    message_data:     Optional[str] = None
 
 
 class SchedulePatch(BaseModel):
     channel_id:       Optional[int] = None
     content:          Optional[str] = None
-    interval_seconds: Optional[int] = Field(None, ge=MIN_INTERVAL, le=MAX_INTERVAL)
+    interval_seconds: Optional[int] = Field(None, ge=0, le=MAX_INTERVAL)
     enabled:          Optional[int] = None
+    schedule_mode:    Optional[str] = None
+    cron_hour:        Optional[int] = Field(None, ge=0, le=23)
+    cron_minute:      Optional[int] = Field(None, ge=0, le=59)
+    cron_weekdays:    Optional[str] = None
+    timezone:         Optional[str] = None
+    message_data:     Optional[str] = None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -83,9 +97,19 @@ async def create_schedule(
     user=Depends(require_guild_admin),
 ):
     name = body.name.strip()
-    content = body.content.strip()
-    if not name or not content:
-        raise HTTPException(400, "name y content no pueden estar vacíos")
+    content = (body.content or "").strip()
+    if not name:
+        raise HTTPException(400, "name es requerido")
+    if not content and not body.message_data:
+        raise HTTPException(400, "Debes proporcionar content o message_data")
+
+    mode = (body.schedule_mode or "interval").lower()
+    if mode not in ("interval", "cron"):
+        raise HTTPException(400, "schedule_mode debe ser 'interval' o 'cron'")
+    if mode == "interval" and (body.interval_seconds or 0) < MIN_INTERVAL:
+        raise HTTPException(400, f"Intervalo mínimo {MIN_INTERVAL}s")
+    if mode == "cron" and (body.cron_hour is None or body.cron_minute is None):
+        raise HTTPException(400, "cron_hour y cron_minute son requeridos en modo cron")
 
     existing = db.get_schedules(guild_id)
     if len(existing) >= MAX_SCHEDULES:
@@ -96,7 +120,13 @@ async def create_schedule(
     creator_id = int(user.get("user_id", 0)) if isinstance(user, dict) else 0
     db.create_schedule(
         guild_id, name, int(body.channel_id), content,
-        int(body.interval_seconds), creator_id,
+        int(body.interval_seconds or 0), creator_id,
+        schedule_mode=mode,
+        cron_hour=body.cron_hour,
+        cron_minute=body.cron_minute,
+        cron_weekdays=body.cron_weekdays,
+        timezone_name=body.timezone,
+        message_data=body.message_data,
     )
     return {"status": "created", "name": name}
 
@@ -162,8 +192,13 @@ async def test_schedule(
     channel = guild.get_channel(int(sched["channel_id"]))
     if not channel or not isinstance(channel, discord.TextChannel):
         raise HTTPException(404, "Canal de texto no encontrado")
+
+    cog = bot.get_cog("Scheduler")
     try:
-        await channel.send(sched["content"])
+        if cog and hasattr(cog, "_send_scheduled_message"):
+            await cog._send_scheduled_message(channel, sched, guild)
+        else:
+            await channel.send(sched.get("content") or "(vacío)")
     except discord.Forbidden:
         raise HTTPException(403, "Sin permisos para enviar en ese canal")
     except discord.HTTPException as e:

@@ -7,8 +7,12 @@ const NAV_SECTIONS = [
     label: "General",
     items: [
       { id: "overview", icon: ICONS.overview, label: "Resumen" },
+    ]},
+  {
+    label: "Moderación",
+    items: [
       { id: "moderation", icon: ICONS.moderation, label: "Moderación" },
-      { id: "automod", icon: ICONS.automod, label: "Automod" },
+      { id: "automod", icon: ICONS.automod, label: "Automoderación" },
       { id: "logs", icon: ICONS.logs, label: "Registros" },
     ]},
   {
@@ -19,11 +23,14 @@ const NAV_SECTIONS = [
       { id: "voice-gen", icon: ICONS.voiceGen, label: "Generador de VCs" },
       { id: "tickets", icon: ICONS.tickets, label: "Tickets" },
       { id: "levels", icon: ICONS.levels, label: "Niveles" },
+      { id: "giveaways", icon: ICONS.giveaways, label: "Sorteos" },
+    ]},
+  {
+    label: "Automatización",
+    items: [
       { id: "autoroles", icon: ICONS.autoroles, label: "Autoroles" },
       { id: "autoresponses", icon: ICONS.autoresponses, label: "Auto-Respuestas" },
       { id: "custom-commands", icon: ICONS.customCommands, label: "Comandos Custom" },
-      { id: "giveaways", icon: ICONS.giveaways, label: "Sorteos" },
-      { id: "tags", icon: ICONS.tags, label: "Tags" },
     ]},
   {
     label: "Herramientas",
@@ -31,7 +38,7 @@ const NAV_SECTIONS = [
       { id: "embeds", icon: ICONS.embeds, label: "Creador de Embeds" },
       { id: "reports", icon: ICONS.reports, label: "Reportes" },
       { id: "schedules", icon: ICONS.schedules, label: "Horarios" },
-      { id: "welcome", icon: ICONS.welcome, label: "Bienvenidas" },
+      { id: "welcome", icon: ICONS.welcome, label: "Mensajes" },
       { id: "suggestions", icon: ICONS.suggestions, label: "Sugerencias" },
     ]},
 ];

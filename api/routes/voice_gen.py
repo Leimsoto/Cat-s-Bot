@@ -38,6 +38,7 @@ _VG_KEYS = {
     "panel_description",
     "panel_color",
     "auto_send_panel",
+    "panel_embed_data",
 }
 
 
@@ -52,6 +53,8 @@ class VoiceGenConfigUpdate(BaseModel):
     panel_description:    Optional[str]  = None
     panel_color:          Optional[str]  = None
     auto_send_panel:      Optional[int]  = None
+    # JSON serializado con la forma de MessageEditor (content + embed).
+    panel_embed_data:     Optional[str]  = None
 
 
 class ResendPanelBody(BaseModel):

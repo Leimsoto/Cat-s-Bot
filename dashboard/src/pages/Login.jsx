@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import CatLogo from "../components/CatLogo";
+
+const GITHUB_URL = "https://github.com/Leimsoto/Cat-s-Bot";
 
 const LOGIN_URL = "/api/auth/login";
 
@@ -247,11 +250,26 @@ export default function Login() {
           <a href="#modulos">Módulos</a>
           <a href="#ventajas">Ventajas</a>
           <a href="#estadisticas">Estadísticas</a>
+          <Link to="/privacy">Privacidad</Link>
+          <Link to="/tos">Condiciones</Link>
         </nav>
-        <button className="landing-nav-cta" onClick={handleLogin}>
-          <DiscordIcon />
-          Iniciar sesión
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <a
+            className="landing-nav-cta"
+            href={GITHUB_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ background: "#24292f", color: "#fff" }}
+            title="Código fuente en GitHub"
+          >
+            <i className="fa-brands fa-github" />
+            <span style={{ marginLeft: 6 }}>GitHub</span>
+          </a>
+          <button className="landing-nav-cta" onClick={handleLogin}>
+            <DiscordIcon />
+            Iniciar sesión
+          </button>
+        </div>
       </header>
 
       <main id="top">
@@ -301,13 +319,26 @@ export default function Login() {
                 <i className="fa-solid fa-arrow-right landing-cta-arrow" aria-hidden="true" />
               </button>
               <a
-                className="landing-cta-secondary"
+                className="landing-cta-invite"
                 href="https://catsbot-setup.leimsoto.com"
                 target="_blank"
                 rel="noopener noreferrer"
+                style={{
+                  background: "linear-gradient(135deg, #3b82f6, #2563eb)",
+                  color: "#fff",
+                  padding: "12px 22px",
+                  borderRadius: 12,
+                  fontWeight: 700,
+                  display: "inline-flex",
+                  gap: 8,
+                  alignItems: "center",
+                  textDecoration: "none",
+                  boxShadow: "0 8px 24px rgba(37,99,235,0.35)",
+                  border: "1px solid rgba(255,255,255,0.18)",
+                }}
               >
                 <i className="fa-solid fa-plus" aria-hidden="true" />
-                Aún no lo tienes, invítalo
+                Invitar a Cat's Bot
               </a>
             </div>
 
@@ -535,7 +566,19 @@ export default function Login() {
             {isOnline ? "Servicio operativo" : "Conectando"}
           </span>
           <span>· {serverCount.toLocaleString("es")} servidores</span>
-          <span>· hecho con cariño en español</span>
+        </div>
+        <div className="landing-footer-meta" style={{ gap: 14 }}>
+          <Link to="/privacy">Política de Privacidad</Link>
+          <Link to="/tos">Condiciones del Servicio</Link>
+          <a
+            href={GITHUB_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+            title="Código fuente"
+          >
+            <i className="fa-brands fa-github" /> Source Code
+          </a>
         </div>
       </footer>
     </div>
