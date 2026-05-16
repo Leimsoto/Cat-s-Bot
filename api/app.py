@@ -14,6 +14,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Thread
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +25,13 @@ logger = logging.getLogger("API")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = BASE_DIR / "dashboard" / "dist"
+
+
+def _origin(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return url.rstrip("/")
 
 
 def create_app(db=None, bot=None) -> FastAPI:
@@ -43,8 +51,8 @@ def create_app(db=None, bot=None) -> FastAPI:
         CORSMiddleware,
         allow_origins=list(
             {
-                dashboard_url,
-                api_base_url,
+                _origin(dashboard_url),
+                _origin(api_base_url),
                 "http://localhost:3000",
                 "http://localhost:5173",
                 "http://localhost:8080",
@@ -142,6 +150,19 @@ def create_app(db=None, bot=None) -> FastAPI:
                 name="panel-assets-legacy",
             )
 
+        icons_dir = DASHBOARD_DIR / "icons"
+        if icons_dir.is_dir():
+            app.mount(
+                "/icons",
+                StaticFiles(directory=str(icons_dir)),
+                name="spa-icons",
+            )
+            app.mount(
+                "/panel/icons",
+                StaticFiles(directory=str(icons_dir)),
+                name="panel-icons",
+            )
+
         index_file = DASHBOARD_DIR / "index.html"
 
         # Servir favicon y otros archivos estáticos top-level si existen
@@ -161,12 +182,13 @@ def create_app(db=None, bot=None) -> FastAPI:
         ):
             candidate = DASHBOARD_DIR / static_name
             if candidate.is_file():
-                app.add_api_route(
-                    f"/{static_name}",
-                    _make_static_handler(candidate),
-                    methods=["GET"],
-                    include_in_schema=False,
-                )
+                for route_path in (f"/{static_name}", f"/panel/{static_name}"):
+                    app.add_api_route(
+                        route_path,
+                        _make_static_handler(candidate),
+                        methods=["GET"],
+                        include_in_schema=False,
+                    )
 
         async def _serve_index(_request: Request = None):
             if index_file.is_file():

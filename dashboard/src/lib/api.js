@@ -6,6 +6,7 @@
 
 const getCache = new Map();
 const pendingGets = new Map();
+const MAX_GET_CACHE_ENTRIES = 120;
 
 const ttlByPath = [
   [/\/api\/guilds\/[^/]+\/commands$/, 5 * 60_000],
@@ -25,6 +26,19 @@ const ttlByPath = [
 
 function getTtl(path) {
   return ttlByPath.find(([pattern]) => pattern.test(path))?.[1] ?? 15_000;
+}
+
+function pruneGetCache() {
+  const now = Date.now();
+  for (const [key, cached] of getCache) {
+    if (cached.expiresAt <= now) getCache.delete(key);
+  }
+
+  while (getCache.size > MAX_GET_CACHE_ENTRIES) {
+    const oldestKey = getCache.keys().next().value;
+    if (!oldestKey) break;
+    getCache.delete(oldestKey);
+  }
 }
 
 function invalidateRelated(path) {
@@ -67,6 +81,8 @@ async function requestJson(path, options = {}) {
 
 export async function apiGet(path, options = {}) {
   const useCache = options.cache !== false;
+  if (useCache) pruneGetCache();
+
   const cached = getCache.get(path);
 
   if (useCache && cached && cached.expiresAt > Date.now()) {
@@ -81,6 +97,7 @@ export async function apiGet(path, options = {}) {
     .then((data) => {
       if (useCache) {
         getCache.set(path, { data, expiresAt: Date.now() + getTtl(path) });
+        pruneGetCache();
       }
       return data;
     })

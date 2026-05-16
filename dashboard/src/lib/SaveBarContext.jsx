@@ -1,4 +1,12 @@
-import { createContext, useContext, useState, useCallback, useEffect } from "react";
+import {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
 
 const SaveBarCtx = createContext({
   dirty: false,
@@ -10,23 +18,37 @@ const SaveBarCtx = createContext({
  * Provider — wrap Dashboard with this.
  * Exposes dirty/saving state + onSave/onRevert to the topbar.
  */
-export function SaveBarProvider({ children, renderBar }) {
-  const [state, setState] = useState({
-    dirty: false,
-    saving: false,
-    onSave: null,
-    onRevert: null});
+export function SaveBarProvider({ children }) {
+  const handlersRef = useRef({ onSave: null, onRevert: null });
+  const [status, setStatus] = useState({ dirty: false, saving: false });
 
   const register = useCallback(({ dirty, saving, onSave, onRevert }) => {
-    setState({ dirty, saving, onSave, onRevert });
+    handlersRef.current = { onSave, onRevert };
+    setStatus((prev) => {
+      const next = { dirty: Boolean(dirty), saving: Boolean(saving) };
+      return prev.dirty === next.dirty && prev.saving === next.saving
+        ? prev
+        : next;
+    });
   }, []);
 
   const clear = useCallback(() => {
-    setState({ dirty: false, saving: false, onSave: null, onRevert: null });
+    handlersRef.current = { onSave: null, onRevert: null };
+    setStatus((prev) =>
+      prev.dirty || prev.saving ? { dirty: false, saving: false } : prev,
+    );
   }, []);
 
+  const onSave = useCallback(() => handlersRef.current.onSave?.(), []);
+  const onRevert = useCallback(() => handlersRef.current.onRevert?.(), []);
+
+  const value = useMemo(
+    () => ({ ...status, onSave, onRevert, register, clear }),
+    [status, onSave, onRevert, register, clear],
+  );
+
   return (
-    <SaveBarCtx.Provider value={{ ...state, register, clear }}>
+    <SaveBarCtx.Provider value={value}>
       {children}
     </SaveBarCtx.Provider>
   );

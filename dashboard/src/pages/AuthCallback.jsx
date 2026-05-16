@@ -12,7 +12,10 @@ export default function AuthCallback() {
       localStorage.setItem('botES_token', token);
       navigate('/panel/dashboard', { replace: true });
     } else {
-      navigate('/', { replace: true });
+      navigate(
+        window.location.pathname.startsWith('/panel') ? '/panel/login' : '/',
+        { replace: true },
+      );
     }
   }, [navigate]);
 

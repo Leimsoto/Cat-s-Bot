@@ -7,9 +7,13 @@ const AuthCallback = lazy(() => import('./pages/AuthCallback'));
 const Privacy = lazy(() => import('./pages/Privacy'));
 const Tos = lazy(() => import('./pages/Tos'));
 
+function loginPath() {
+  return window.location.pathname.startsWith('/panel') ? '/panel/login' : '/';
+}
+
 function ProtectedRoute({ children }) {
   const token = localStorage.getItem('botES_token');
-  if (!token) return <Navigate to="/" replace />;
+  if (!token) return <Navigate to={loginPath()} replace />;
   return children;
 }
 
@@ -40,7 +44,7 @@ export default function App() {
           <Route path="/privacy" element={<Privacy />} />
           <Route path="/tos" element={<Tos />} />
           <Route path="/auth/callback" element={<AuthCallback />} />
-          <Route path="/panel/login" element={<Navigate to="/" replace />} />
+          <Route path="/panel/login" element={<Login />} />
           <Route path="/panel/auth/callback" element={<AuthCallback />} />
           <Route path="/panel" element={<Navigate to="/panel/dashboard" replace />} />
           <Route
