@@ -133,9 +133,15 @@ export default function SearchableSelect({
   const popoverRef = useRef(null);
   const inputRef = useRef(null);
   const listRef = useRef(null);
+  const resolveRequestsRef = useRef(new Set());
   const [popoverPos, setPopoverPos] = useState(null);
 
   const debouncedQuery = useDebounce(query, debounceMs);
+  const selectedIds = useMemo(() => {
+    if (multiple) return Array.isArray(value) ? value.map(String) : [];
+    return value != null && value !== "" ? [String(value)] : [];
+  }, [multiple, value]);
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
   // Calcula la posición del popover (portal-friendly, evita overflow del card padre).
   const recalcPos = useCallback(() => {
@@ -170,7 +176,7 @@ export default function SearchableSelect({
     setLoading(true);
     const sep = endpoint.includes("?") ? "&" : "?";
     const url = `${endpoint}${sep}search=${encodeURIComponent(debouncedQuery)}&limit=${maxResults}`;
-    apiGet(url, { cache: false })
+    apiGet(url)
       .then((data) => {
         if (cancelled) return;
         const arr = Array.isArray(data?.[itemsKey])
@@ -213,37 +219,60 @@ export default function SearchableSelect({
 
   // Resolución implícita: si está en modo remoto con valor(es) que aún no
   // existen en knownById, hace un fetch sin filtro para encontrarlos.
-  useEffect(() => {
-    if (!isRemote || !endpoint) return;
-    const ids = multiple
-      ? (Array.isArray(value) ? value.map(String) : [])
-      : (value != null && value !== "" ? [String(value)] : []);
-    const missing = ids.filter((id) => !knownById.has(id));
-    if (missing.length === 0) return;
+  const missingIdKey = useMemo(
+    () =>
+      selectedIds
+        .filter((id) => !knownById.has(id))
+        .sort()
+        .join("\u001f"),
+    [selectedIds, knownById],
+  );
 
+  useEffect(() => {
+    if (!isRemote || !endpoint || !missingIdKey) return;
+
+    const requestKey = `${endpoint}|${itemsKey}|${missingIdKey}`;
+    if (resolveRequestsRef.current.has(requestKey)) return;
+    resolveRequestsRef.current.add(requestKey);
+
+    const missing = new Set(missingIdKey.split("\u001f"));
     const sep = endpoint.includes("?") ? "&" : "?";
-    const url = `${endpoint}${sep}search=&limit=500`;
+    const url = `${endpoint}${sep}search=&limit=250`;
     let cancelled = false;
-    apiGet(url, { cache: false })
+
+    apiGet(url)
       .then((data) => {
         if (cancelled) return;
         const arr = Array.isArray(data?.[itemsKey])
           ? data[itemsKey]
           : Array.isArray(data)
-          ? data
-          : [];
+            ? data
+            : [];
         const updates = {};
         for (const o of arr) {
           const k = String(o.id);
-          if (missing.includes(k)) updates[k] = o;
+          if (missing.has(k)) updates[k] = o;
         }
         if (Object.keys(updates).length > 0) {
-          setResolvedById((prev) => ({ ...prev, ...updates }));
+          setResolvedById((prev) => {
+            let changed = false;
+            const next = { ...prev };
+            for (const [key, opt] of Object.entries(updates)) {
+              if (!next[key]) {
+                next[key] = opt;
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
+          });
         }
       })
       .catch(() => {});
-    return () => { cancelled = true; };
-  }, [isRemote, endpoint, value, multiple, itemsKey, knownById]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isRemote, endpoint, itemsKey, missingIdKey]);
 
   // Cerrar al hacer click fuera (también considera el popover en portal).
   useEffect(() => {
@@ -344,8 +373,8 @@ export default function SearchableSelect({
       ? knownById.get(String(value)) || { id: value, name: `#${value}` }
       : null;
 
-  const selectedMulti = multiple && Array.isArray(value)
-    ? value.map((v) => knownById.get(String(v)) || { id: v, name: `#${v}` })
+  const selectedMulti = multiple
+    ? selectedIds.map((v) => knownById.get(String(v)) || { id: v, name: `#${v}` })
     : [];
 
   return (
@@ -421,7 +450,7 @@ export default function SearchableSelect({
                   visibleOptions.map((opt, idx) => {
                     const id = String(opt.id);
                     const isSelected = multiple
-                      ? Array.isArray(value) && value.map(String).includes(id)
+                      ? selectedIdSet.has(id)
                       : String(value) === id;
                     return (
                       <button

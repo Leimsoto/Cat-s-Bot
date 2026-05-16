@@ -1,8 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════
    1. GOOGLE FONTS
    ═══════════════════════════════════════════════════════════════════ */
-@import url("https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Plus+Jakarta+Sans:wght@600;700;800;900&display=swap");
-
 /* ═══════════════════════════════════════════════════════════════════
    2. CSS VARIABLES
    ═══════════════════════════════════════════════════════════════════ */
@@ -5616,4 +5614,40 @@ body::before {
 .legal-footer a {
     color: #a78bfa;
     text-decoration: none;
+}
+
+/* Performance guardrails
+   The dashboard is a long-lived control panel, so avoid fixed animated blur
+   layers and backdrop filters. Those effects create huge compositor surfaces in
+   Chromium and were the main source of scroll jank/RAM spikes. */
+.app-container::before,
+.app-container::after,
+.loading-stage::before,
+.loading-stage::after,
+.landing-bg-orb {
+    display: none !important;
+    animation: none !important;
+    filter: none !important;
+    will-change: auto !important;
+}
+
+body::before {
+    display: none !important;
+}
+
+.sidebar,
+.guild-dropdown,
+.legal-nav,
+.landing-nav {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+.animate-fade-in,
+.ov-container,
+.glass-panel,
+.nav-links li,
+.guild-selector,
+.guild-option {
+    will-change: auto !important;
 }

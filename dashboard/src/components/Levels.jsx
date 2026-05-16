@@ -16,6 +16,7 @@ export default function Levels({ selectedGuild: guildId }) {
   const [toast, setToast] = useState(null);
   const [newReward, setNewReward] = useState({ level: "", role_id: "" });
   const [addingReward, setAddingReward] = useState(false);
+  const [lvlTab, setLvlTab] = useState("embed-content");
 
   const showToast = (msg, type = "success") => setToast({ msg, type });
 
@@ -102,6 +103,25 @@ export default function Levels({ selectedGuild: guildId }) {
 
   useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
+  const levelMessage = useMemo(() => {
+    const raw = cfg?.levelup_embed_config;
+    if (raw) {
+      try {
+        return normalizeMessage(typeof raw === "string" ? JSON.parse(raw) : raw);
+      } catch {
+        // Fallback to the default message below.
+      }
+    }
+    return normalizeMessage({
+      enabled: true,
+      embed: {
+        title: "⭐ ¡Nivel {level}!",
+        description: "{user} ha subido al nivel **{level}**.",
+        color: "#fbbf24",
+      },
+    });
+  }, [cfg?.levelup_embed_config]);
+
   if (loading)
     return (
       <div className="dashboard-empty-state">
@@ -134,23 +154,6 @@ export default function Levels({ selectedGuild: guildId }) {
   const ttl = cfg?.levelup_delete_after_seconds ?? 30;
   const willDelete = !persist || autodel;
   const announcementMode = cfg?.announcement_mode || (cfg?.announcement_channel_id ? "channel" : "same");
-
-  const levelMessage = useMemo(() => {
-    const raw = cfg?.levelup_embed_config;
-    if (raw) {
-      try { return normalizeMessage(typeof raw === "string" ? JSON.parse(raw) : raw); } catch { /* */ }
-    }
-    return normalizeMessage({
-      enabled: true,
-      embed: {
-        title: "⭐ ¡Nivel {level}!",
-        description: "{user} ha subido al nivel **{level}**.",
-        color: "#fbbf24",
-      },
-    });
-  }, [cfg?.levelup_embed_config]);
-
-  const [lvlTab, setLvlTab] = useState("embed-content");
 
   return (
     <div className="ov-container animate-fade-in">
