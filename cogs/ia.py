@@ -59,6 +59,7 @@ from discord import app_commands
 from discord.ext import commands
 from cogs._conversation import Conversation, current_channel_members, provider_for, public_channel
 from cogs._ai_mentions import format_ai_mentions, mention_context, split_ai_text
+from ai_chat_config import chat_actor_blocked
 
 try:
     from google import genai
@@ -485,6 +486,14 @@ class IA(commands.Cog):
             task.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
+        while True:
+            try:
+                pending = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self.conversation.refund_deepthink(pending)
+            self._queue.release(pending)
+            self._queue.task_done()
         if self._http and not self._http.closed:
             await self._http.close()
         await self.conversation.close()
@@ -875,6 +884,8 @@ class IA(commands.Cog):
         try:
             channel = message.channel
             cfg = self.db.get_ai_config(channel.guild.id)
+            if chat_actor_blocked(message, cfg):
+                return
             webhook_name = cfg.get("ai_webhook_name") or "Bot ES IA"
             webhook_icon_url = cfg.get("ai_webhook_icon") or self.bot.user.display_avatar.url
 
@@ -885,6 +896,8 @@ class IA(commands.Cog):
             text, _ = format_ai_mentions(f"{message.author.mention} {text}", message)
             notified_user_ids = set()
             for chunk in split_ai_text(text, 1900):
+                if chat_actor_blocked(message, self.db.get_ai_config(message.guild.id)):
+                    return
                 chunk, mentions = format_ai_mentions(chunk, message, first_fragment=False, notified_user_ids=notified_user_ids)
                 await wh.send(
                     content=chunk,
@@ -904,6 +917,8 @@ class IA(commands.Cog):
             text, _ = format_ai_mentions(text, message)
             notified_user_ids = set()
             for index, chunk in enumerate(split_ai_text(text, _DISCORD_MAX)):
+                if chat_actor_blocked(message, self.db.get_ai_config(message.guild.id)):
+                    return
                 chunk, mentions = format_ai_mentions(chunk, message, first_fragment=index == 0, notified_user_ids=notified_user_ids)
                 await message.reply(chunk, mention_author=index == 0, allowed_mentions=mentions)
 
@@ -920,10 +935,17 @@ class IA(commands.Cog):
             except Exception as e:
                 logger.error(f"Worker {worker_id} error: {e}", exc_info=True)
             finally:
+                if job.get("deep_request_id") is not None:
+                    self.conversation.refund_deepthink(job)
                 self._queue.release(job)
                 self._queue.task_done()
 
     async def _process_job(self, job: dict):
+        message = job["message"]
+        if chat_actor_blocked(message, self.db.get_ai_config(message.guild.id)):
+            if job.get("deep_request_id") is not None:
+                self.conversation.refund_deepthink(job)
+            return
         if job.get("conversation"):
             return await self.conversation.process(job)
         message:       discord.Message = job["message"]
@@ -1000,6 +1022,8 @@ class IA(commands.Cog):
             reply_text = _normalize_discord_ai_text(
                 getattr(response, "text", None) or "No pude generar una respuesta."
             )
+            if chat_actor_blocked(message, self.db.get_ai_config(message.guild.id)):
+                return
 
             # Guardar turno del modelo
             # /ia_limpiar puede retirar este historial mientras esperamos a la API.
@@ -1012,6 +1036,8 @@ class IA(commands.Cog):
             await self._send_reply(message, reply_text, is_ai_channel)
 
         except Exception as e:
+            if chat_actor_blocked(message, self.db.get_ai_config(message.guild.id)):
+                return
             status_code = _api_error_status_code(e)
             if status_code in {401, 403}:
                 leaked = _is_leaked_api_key_error(e)
@@ -1040,18 +1066,19 @@ class IA(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.guild and provider_for(self.db, message.guild.id) == "strata":
+        if not message.guild or message.author.bot or getattr(message, "webhook_id", None):
+            return
+        cfg = self.db.get_ai_config(message.guild.id)
+        if chat_actor_blocked(message, cfg):
+            return
+        if provider_for(self.db, message.guild.id, cfg) == "strata":
             return await self.conversation.listen(message)
         if (
-            message.author.bot
-            or getattr(message, "webhook_id", None)
-            or not message.guild
-            or not genai
+            not genai
             or types is None
         ):
             return
 
-        cfg = self.db.get_ai_config(message.guild.id)
         try:
             ai_enabled = bool(int(cfg.get("ai_enabled", 1)))
         except (TypeError, ValueError):
@@ -1211,6 +1238,12 @@ class IA(commands.Cog):
 
 
 
+    @app_commands.command(name="deepthink", description="Investiga una consulta concreta a fondo usando tu cupo diario")
+    @app_commands.guild_only()
+    @app_commands.describe(consulta="La consulta concreta que quieres investigar (hasta 1800 caracteres)")
+    async def deepthink(self, interaction: discord.Interaction, consulta: app_commands.Range[str, 1, 1800]):
+        await self.conversation.enqueue_deepthink(interaction, consulta)
+
     @app_commands.command(name="ia_limpiar", description="Borra tu historial de conversación con la IA")
     async def iaclear(self, interaction: discord.Interaction):
         if interaction.guild_id:
@@ -1240,14 +1273,23 @@ class IA(commands.Cog):
     @app_commands.command(name="ia_memoria", description="Consulta, guarda o borra recuerdos duraderos de la IA")
     @app_commands.guild_only()
     @app_commands.choices(
-        accion=[app_commands.Choice(name="Ver", value="ver"), app_commands.Choice(name="Guardar (reemplaza)", value="guardar"), app_commands.Choice(name="Borrar", value="borrar")],
+        accion=[app_commands.Choice(name="Ver mis notas y recuerdos automáticos", value="ver"),
+            app_commands.Choice(name="Guardar nota manual (reemplaza)", value="guardar"),
+            app_commands.Choice(name="Borrar todo el ámbito", value="borrar"),
+            app_commands.Choice(name="Editar recuerdo automático por ID", value="editar_auto"),
+            app_commands.Choice(name="Borrar recuerdo automático por ID", value="borrar_auto"),
+            app_commands.Choice(name="Pausar recuerdos automáticos", value="pausar_auto"),
+            app_commands.Choice(name="Activar recuerdos automáticos", value="activar_auto")],
         ambito=[app_commands.Choice(name="Mi perfil", value="user"), app_commands.Choice(name="Este chat (admin)", value="chat"), app_commands.Choice(name="Servidor compartido (admin)", value="global")],
     )
-    @app_commands.describe(compartir_en_servidor="Permitir que tu recuerdo de un canal público se use al responderte en otros chats")
-    async def ai_memory(self, interaction: discord.Interaction, accion: str, ambito: str = "user", texto: str = "", compartir_en_servidor: bool = False):
+    @app_commands.describe(compartir_en_servidor="Compartir solo la nota manual de este canal público al responderte en otros chats",
+        recuerdo="ID del recuerdo automático mostrado con Ver (editar o borrar)", texto="Nota manual (hasta 2000 caracteres) o edición de recuerdo automático (hasta 250)")
+    async def ai_memory(self, interaction: discord.Interaction, accion: str, ambito: str = "user", texto: str = "", compartir_en_servidor: bool = False, recuerdo: str = ""):
         await interaction.response.defer(ephemeral=True)
-        if accion not in {"ver", "guardar", "borrar"} or ambito not in {"user", "chat", "global"}:
+        if accion not in {"ver", "guardar", "borrar", "editar_auto", "borrar_auto", "pausar_auto", "activar_auto"} or ambito not in {"user", "chat", "global"}:
             return await interaction.followup.send("Acción o ámbito inválido.", ephemeral=True)
+        if accion.endswith("_auto") and ambito != "user":
+            return await interaction.followup.send("Los recuerdos automáticos son personales. Elige Mi perfil para gestionarlos.", ephemeral=True)
         channel, (member,) = await current_channel_members(interaction.guild, interaction.channel_id, (interaction.user.id,))
         live_guild = None
         if ambito != "user":
@@ -1266,6 +1308,20 @@ class IA(commands.Cog):
                 return await interaction.followup.send("🐾 El equipo administrador puede gestionar los recuerdos del chat y del servidor.", ephemeral=True)
         owner = member.id if ambito == "user" else channel.id if ambito == "chat" else 0
         source = 0 if ambito == "global" else channel.id
+        if accion in {"pausar_auto", "activar_auto"}:
+            enabled = accion == "activar_auto"
+            self.db.set_ai_personal_memory_enabled(interaction.guild_id, owner, enabled)
+            return await interaction.followup.send(
+                "✅ Guardado automático " + ("activado" if enabled else "pausado") +
+                ". Tus recuerdos existentes se conservan. Solo se usan en su canal de origen y pueden aparecer en respuestas visibles del bot.", ephemeral=True)
+        if accion in {"editar_auto", "borrar_auto"}:
+            if accion == "editar_auto" and not 1 <= len(texto.strip()) <= 250:
+                return await interaction.followup.send("Escribe el nuevo recuerdo en texto, de 1 a 250 caracteres.", ephemeral=True)
+            changed = (self.db.edit_ai_personal_memory(interaction.guild_id, owner, recuerdo, texto) if accion == "editar_auto"
+                else self.db.delete_ai_personal_memory(interaction.guild_id, owner, recuerdo))
+            return await interaction.followup.send(
+                ("✅ Recuerdo " + ("editado" if accion == "editar_auto" else "borrado") + ".") if changed else
+                "No encontré ese recuerdo en tu perfil. Usa Ver y copia su ID.", ephemeral=True)
         if accion == "guardar":
             if not texto.strip() or len(texto) > 2000:
                 return await interaction.followup.send("Escribe un recuerdo de 1 a 2000 caracteres.", ephemeral=True)
@@ -1280,6 +1336,16 @@ class IA(commands.Cog):
             return await interaction.followup.send("✅ Recuerdos borrados. En tu perfil también se retiran tus turnos y respuestas dirigidas a ti; en chat se vacía todo su historial de IA.", ephemeral=True)
         rows = self.db.get_ai_memories(interaction.guild_id, ambito, owner)
         text = "\n\n".join(f"Origen {row['source_channel']} · {'público al guardar' if row['public_at_capture'] else 'confinado'}:\n{row['content']}" for row in rows)
+        if ambito == "user":
+            settings = self.db.get_ai_personal_memory_settings(interaction.guild_id, owner)
+            automatic = self.db.get_ai_personal_memories(interaction.guild_id, owner)
+            text = ("Notas manuales:\n" + (text or "Sin notas manuales.") +
+                "\n\nRecuerdos automáticos · guardado " + ("activo" if settings["enabled"] else "pausado") +
+                " · hasta 20 por servidor, solo en el canal de origen:\n" +
+                ("\n\n".join(f"ID {row['memory_id']} · origen {row['source_channel']}:\n{row['content']}" for row in automatic) or "Sin recuerdos automáticos.") +
+                "\n\nPara corregir o borrar uno: elige Editar/Borrar recuerdo automático y copia su ID en recuerdo; la edición va en texto. "
+                "Pausar detiene nuevos guardados y conserva los existentes. Borrar todo también retira notas e historial personales. "
+                "Los recuerdos pueden aparecer en respuestas visibles del bot.")
         if len(text) > 1900:
             await interaction.followup.send("Tus recuerdos guardados:", ephemeral=True,
                 file=discord.File(io.BytesIO(text.encode("utf-8")), filename="memoria-ia.txt"))

@@ -299,18 +299,43 @@ Hay tres ámbitos, separados por servidor:
   hilos quedan confinados aunque se solicite compartir. El comando confirma
   esa procedencia de forma efímera; el recuerdo puede aparecer en las respuestas
   visibles del bot.
+- **Recuerdos personales automáticos (endpoint personalizado: Chat Completions o Responses):** el modelo puede proponer un
+  recuerdo útil mientras responde, a partir de una autodescripción explícita
+  en tu mensaje actual: preferencias de comunicación, aficiones habituales,
+  profesión o proyectos. El contrato excluye inferencias, información sensible,
+  credenciales, datos de terceros y estados pasajeros. Se exige evidencia
+  literal del mensaje y se rechazan propuestas inválidas; el filtro de texto
+  es conservador y no sustituye el criterio semántico del modelo. Se guardan
+  hasta 20 recuerdos adicionales por persona y servidor, de 250 caracteres,
+  separados de las notas manuales y siempre confinados a su canal o hilo.
+  Compartir una nota manual no autoriza compartir estos recuerdos. No se
+  extraen del historial antiguo, otras personas, adjuntos ni investigación web.
+  El autoguardado está activo por defecto y requiere un endpoint con herramientas
+  nativas. No añade una llamada de extracción a cada mensaje: usa la generación
+  existente; si el modelo solo propone la herramienta sin texto de respuesta,
+  se hace una continuación para responder. Tras confirmar la escritura se envía
+  un aviso discreto sin publicar el contenido guardado. Una frase del modelo
+  como «lo recordaré» por sí sola no confirma ninguna escritura.
 - **Servidor:** una nota deliberadamente compartida por dueño o Administrator,
   disponible en todo el servidor. Se administra desde IA o con `/ia_memoria
   ambito:global`; `ambito:chat` gestiona la nota del chat actual. Ningún mensaje
   normal se convierte automáticamente en memoria global ni en una regla.
 
-`/ia_memoria accion:ver` muestra tus notas de forma efímera. `accion:borrar`
-en el perfil, o `/ia_limpiar`, elimina tus notas, tus turnos guardados y las
+`/ia_memoria accion:ver` muestra tus notas, recuerdos automáticos y sus IDs de
+forma efímera. `accion:editar_auto recuerdo:ID texto:…` corrige uno;
+`accion:borrar_auto recuerdo:ID` lo elimina. `accion:pausar_auto` detiene
+nuevas capturas sin perder los recuerdos existentes y `accion:activar_auto`
+las reanuda. Estos controles solo afectan a tu perfil en ese servidor.
+`accion:borrar` en el perfil, o `/ia_limpiar`, elimina tus notas, recuerdos
+automáticos, tus turnos guardados y las
 respuestas del bot dirigidas a ti, incluso si el turno original ya salió del
 límite configurado. Conserva los mensajes independientes de otras personas;
 no promete borrar sus paráfrasis ni elimina mensajes de Discord. El borrado del
-ámbito chat retira su nota e historial completos. Editar o eliminar un mensaje
-guardado retira ese turno y las respuestas originadas por él, conservando los
+ámbito chat retira su nota, los recuerdos automáticos originados allí e historial
+completos. Las ediciones, borrados y pausas invalidan el trabajo pendiente y
+las capturas de mensajes anteriores al control; reactivar no recupera recuerdos
+desde mensajes antiguos. Editar o eliminar un mensaje guardado retira ese turno,
+las respuestas y recuerdos automáticos originados por él, conservando los
 demás; eventos de mensajes no guardados no vacían conversaciones. No se pueden
 reconciliar ediciones/borrados ocurridos mientras el bot estaba desconectado.
 Las notas permanecen hasta reemplazarlas o borrarlas; los turnos vencidos se
@@ -324,7 +349,9 @@ reducido si Strata informa una ventana menor mediante `/v1/models`; aumentarlo
 no amplía la capacidad real del servidor. Reserva 2048 tokens para plantilla,
 16384 por imagen como margen estimado y la misma salida que solicita al modelo:
 1000 con razonamiento Off, 8192 con Auto/Low/Medium y 16384 con High/Max.
-Deep Think reserva al menos 16384. Se cuentan primero
+Las consultas explícitas `/deepthink` reservan al menos 4096; las verificaciones
+internas usan 512 sin razonamiento y la recuperación web normal 1024 sin razonamiento.
+Se cuentan primero
 reglas, notas, mensaje actual, referencias y resultados web; solo se recortan
 los mensajes recientes más antiguos. Si ese contexto obligatorio no cabe, se
 informa del problema sin eliminar silenciosamente las reglas o el mensaje actual.
@@ -372,8 +399,11 @@ no habilita los motores PostgreSQL/MariaDB todavía no soportados.
 
 ### Razonamiento y Deep Think
 
-**Endpoints** separa `llm.chat_reasoning_effort` del razonamiento del planificador
-web, `llm.web_reasoning_effort`. Ambos conservan Off (`none`) como valor inicial.
+**Endpoints** separa `llm.chat_reasoning_effort`, usado en la primera respuesta
+conversacional y en la redacción final, de `llm.web_reasoning_effort`, usado solo
+por la investigación explícita `/deepthink`. Ambos conservan Off (`none`) como valor inicial.
+La recuperación web normal y los controles internos son ligeros y no heredan
+el selector web. Un nivel alto del selector de chat puede aumentar su latencia.
 Las opciones son **Off, Auto, Low, Medium, High y Max**. Auto omite el parámetro
 para respetar la configuración del servidor; los demás valores se envían
 literalmente como `reasoning_effort` en Chat Completions o `reasoning.effort`
@@ -382,10 +412,18 @@ lo adapta según la familia del modelo. La reserva incluye tokens de pensamiento
 y respuesta, como documenta [Strata](https://github.com/Niko1221/Strata/blob/v0.2.9/docs/DETAILS.md#L469).
 Esto no modifica el contrato breve y sin razonamiento de moderación.
 
-**IA → Deep Think** (`ai_deep_think`, desactivado por defecto) amplía el trabajo
-para preguntas complejas y, con Internet habilitado, la investigación pública.
-No cambia el interruptor independiente `ai_web_enabled` ni autoriza enviar
-consultas privadas de permisos/moderación a la web.
+**IA → /deepthink** (`ai_deep_think`, desactivado por defecto) habilita el comando
+para una consulta concreta de hasta 1800 caracteres; no activa el modo profundo
+en los mensajes normales. Requiere Strata configurado e Internet habilitado.
+`ai_deep_think_daily_limit` establece el cupo diario por usuario y servidor:
+3 por defecto, de 0 a 1000; 0 lo inhabilita. El día se renueva a las 00:00 UTC.
+La reserva es atómica y usa el ID de interacción para impedir doble ejecución.
+Cola llena, cancelación o fallo técnico sin respuesta devuelven el uso; una
+respuesta ya enviada lo consume. El comando conserva los controles del chat:
+roles, restricciones, canal/hilo, permisos actuales, memoria y reautorización.
+Su ancla de Discord sigue registrada como mensaje del bot; la identidad del
+solicitante solo se aplica al trabajo cuyo origen de interacción se ha verificado.
+No autoriza enviar consultas privadas de permisos/moderación a la web.
 
 ### Investigación web opcional
 
@@ -410,12 +448,17 @@ DuckDuckGo. La respuesta final recibe el contexto autorizado y los resultados
 web como datos no confiables; las páginas no pueden convertirse en reglas ni
 recuerdos globales.
 
-La investigación no tiene una cuota total de búsquedas, páginas, rondas ni
-tiempo conjunto. El modelo decide cuándo la pregunta está cubierta con evidencia
+El chat normal usa recuperación rápida: hasta dos búsquedas, tres lecturas,
+cuatro rondas y 30 segundos de trabajo web. El redactor recibe pasajes realmente
+leídos y responde con lo respaldado, limitando las dudas a los datos concretos
+que falten, sin añadir avisos internos ni fingir una investigación exhaustiva.
+
+Solo `/deepthink` investiga sin cuota total de búsquedas, páginas, rondas ni
+tiempo conjunto para esa consulta. El modelo decide cuándo está cubierta con evidencia
 suficiente y ha resuelto sus dudas materiales. Un reporte insuficiente es un
 checkpoint para seguir investigando, no una respuesta final. Si falta una precisión
-esencial del usuario, puede pedirla de forma concreta. Deep Think exige más
-contraste y examina interpretaciones alternativas, sin cambiar cuotas de búsqueda.
+esencial del usuario, puede pedirla de forma concreta. Exige más contraste
+y examina interpretaciones alternativas.
 Esto puede aumentar la latencia, los tokens y el coste del proveedor. Se mantienen
 los límites técnicos de cada petición: ventana de contexto/salida y timeouts del
 modelo (180 segundos, 300 con Deep Think), búsqueda y lector web. Los errores

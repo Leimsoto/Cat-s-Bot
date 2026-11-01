@@ -29,6 +29,36 @@ class ConversationLatencyTest(unittest.IsolatedAsyncioTestCase):
                 "members": f.guild.fetch_member.await_count, "owner": f.cog.bot.fetch_guild.await_count,
                 "messages": discord.TextChannel.fetch_message.await_count}
 
+    async def test_global_deep_availability_does_not_enable_deep_for_normal_messages(self):
+        self.db.set_ai_config(10, ai_deep_think=1)
+        message = self.fixture.message(ping=True)
+        await self.engine.listen(message)
+        job = self.fixture.cog._queue.get_nowait()
+        with patch("cogs._conversation.request_completion", new=AsyncMock(return_value={"role": "assistant", "content": "Hola"})) as provider:
+            await self.engine.process(job)
+        self.assertFalse(job.get("deep_think", False))
+        self.assertEqual(provider.await_args.kwargs["max_output_tokens"], 1000)
+        self.assertNotIn("Deep Think está activo", provider.await_args.args[2][0]["content"])
+
+    async def test_control_and_normal_retrieval_use_small_budgets_but_final_chat_keeps_selector(self):
+        self.db.set_automod_config(10, rules={"llm": {"endpoint_url": "https://provider.example/v1", "model": "strata",
+            "chat_reasoning_effort": "high", "web_reasoning_effort": "high"}})
+        await self.engine.listen(self.fixture.message(ping=True))
+        job = self.fixture.cog._queue.get_nowait()
+        with patch("cogs._conversation.request_completion", new=AsyncMock(return_value={"role": "assistant", "content": "Fixture"})) as provider:
+            await self.engine.generate(job, [{"role": "system", "content": "control"}], internal=True)
+            self.assertEqual(provider.await_args.kwargs["reasoning_effort"], "none")
+            self.assertEqual(provider.await_args.kwargs["max_output_tokens"], 512)
+            await self.engine.generate(job, [{"role": "system", "content": "quick research"}], task="web")
+            self.assertEqual(provider.await_args.kwargs["reasoning_effort"], "none")
+            self.assertEqual(provider.await_args.kwargs["max_output_tokens"], 1024)
+            await self.engine.generate(job, [{"role": "system", "content": "final"}])
+            self.assertEqual(provider.await_args.kwargs["reasoning_effort"], "high")
+            self.assertEqual(provider.await_args.kwargs["max_output_tokens"], 16384)
+            job["deep_think"] = True
+            await self.engine.generate(job, [{"role": "system", "content": "deep research"}], task="web")
+            self.assertEqual(provider.await_args.kwargs["reasoning_effort"], "high")
+
     async def test_passive_capture_and_gateway_gates_do_not_consume_discord_rest(self):
         f = self.fixture
         await self.engine.listen(f.message())

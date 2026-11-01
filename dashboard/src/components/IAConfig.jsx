@@ -54,6 +54,8 @@ function IASettings({ guildId, onNavigate }) {
 
   const save = async () => {
     if (!cfg || saving || loading) return;
+    const quotaInput = document.getElementById("ia-deep-think-daily-limit");
+    if (quotaInput && !quotaInput.reportValidity()) return;
     const version = requestVersion.current;
     setSaving(true);
     try {
@@ -64,12 +66,14 @@ function IASettings({ guildId, onNavigate }) {
         ai_response_mode: cfg.ai_response_mode === "mentions" ? "mentions" : "all",
         ai_channel_id: cfg.ai_channel_id ?? null,
         ai_role_id: cfg.ai_role_id ?? null,
+        ai_restricted_role_ids: cfg.ai_restricted_role_ids ?? [],
         ai_system_prompt: cfg.ai_system_prompt || null,
         ai_limit_requests: cfg.ai_limit_requests ?? 50,
         ai_limit_hours: cfg.ai_limit_hours ?? 12,
         ai_imagine_enabled: cfg.ai_imagine_enabled ? 1 : 0,
         ai_web_enabled: cfg.ai_web_enabled ? 1 : 0,
         ai_deep_think: cfg.ai_deep_think ? 1 : 0,
+        ai_deep_think_daily_limit: cfg.ai_deep_think_daily_limit ?? 3,
         ai_memory_messages: cfg.ai_memory_messages ?? 40};
       await apiPatch(`/api/guilds/${guildId}/ia`, payload);
       if (version !== requestVersion.current) return;
@@ -236,6 +240,24 @@ function IASettings({ guildId, onNavigate }) {
               Si se elige, exige este rol para mencionar o responder al bot fuera del canal principal. Sin selección, basta con tener acceso al canal.
             </span>
           </div>
+          <div className="config-item" style={{ marginBottom: 0 }}>
+            <label>Roles restringidos (opcional)</label>
+            <SearchableSelect
+              ariaLabel="Roles restringidos para el chat de IA"
+              disabled={saving || loading}
+              multiple
+              value={cfg?.ai_restricted_role_ids ?? []}
+              onChange={(roles) => set("ai_restricted_role_ids", roles)}
+              endpoint={`/api/guilds/${guildId}/roles?include_managed=true`}
+              itemsKey="roles"
+              placeholder="Seleccionar roles restringidos…"
+              renderOption={renderRoleOption}
+              renderSelected={renderRoleOption}
+            />
+            <span style={{ fontSize: "0.76rem", color: "var(--text-muted)" }}>
+              Quien tenga uno de estos roles no recibirá respuestas del chat de IA, aunque tenga el rol de acceso o sea administrador. Los bots y webhooks se ignoran siempre.
+            </span>
+          </div>
         </div>
       </div>
 
@@ -319,10 +341,17 @@ function IASettings({ guildId, onNavigate }) {
         {usingStrata && <p className="muted-text">La búsqueda web puede usar el contexto de la conversación para entender referencias como «busca sobre eso». Solo accede a páginas públicas: sin sitios privados o locales, inicios de sesión ni formularios. Desactivada, no usa estas herramientas web.</p>}
 
         {usingStrata && <div className="config-item inline-check">
-          <div><div style={{ fontWeight: 700 }}>Deep Think · investigación intensiva</div><div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Contrasta más a fondo fuentes, alternativas y dudas relevantes hasta que el modelo considere suficiente la información para responder. Puede tardar más y consumir más tokens y recursos del proveedor. Requiere tener Internet activado.</div></div>
-          <label className="cr-switch"><input type="checkbox" aria-label="Activar Deep Think para investigación intensiva" checked={!!cfg.ai_deep_think} onChange={(e) => set("ai_deep_think", e.target.checked ? 1 : 0)} /><span aria-hidden="true" /></label>
+          <div><div style={{ fontWeight: 700 }}>Permitir Deep Think mediante /deepthink</div><div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Cada persona puede usar /deepthink consulta para investigar a fondo solo esa consulta; las conversaciones normales mantienen el modo rápido. Contrasta fuentes, alternativas y dudas relevantes hasta que el modelo considere suficiente la información. Puede tardar más y consumir más tokens y recursos del proveedor. Requiere tener Internet activado.</div></div>
+          <label className="cr-switch"><input type="checkbox" aria-label="Permitir Deep Think mediante /deepthink" checked={!!cfg.ai_deep_think} onChange={(e) => set("ai_deep_think", e.target.checked ? 1 : 0)} /><span aria-hidden="true" /></label>
         </div>}
-        {usingStrata && !!cfg.ai_deep_think && !cfg.ai_web_enabled && <p role="status" className="muted-text">Deep Think está configurado; se aplicará al activar Internet.</p>}
+        {usingStrata && <div className="config-item">
+          <label htmlFor="ia-deep-think-daily-limit">Consultas Deep Think diarias por usuario</label>
+          <input id="ia-deep-think-daily-limit" type="number" min={0} max={1000} step={1} required
+            value={cfg.ai_deep_think_daily_limit ?? 3}
+            onChange={(e) => set("ai_deep_think_daily_limit", e.target.value === "" ? "" : Number(e.target.value))} />
+          <span className="muted-text">De 0 a 1000 consultas por persona en este servidor. El cupo se reinicia a las 00:00 UTC. Con 0 se deshabilita /deepthink.</span>
+        </div>}
+        {usingStrata && !!cfg.ai_deep_think && !cfg.ai_web_enabled && <p role="status" className="muted-text">El permiso de /deepthink está guardado; el comando requiere activar Internet.</p>}
 
         {!usingStrata && <div className="config-item inline-check">
           <div>
@@ -368,7 +397,7 @@ function IASettings({ guildId, onNavigate }) {
 
       <div className="glass-panel" style={{ padding: 24, borderRadius: 22, display: usingStrata ? undefined : "none" }}>
         <h3 style={{ marginTop: 0 }}>Memoria persistente</h3>
-        <p className="muted-text">Strata conserva el historial reciente de cada chat hasta el límite configurado durante 30 días. En el canal principal recoge el contexto de la conversación; en otros canales guarda solo las interacciones dirigidas al bot.</p>
+        <p className="muted-text">Cat’s Bot conserva el historial reciente de cada chat hasta el límite configurado durante 30 días. En el canal principal recoge el contexto de la conversación; en otros canales guarda solo las interacciones dirigidas al bot.</p>
         <div className="config-item">
           <label htmlFor="ia-memory-messages">Mensajes de memoria por chat</label>
           <input id="ia-memory-messages" type="number" min={0} max={5000} step={1} value={cfg.ai_memory_messages ?? 40}
@@ -386,7 +415,7 @@ function IASettings({ guildId, onNavigate }) {
           {chatDraftPending && <span className="muted-text">Guarda o descarta la nota del chat antes de cambiar de canal.</span>}
         </div>
         {memoryChannelId && <MemoryEditor key={`${guildId}-${memoryChannelId}`} guildId={guildId} scope="chat" channelId={memoryChannelId} onPendingChange={setChatDraftPending} />}
-        <p className="muted-text" style={{ marginTop: 24 }}>Cada persona gestiona su propia memoria con <code>/ia_memoria</code> y la borra con <code>/ia_limpiar</code>. Por defecto, sus notas se quedan en el chat de origen. Solo acompañan al usuario a otros chats del mismo servidor si activa <code>compartir_en_servidor: True</code> al guardar, desde un canal público ordinario que siga siendo público. Las notas de canales privados y de hilos siempre se quedan en su origen. El bot usa solo la memoria de quien le habla; no comparte memoria entre servidores.</p>
+        <p className="muted-text" style={{ marginTop: 24 }}>Cada persona gestiona su propia memoria con <code>/ia_memoria</code> y la borra con <code>/ia_limpiar</code>. El bot puede guardar recuerdos personales útiles de lo que esa persona expresa en su mensaje actual y avisa al confirmar el guardado. Se pueden consultar, editar y borrar por ID, o pausar el guardado automático sin perder los existentes, desde ese comando. Los recuerdos automáticos siempre se quedan en el chat de origen. Las notas manuales solo acompañan al usuario a otros chats del mismo servidor si activa <code>compartir_en_servidor: True</code> al guardar, desde un canal público ordinario que siga siendo público. Las notas de canales privados y de hilos siempre se quedan en su origen. El bot usa solo la memoria de quien le habla; no comparte memoria entre servidores. Los recuerdos pueden aparecer en sus respuestas visibles.</p>
       </div>
     </div>
   );

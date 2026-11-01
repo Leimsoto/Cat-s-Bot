@@ -121,6 +121,15 @@ def bound_research(web, byte_budget):
     for key in ("results_untrusted", "search_result_urls", "sources", "verified_source_urls"):
         while result.get(key) and size() > limit:
             result[key].pop()
+    passages = result.get("page_evidence_untrusted", [])
+    while len(passages) > 1 and size() > limit:
+        passages.pop()
+        result["page_evidence_truncated"] = True
+    if passages:
+        page = passages[0]
+        while page.get("text") and size() > limit:
+            page["text"] = page["text"][:max(0, len(page["text"]) - max(1, (size() - limit) // 2))]
+            page["text_truncated"] = result["page_evidence_truncated"] = True
     if size() <= limit:
         return result
     assessment = result.setdefault("assessment", assess_research(None, {}))

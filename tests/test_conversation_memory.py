@@ -672,7 +672,7 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
                                            research_report([research_fact(url, "Release 9 is current.")], sufficient=True)])) as request:
             web = await self.engine.web_context(self.cog._queue.get_nowait())
         self.assertEqual(len(web["results_untrusted"]), 5)
-        self.assertEqual(self.engine.web.search_web.await_count, 3)
+        self.assertEqual(self.engine.web.search_web.await_count, 2)
         self.engine.web.read_webpage.assert_awaited_once_with(url, query=message.content, max_text=ANY)
         self.assertEqual(request.await_count, 3)
 
@@ -693,8 +693,8 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=[
             {"role": "assistant", "content": None, "tool_calls": [self.tool_call()]},
             {"role": "assistant", "content": "fin"}])) as request:
-            with self.assertRaisesRegex(ValueError, "research_missing_report"):
-                await self.engine.web_context(self.cog._queue.get_nowait())
+            result = await self.engine.web_context(self.cog._queue.get_nowait())
+        self.assertFalse(result["complete"])
         observed = json.loads(request.await_args.args[2][-1]["content"])
         self.assertEqual(observed["error"], "public_web_unavailable")
         self.assertEqual(observed["detail"], "safe category")
@@ -792,10 +792,12 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         report = {"public_topic": "Example", "summary": "Version 9", "sufficient": True, "gaps": [],
             "facts": [{"claim": "Current version 9", "status": "supported", "support": [{"url": url, "quote": "Release 9 is current."}]}]}
         submit = {"id": "report", "type": "function", "function": {"name": "submit_research", "arguments": json.dumps(report)}}
+        job = self.cog._queue.get_nowait()
+        job["deep_think"] = True
         with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=[
                 {"role": "assistant", "tool_calls": [self.tool_call("read_webpage", url)]},
                 {"role": "assistant", "tool_calls": [submit]}])):
-            result = await self.engine.web_context(self.cog._queue.get_nowait())
+            result = await self.engine.web_context(job)
         self.assertTrue(result["assessment"]["sufficient"])
         self.assertNotIn("NOISY_CORPUS", json.dumps(result))
         self.assertIn("Release 9 is current.", json.dumps(result))
@@ -826,13 +828,15 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         responses = [intent] + [{"role": "assistant", "tool_calls": [self.tool_call(argument=f"Example release {index}", call_id=f"q{index}")]} for index in range(5)]
         responses += [{"role": "assistant", "tool_calls": [self.tool_call("read_webpage", url, "release")]},
                       research_report([research_fact(url, "Release 9 is current.")], sufficient=True), "La versión actual es 9."]
+        job = self.cog._queue.get_nowait()
+        job["deep_think"] = True
         with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=responses)) as request:
-            await self.engine.process(self.cog._queue.get_nowait())
+            await self.engine.process(job)
         self.assertEqual(self.engine.web.search_web.await_count, 5)
         self.assertIn("Deep Think está activo", request.await_args_list[0].args[2][0]["content"])
         self.assertIn("Deep Think: test alternative", request.await_args_list[1].args[2][0]["content"])
         for call in request.await_args_list:
-            self.assertGreaterEqual(call.kwargs["max_output_tokens"], 16384)
+            self.assertGreaterEqual(call.kwargs["max_output_tokens"], 4096)
             self.assertEqual(call.kwargs["timeout_seconds"], 300)
         self.assertTrue(message.reply.await_args.kwargs["mention_author"])
 
@@ -851,11 +855,15 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_chat_planner_budget_includes_tools_and_stops_before_model_egress(self):
         self.db.set_ai_config(10, ai_web_enabled=1)
         await self.engine.listen(self.message(ping=True))
+        job = self.cog._queue.get_nowait()
         with patch.object(self.engine.budget, "window", new=AsyncMock(return_value=5000)), patch(
                 "cogs._conversation.request_completion", new=AsyncMock()) as request:
+            result = await self.engine.web_context(job)
+            self.assertFalse(result["complete"])
+            job["deep_think"] = True
             from cogs._conversation_budget import ContextBudgetError
             with self.assertRaises(ContextBudgetError):
-                await self.engine.web_context(self.cog._queue.get_nowait())
+                await self.engine.web_context(job)
         request.assert_not_awaited()
 
     async def test_context_pressure_consolidates_read_evidence_without_more_external_calls(self):
@@ -867,10 +875,12 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "facts": [{"claim": "Current version 9", "status": "supported", "support": [{"url": url, "quote": "Release 9 is current."}]}]}
         async def fits(session, cfg, messages, *, tools):
             return not (len(tools) > 1 and any(row["role"] == "tool" for row in messages))
+        job = self.cog._queue.get_nowait()
+        job["deep_think"] = True
         with patch.object(self.engine.budget, "replay_fits", new=fits), patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=[
                 {"role": "assistant", "tool_calls": [self.tool_call("read_webpage", url)]},
                 {"role": "assistant", "tool_calls": [{"id": "report", "type": "function", "function": {"name": "submit_research", "arguments": json.dumps(report)}}]}])) as request:
-            result = await self.engine.web_context(self.cog._queue.get_nowait())
+            result = await self.engine.web_context(job)
         self.engine.web.read_webpage.assert_awaited_once()
         self.assertEqual([tool["function"]["name"] for tool in request.await_args.kwargs["tools"]], ["submit_research"])
         self.assertTrue(result["assessment"]["sufficient"])
@@ -910,8 +920,10 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "tool_calls": [self.tool_call("read_webpage", "https://official.example/changelog", "d")]},
             {"role": "assistant", "tool_calls": [self.tool_call("read_webpage", "https://official.example/status", "e")]},
             research_report([research_fact("https://official.example/changelog", "Current release 9")], sufficient=True)]
+        job = self.cog._queue.get_nowait()
+        job["deep_think"] = True
         with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=responses)) as request:
-            result = await self.engine.web_context(self.cog._queue.get_nowait())
+            result = await self.engine.web_context(job)
         self.assertEqual(request.await_count, 6)
         self.assertEqual(self.engine.web.search_web.await_count, 2)
         self.assertEqual(self.engine.web.read_webpage.await_count, 3)
@@ -1626,7 +1638,7 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_my_moderation_history", json.dumps(request.await_args.kwargs["tools"]))
         self.assertNotIn("moderation_records_untrusted", request.await_args.args[2][1]["content"])
 
-    async def test_failed_web_research_is_an_error_without_a_partial_answer_or_invented_citations(self):
+    async def test_normal_retrieval_failure_does_not_invent_facts_or_citations(self):
         self.db.set_ai_config(10, ai_web_enabled=1)
         message = self.message(ping=True)
         message.content = "Busca la última versión de Example"
@@ -1640,7 +1652,7 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=responses)) as request:
             await self.engine.process(self.cog._queue.get_nowait())
         reply = message.reply.await_args.args[0]
-        self.assertIn("No pude completar la respuesta", reply)
+        self.assertIn("No pude verificar la última versión", reply)
         self.assertNotIn("Fuentes consultadas:", reply)
         self.assertIn("public_web_unavailable", request.await_args.args[2][-1]["content"])
 

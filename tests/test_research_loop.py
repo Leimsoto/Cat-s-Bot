@@ -23,12 +23,60 @@ class ModelResearchTests(unittest.IsolatedAsyncioTestCase):
         self.fixture.db.set_ai_config(10, ai_web_enabled=1)
         await self.engine.listen(self.fixture.message(ping=True))
         self.job = self.fixture.cog._queue.get_nowait()
+        self.job["deep_think"] = True
 
     async def asyncTearDown(self):
         await self.fixture.asyncTearDown()
 
     def call(self, name, argument, index=0):
         return {"role": "assistant", "tool_calls": [self.fixture.tool_call(name, argument, f"call{index}")]}
+
+    async def test_normal_retrieval_caps_tools_and_passes_read_passages_without_claiming_completion(self):
+        self.job["deep_think"] = False
+        self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": []}), close=AsyncMock(),
+            read_webpage=AsyncMock(side_effect=lambda url, **_: {"url": url, "text": "Memory: 16 GB.", "retrieved_at_utc": "2030-01-02"}))
+        replies = [
+            {"tool_calls": [self.fixture.tool_call("search_web", f"query {i}", f"search{i}") for i in range(3)]},
+            {"tool_calls": [self.fixture.tool_call("read_webpage", f"https://official.example/{i}", f"read{i}") for i in range(4)]}]
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)) as provider:
+            result = await self.engine.web_context(self.job)
+        self.assertEqual(provider.await_count, 2)
+        self.assertEqual(self.engine.web.search_web.await_count, 2)
+        self.assertEqual(self.engine.web.read_webpage.await_count, 3)
+        self.assertEqual(result["retrieval_mode"], "quick")
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["assessment"]["sufficient"])
+        self.assertEqual(len(result["page_evidence_untrusted"]), 3)
+        self.assertIn("Memory: 16 GB.", json.dumps(result["page_evidence_untrusted"]))
+
+    async def test_normal_retrieval_has_four_planner_rounds_and_timeout_is_not_sufficiency(self):
+        self.job["deep_think"] = False
+        self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": []}), close=AsyncMock())
+        replies = [self.call("search_web", f"query {index}", index) for index in range(4)]
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)) as provider:
+            result = await self.engine.web_context(self.job)
+        self.assertEqual(provider.await_count, 4)
+        self.assertEqual(self.engine.web.search_web.await_count, 2)
+        self.assertFalse(result["complete"])
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=TimeoutError())):
+            result = await self.engine.web_context(self.job)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["verified_source_urls"], [])
+
+    async def test_quick_retrieval_small_context_keeps_a_useful_passage_with_long_urls(self):
+        self.job.update(deep_think=False, web_byte_allowance=8192)
+        urls = [f"https://official.example/{index}/" + "x" * 1990 for index in range(3)]
+        self.engine.web = SimpleNamespace(close=AsyncMock(), read_webpage=AsyncMock(side_effect=lambda url, **_: {
+            "url": url, "text": "Memory: 16 GB. " + "additional detail " * 500}))
+        replies = [{"tool_calls": [self.fixture.tool_call("read_webpage", url, f"read{index}") for index, url in enumerate(urls)]},
+                   {"role": "assistant", "content": "done"}]
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)):
+            result = await self.engine.web_context(self.job)
+        self.assertEqual(result["retrieval_mode"], "quick")
+        self.assertTrue(result["page_evidence_untrusted"])
+        self.assertIn("Memory: 16 GB.", result["page_evidence_untrusted"][0]["text"])
+        self.assertTrue(result.get("page_evidence_truncated"))
+        self.assertLessEqual(len(json.dumps(result, ensure_ascii=False).encode("utf-8")), 8192)
 
     async def test_model_can_exceed_all_old_search_read_and_round_quotas(self):
         self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": []}),

@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 from llm_moderation_config import DEFAULT_LLM_CONFIG
+from ai_chat_config import normalize_restricted_roles
 
 logger = logging.getLogger("Database")
 
@@ -93,10 +94,12 @@ VALID_AI_CONFIG_COLUMNS = frozenset(
         "ai_provider",
         "ai_web_enabled",
         "ai_deep_think",
+        "ai_deep_think_daily_limit",
         "ai_memory_messages",
         "ai_response_mode",
         "ai_channel_id",
         "ai_role_id",
+        "ai_restricted_role_ids",
         "ai_model",
         "ai_system_prompt",
         "ai_limit_requests",
@@ -302,6 +305,7 @@ CREATE TABLE IF NOT EXISTS ai_config (
     ai_response_mode    TEXT    DEFAULT 'mentions',
     ai_channel_id       INTEGER,
     ai_role_id          INTEGER,
+    ai_restricted_role_ids TEXT DEFAULT '[]',
     ai_model            TEXT    DEFAULT 'gemma-4-26b-a4b-it',
     ai_system_prompt    TEXT,
     ai_limit_requests   INTEGER DEFAULT 50,
@@ -738,6 +742,7 @@ CREATE TABLE IF NOT EXISTS ai_config (
     ai_response_mode    TEXT    DEFAULT 'mentions',
     ai_channel_id       BIGINT,
     ai_role_id          BIGINT,
+    ai_restricted_role_ids TEXT DEFAULT '[]',
     ai_model            TEXT    DEFAULT 'gemma-4-26b-a4b-it',
     ai_system_prompt    TEXT,
     ai_limit_requests   INTEGER DEFAULT 50,
@@ -1172,6 +1177,7 @@ CREATE TABLE IF NOT EXISTS ai_config (
     ai_response_mode    VARCHAR(16) DEFAULT 'mentions',
     ai_channel_id       BIGINT,
     ai_role_id          BIGINT,
+    ai_restricted_role_ids TEXT DEFAULT '[]',
     ai_model            VARCHAR(60) DEFAULT 'gemma-4-26b-a4b-it',
     ai_system_prompt    TEXT,
     ai_limit_requests   INT         DEFAULT 50,
@@ -1828,8 +1834,59 @@ class DatabaseManager:
         self._ensure_moderation_mvp_tables()
         self._ensure_functional_runtime_tables()
         self._ensure_ai_memory_tables()
+        self._ensure_ai_deep_think_tables()
         self.ensure_column("server_config", "ai_message_categories", "TEXT DEFAULT '{}'")
         self.ensure_column("automod_log", "extra_data", "TEXT")
+
+    def _ensure_ai_deep_think_tables(self) -> None:
+        self._executemany([(sql, ()) for sql in (
+            """CREATE TABLE IF NOT EXISTS ai_deep_think_requests (
+                guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
+                request_id VARCHAR(100) NOT NULL, usage_day VARCHAR(10) NOT NULL,
+                refunded INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id, request_id))""",
+            "CREATE INDEX IF NOT EXISTS idx_ai_deep_think_daily ON ai_deep_think_requests (guild_id, user_id, usage_day, refunded)",
+        )])
+
+    def reserve_ai_deep_think(self, guild_id: int, user_id: int, request_id: int | str,
+                              *, now: datetime | None = None) -> Dict:
+        """Reserve once per Discord request; only accepted=True may start work."""
+        with self._conn() as conn:
+            # Take the write lock before reading: other connections share this quota.
+            conn.execute("BEGIN IMMEDIATE")
+            day = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date()
+            reset_at = datetime.combine(day + timedelta(days=1), datetime.min.time(), timezone.utc)
+            cur = conn.cursor()
+            cur.execute("SELECT ai_deep_think, ai_deep_think_daily_limit FROM ai_config WHERE guild_id = ?", (guild_id,))
+            cfg = cur.fetchone()
+            enabled = bool(cfg and cfg["ai_deep_think"])
+            limit = int(cfg["ai_deep_think_daily_limit"]) if cfg else 3
+            cur.execute("SELECT refunded FROM ai_deep_think_requests WHERE guild_id = ? AND user_id = ? AND request_id = ?",
+                        (guild_id, user_id, str(request_id)))
+            previous = cur.fetchone()
+            cur.execute("SELECT COUNT(*) AS used FROM ai_deep_think_requests WHERE guild_id = ? AND user_id = ? AND usage_day = ? AND refunded = 0",
+                        (guild_id, user_id, day.isoformat()))
+            used = int(cur.fetchone()["used"])
+            if previous:
+                status = "refunded" if previous["refunded"] else "duplicate"
+            elif not enabled or limit == 0:
+                status = "disabled"
+            elif used >= limit:
+                status = "limit"
+            else:
+                cur.execute("INSERT INTO ai_deep_think_requests (guild_id, user_id, request_id, usage_day) VALUES (?, ?, ?, ?)",
+                            (guild_id, user_id, str(request_id), day.isoformat()))
+                used += 1
+                status = "reserved"
+            return {"accepted": status == "reserved", "status": status, "used": used,
+                    "limit": limit, "remaining": max(0, limit - used), "reset_at": reset_at.isoformat()}
+
+    def refund_ai_deep_think(self, guild_id: int, user_id: int, request_id: int | str) -> bool:
+        """Refund a failed request once, retaining its ID to reject duplicate work."""
+        return bool(self._execute_rowcount(
+            "UPDATE ai_deep_think_requests SET refunded = 1 WHERE guild_id = ? AND user_id = ? AND request_id = ? AND refunded = 0",
+            (guild_id, user_id, str(request_id)),
+        ))
 
     def _ensure_ai_memory_tables(self) -> None:
         self._executemany([(sql, ()) for sql in (
@@ -1847,6 +1904,14 @@ class DatabaseManager:
                 origin_message_id BIGINT,
                 PRIMARY KEY (guild_id, channel_id, message_id))""",
             "CREATE INDEX IF NOT EXISTS idx_ai_chat_turns_created ON ai_chat_turns (created_at)",
+            """CREATE TABLE IF NOT EXISTS ai_personal_memories (
+                guild_id BIGINT NOT NULL, owner_id BIGINT NOT NULL, memory_id VARCHAR(32) NOT NULL,
+                source_channel BIGINT NOT NULL, source_message BIGINT NOT NULL,
+                content TEXT NOT NULL, updated_at VARCHAR(40) NOT NULL,
+                PRIMARY KEY (guild_id, owner_id, memory_id))""",
+            """CREATE TABLE IF NOT EXISTS ai_personal_memory_settings (
+                guild_id BIGINT NOT NULL, owner_id BIGINT NOT NULL, enabled INTEGER NOT NULL,
+                after_message BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, owner_id))""",
         )])
         self.ensure_column("ai_chat_turns", "requester_id", "BIGINT")
         self.ensure_column("ai_chat_turns", "origin_message_id", "BIGINT")
@@ -1867,6 +1932,80 @@ class DatabaseManager:
 
     def get_ai_memories(self, guild_id: int, scope: str, owner_id: int) -> List[Dict]:
         return self._fetchall("SELECT * FROM ai_memories WHERE guild_id = ? AND scope = ? AND owner_id = ? ORDER BY updated_at DESC LIMIT 20", (guild_id, scope, owner_id))
+
+    def get_ai_personal_memory_settings(self, guild_id, owner_id):
+        return self._fetchone("SELECT enabled, after_message FROM ai_personal_memory_settings WHERE guild_id = ? AND owner_id = ?", (guild_id, owner_id)) or {"enabled": 1, "after_message": 0}
+
+    def get_ai_personal_memories(self, guild_id, owner_id):
+        return self._fetchall("SELECT * FROM ai_personal_memories WHERE guild_id = ? AND owner_id = ? ORDER BY updated_at DESC LIMIT 20", (guild_id, owner_id))
+
+    def _ai_personal_barrier(self, cur, guild_id, owner_id, *, enabled=None):
+        cur.execute(self._adapt("SELECT enabled, after_message FROM ai_personal_memory_settings WHERE guild_id = ? AND owner_id = ?"), (guild_id, owner_id))
+        settings = cur.fetchone() or {"enabled": 1, "after_message": 0}
+        cur.execute(self._adapt("SELECT MAX(source_message) AS latest FROM ai_personal_memories WHERE guild_id = ? AND owner_id = ?"), (guild_id, owner_id))
+        latest = int(cur.fetchone()["latest"] or 0)
+        cur.execute(self._adapt("SELECT MAX(message_id) AS latest FROM ai_chat_turns WHERE guild_id = ? AND author_id = ? AND is_bot = 0"), (guild_id, owner_id))
+        # Discord snowflakes encode creation time: a later replay of any pre-control message stays blocked.
+        control_message = (int(datetime.now(timezone.utc).timestamp() * 1000) - 1420070400000) << 22 | ((1 << 22) - 1)
+        latest = max(latest, int(cur.fetchone()["latest"] or 0), int(settings["after_message"]), control_message)
+        cur.execute(self._adapt("DELETE FROM ai_personal_memory_settings WHERE guild_id = ? AND owner_id = ?"), (guild_id, owner_id))
+        cur.execute(self._adapt("INSERT INTO ai_personal_memory_settings (guild_id, owner_id, enabled, after_message) VALUES (?, ?, ?, ?)"),
+            (guild_id, owner_id, int(settings["enabled"] if enabled is None else enabled), latest))
+        self._ai_bump_revision(cur, guild_id, "user", owner_id)
+
+    def set_ai_personal_memory_enabled(self, guild_id, owner_id, enabled):
+        if type(enabled) is not bool:
+            raise ValueError("Estado de memoria inválido")
+        with self._conn() as conn:
+            self._ai_personal_barrier(conn.cursor(), guild_id, owner_id, enabled=enabled)
+
+    def save_ai_personal_memory(self, guild_id, owner_id, channel_id, message_id, content, expected_revision):
+        import uuid
+        if not isinstance(content, str) or not 5 <= len(content.strip()) <= 250:
+            return None
+        content = content.strip()
+        with self._conn() as conn:
+            cur = conn.cursor()
+            if self._ai_revision(cur, guild_id, channel_id, owner_id) != expected_revision:
+                return None
+            cur.execute(self._adapt("SELECT enabled, after_message FROM ai_personal_memory_settings WHERE guild_id = ? AND owner_id = ?"), (guild_id, owner_id))
+            settings = cur.fetchone()
+            if settings and (not settings["enabled"] or message_id <= int(settings["after_message"])):
+                return None
+            cur.execute(self._adapt("SELECT content FROM ai_personal_memories WHERE guild_id = ? AND owner_id = ? AND source_channel = ?"), (guild_id, owner_id, channel_id))
+            if any(row["content"].casefold() == content.casefold() for row in cur.fetchall()):
+                return None
+            cur.execute(self._adapt("SELECT memory_id FROM ai_personal_memories WHERE guild_id = ? AND owner_id = ?"), (guild_id, owner_id))
+            if len(cur.fetchall()) >= 20:
+                return None
+            # SQLite _conn serializes this check/write with controls; additions must not cancel queued replies.
+            memory_id = uuid.uuid4().hex[:12]
+            cur.execute(self._adapt("INSERT INTO ai_personal_memories (guild_id, owner_id, memory_id, source_channel, source_message, content, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"),
+                (guild_id, owner_id, memory_id, channel_id, message_id, content, datetime.now(timezone.utc).isoformat()))
+            return memory_id
+
+    def edit_ai_personal_memory(self, guild_id, owner_id, memory_id, content):
+        if not isinstance(content, str) or not 1 <= len(content.strip()) <= 250:
+            raise ValueError("Escribe un recuerdo de 1 a 250 caracteres")
+        with self._conn() as conn:
+            cur = conn.cursor()
+            cur.execute(self._adapt("SELECT memory_id FROM ai_personal_memories WHERE guild_id = ? AND owner_id = ? AND memory_id = ?"), (guild_id, owner_id, memory_id))
+            if not cur.fetchone():
+                return False
+            self._ai_personal_barrier(cur, guild_id, owner_id)
+            cur.execute(self._adapt("UPDATE ai_personal_memories SET content = ?, updated_at = ? WHERE guild_id = ? AND owner_id = ? AND memory_id = ?"),
+                (content.strip(), datetime.now(timezone.utc).isoformat(), guild_id, owner_id, memory_id))
+            return True
+
+    def delete_ai_personal_memory(self, guild_id, owner_id, memory_id):
+        with self._conn() as conn:
+            cur = conn.cursor()
+            cur.execute(self._adapt("SELECT memory_id FROM ai_personal_memories WHERE guild_id = ? AND owner_id = ? AND memory_id = ?"), (guild_id, owner_id, memory_id))
+            if not cur.fetchone():
+                return False
+            self._ai_personal_barrier(cur, guild_id, owner_id)
+            cur.execute(self._adapt("DELETE FROM ai_personal_memories WHERE guild_id = ? AND owner_id = ? AND memory_id = ?"), (guild_id, owner_id, memory_id))
+            return True
 
     def set_ai_memory(self, guild_id, scope, owner_id, source_channel, content, public_at_capture=False):
         if scope not in {"user", "chat", "global"} or not isinstance(content, str) or len(content) > 2000:
@@ -1920,6 +2059,14 @@ class DatabaseManager:
             raise ValueError("Ámbito inválido")
         with self._conn() as conn:
             cur = conn.cursor()
+            if scope == "user":
+                self._ai_personal_barrier(cur, guild_id, owner_id)
+                cur.execute(self._adapt("DELETE FROM ai_personal_memories WHERE guild_id = ? AND owner_id = ?"), (guild_id, owner_id))
+            elif scope == "chat":
+                cur.execute(self._adapt("SELECT DISTINCT owner_id FROM ai_personal_memories WHERE guild_id = ? AND source_channel = ?"), (guild_id, owner_id))
+                for row in cur.fetchall():
+                    self._ai_personal_barrier(cur, guild_id, int(row["owner_id"]))
+                cur.execute(self._adapt("DELETE FROM ai_personal_memories WHERE guild_id = ? AND source_channel = ?"), (guild_id, owner_id))
             cur.execute(self._adapt("DELETE FROM ai_memories WHERE guild_id = ? AND scope = ? AND owner_id = ?"), (guild_id, scope, owner_id))
             if scope == "chat":
                 cur.execute(self._adapt("DELETE FROM ai_chat_turns WHERE guild_id = ? AND channel_id = ?"), (guild_id, owner_id))
@@ -1934,6 +2081,10 @@ class DatabaseManager:
     def invalidate_ai_chat(self, guild_id, channel_id, message_id):
         with self._conn() as conn:
             cur = conn.cursor()
+            cur.execute(self._adapt("SELECT DISTINCT owner_id FROM ai_personal_memories WHERE guild_id = ? AND source_channel = ? AND source_message = ?"), (guild_id, channel_id, message_id))
+            for row in cur.fetchall():
+                self._ai_personal_barrier(cur, guild_id, int(row["owner_id"]))
+            cur.execute(self._adapt("DELETE FROM ai_personal_memories WHERE guild_id = ? AND source_channel = ? AND source_message = ?"), (guild_id, channel_id, message_id))
             cur.execute(self._adapt("DELETE FROM ai_chat_turns WHERE guild_id = ? AND channel_id = ? AND (message_id = ? OR origin_message_id = ?)"), (guild_id, channel_id, message_id, message_id))
             if cur.rowcount:
                 self._ai_bump_revision(cur, guild_id, "chat", channel_id)
@@ -2179,8 +2330,10 @@ class DatabaseManager:
             ("ai_provider", "VARCHAR(16) DEFAULT 'auto'"),
             ("ai_web_enabled", "INTEGER DEFAULT 0"),
             ("ai_deep_think", "INTEGER DEFAULT 0"),
+            ("ai_deep_think_daily_limit", "INTEGER DEFAULT 3"),
             ("ai_memory_messages", "INTEGER DEFAULT 40"),
             ("ai_response_mode", "VARCHAR(16) DEFAULT 'all'"),
+            ("ai_restricted_role_ids", "TEXT DEFAULT '[]'"),
         ]
         for col, col_def in migrations:
             try:
@@ -3864,10 +4017,12 @@ class DatabaseManager:
         "ai_provider": "auto",
         "ai_web_enabled": 0,
         "ai_deep_think": 0,
+        "ai_deep_think_daily_limit": 3,
         "ai_memory_messages": 40,
         "ai_response_mode": "mentions",
         "ai_channel_id": None,
         "ai_role_id": None,
+        "ai_restricted_role_ids": [],
         "ai_model": "gemma-4-26b-a4b-it",
         "ai_system_prompt": None,
         "ai_limit_requests": 50,
@@ -3883,6 +4038,8 @@ class DatabaseManager:
         result["guild_id"] = guild_id
         if row:
             result.update(row)
+        restricted = result["ai_restricted_role_ids"]
+        result["ai_restricted_role_ids"] = json.loads(restricted) if isinstance(restricted, str) else list(restricted or [])
         return result
 
     def set_ai_config(self, guild_id: int, **kwargs) -> None:
@@ -3890,11 +4047,20 @@ class DatabaseManager:
         if invalid:
             raise ValueError(f"Columnas inválidas en ai_config: {invalid}")
 
+        if "ai_restricted_role_ids" in kwargs:
+            kwargs["ai_restricted_role_ids"] = json.dumps(normalize_restricted_roles(kwargs["ai_restricted_role_ids"]))
+
         if "ai_provider" in kwargs and kwargs["ai_provider"] not in {"auto", "strata", "gemini"}:
             raise ValueError("ai_provider debe ser auto, strata o gemini")
 
         if "ai_memory_messages" in kwargs and (type(kwargs["ai_memory_messages"]) is not int or not 0 <= kwargs["ai_memory_messages"] <= 5000):
             raise ValueError("ai_memory_messages debe ser un entero entre 0 y 5000")
+
+        if "ai_deep_think_daily_limit" in kwargs and (
+            type(kwargs["ai_deep_think_daily_limit"]) is not int
+            or not 0 <= kwargs["ai_deep_think_daily_limit"] <= 1000
+        ):
+            raise ValueError("ai_deep_think_daily_limit debe ser un entero entre 0 y 1000")
 
         for field in ("ai_web_enabled", "ai_deep_think"):
             if field not in kwargs:

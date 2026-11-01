@@ -146,13 +146,14 @@ class ReasoningTransportTests(unittest.IsolatedAsyncioTestCase):
 
 class LegacyMentionSendTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.author = SimpleNamespace(id=30, display_name="Ana", name="ana", mention="<@30>")
+        self.author = SimpleNamespace(id=30, display_name="Ana", name="ana", mention="<@30>", bot=False, roles=[])
         self.target = SimpleNamespace(id=31, display_name="Luis", name="luis")
         self.guild = SimpleNamespace(id=1, members=[self.author, self.target])
         self.channel = SimpleNamespace(guild=self.guild)
         self.message = SimpleNamespace(author=self.author, guild=self.guild, mentions=[self.target],
             content="Pregunta a <@31>", channel=self.channel, reply=AsyncMock())
         self.cog = IA.__new__(IA)
+        self.cog.db = SimpleNamespace(get_ai_config=lambda _guild_id: {})
 
     async def test_legacy_replies_ping_first_fragment_and_block_mass_mentions(self):
         await self.cog._send_reply(self.message, "Hola @Luis <@999> @everyone <@&9> " + "x" * 2100, False)

@@ -179,6 +179,8 @@ class ResponsesConversationTest(unittest.IsolatedAsyncioTestCase):
                 self.db.set_automod_config(10, rules={"llm": {"endpoint_url": "https://provider.example/v1",
                     "api_type": protocol, "model": "fictitious", "enabled": False}})
                 await self.engine.listen(self.fixture.message(300 + index, ping=True))
+                job = self.fixture.cog._queue.get_nowait()
+                job["deep_think"] = True
                 self.engine.web = SimpleNamespace(read_webpage=AsyncMock(side_effect=[
                     {"url": first, "text": "Release 9 is current.", "retrieved_at_utc": "2030-01-02"},
                     {"url": second, "text": "Performance improved 20 percent."}]), close=AsyncMock())
@@ -193,9 +195,9 @@ class ResponsesConversationTest(unittest.IsolatedAsyncioTestCase):
                     replies = [{"choices": [{"finish_reason": "tool_calls", "message": message}]} for message in (
                         {"content": opaque, "tool_calls": [self.fixture.tool_call("read_webpage", first, "read1")]},
                         checkpoint, {"tool_calls": [self.fixture.tool_call("read_webpage", second, "read2")]}, finished)]
-                with patch.object(self.engine.budget, "window", new=AsyncMock(return_value=16000)), patch(
+                with patch.object(self.engine.budget, "window", new=AsyncMock(return_value=20000)), patch(
                         "cogs._llm_moderation.endpoint_json", new=AsyncMock(side_effect=replies)) as provider:
-                    result = await self.engine.web_context(self.fixture.cog._queue.get_nowait())
+                    result = await self.engine.web_context(job)
                 self.assertEqual(provider.await_count, 4)
                 payloads = [call.args[2] for call in provider.await_args_list]
                 self.assertEqual([tool["name"] if protocol == "responses" else tool["function"]["name"]
