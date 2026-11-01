@@ -298,6 +298,35 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", message.reply.await_args.args[0])
         self.assertEqual(len(self.db.get_ai_chat_turns(10, 20)), 1)
 
+    async def test_failure_log_records_only_a_known_contract_code(self):
+        for index, detail in enumerate(("endpoint_invalid_tool_call", "private-provider-payload")):
+            message = self.message(200 + index, ping=True)
+            await self.engine.listen(message)
+            with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=ValueError(detail))), self.assertLogs("cogs._conversation", level="WARNING") as logged:
+                await self.engine.process(self.cog._queue.get_nowait())
+            text = "\n".join(logged.output)
+            self.assertNotIn("private-provider-payload", text)
+            if index == 0:
+                self.assertIn("code=endpoint_invalid_tool_call", text)
+
+    async def test_web_intent_repair_failure_or_private_brief_never_reaches_public_research(self):
+        self.db.set_ai_config(10, ai_web_enabled=1)
+        initial = {"tool_calls": [{"id": "first", "type": "function", "function": {
+            "name": "request_public_web_research", "arguments": '{"query":"Example listing"}'}}]}
+        failures = [{"content": "No tool"}, {"tool_calls": [{"id": "repair", "type": "function", "function": {
+            "name": "request_public_web_research", "arguments": json.dumps({"public_brief": {
+                "topic": "Example", "question": "password: private-secret"}})}}]}]
+        for index, repair in enumerate(failures):
+            message = self.message(300 + index, ping=True)
+            await self.engine.listen(message)
+            with patch.object(self.engine, "web_context", new=AsyncMock()) as research, patch(
+                    "cogs._conversation.request_completion", new=AsyncMock(side_effect=[initial, repair])) as provider, self.assertLogs("cogs._conversation", level="WARNING") as logged:
+                await self.engine.process(self.cog._queue.get_nowait())
+            self.assertEqual(provider.await_count, 2)
+            research.assert_not_awaited()
+            self.assertIn("code=invalid_web_brief_arguments", "\n".join(logged.output))
+            self.assertNotIn("private-secret", "\n".join(logged.output))
+
     async def test_automatic_provider_preserves_legacy_when_endpoint_missing(self):
         self.assertEqual(provider_for(self.db, 10, {"ai_provider": "auto"}), "strata")
         self.assertEqual(provider_for(self.db, 11, {"ai_provider": "auto"}), "gemini")
@@ -618,7 +647,20 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         call = {"id": "intent_1", "type": "function", "function": {"name": "request_public_web_research", "arguments": '{"query":"PRIVATE"}'}}
         with patch("cogs._conversation.request_completion", new=AsyncMock(return_value={"role": "assistant", "content": "PRIVATE", "tool_calls": [call]})) as request:
             await self.engine.process(self.cog._queue.get_nowait())
-        request.assert_awaited_once()
+        self.assertEqual(request.await_count, 2)
+        self.assertNotIn('"PRIVATE"', json.dumps(request.await_args.args[2]))
+        self.assertIsNone(self.engine.web)
+
+    async def test_scope_change_before_web_intent_repair_stops_without_another_model_call(self):
+        self.db.set_ai_config(10, ai_web_enabled=1)
+        await self.engine.listen(self.message(ping=True))
+        async def invalid(*args, **kwargs):
+            self.db.set_ai_config(10, ai_enabled=0)
+            return {"tool_calls": [{"id": "intent", "type": "function", "function": {
+                "name": "request_public_web_research", "arguments": '{"query":"Example listing"}'}}]}
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=invalid)) as provider:
+            await self.engine.process(self.cog._queue.get_nowait())
+        provider.assert_awaited_once()
         self.assertIsNone(self.engine.web)
 
     async def test_config_or_clear_during_parallel_permission_fetch_invalidates_snapshot(self):
@@ -662,7 +704,7 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.db.set_ai_config(10, ai_web_enabled=1)
         message = self.message(ping=True)
         url = "https://official.example/releases"
-        self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": []}),
+        self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": [{"url": url}]}),
             read_webpage=AsyncMock(return_value={"url": url, "text": "Release 9 is current."}), close=AsyncMock())
         await self.engine.listen(message)
         calls = [self.tool_call(argument=f"consulta {index}", call_id=f"call_{index}") for index in range(3)]
@@ -823,7 +865,7 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         intent = {"role": "assistant", "tool_calls": [{"id": "intent", "type": "function", "function": {
             "name": "request_public_web_research", "arguments": json.dumps({"public_brief": {"topic": "Example", "question": "Compare current Example releases"}})}}]}
         url = "https://official.example/releases"
-        self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": []}),
+        self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": [{"url": url, "title": "Example releases"}]}),
             read_webpage=AsyncMock(return_value={"url": url, "text": "Release 9 is current."}), close=AsyncMock())
         responses = [intent] + [{"role": "assistant", "tool_calls": [self.tool_call(argument=f"Example release {index}", call_id=f"q{index}")]} for index in range(5)]
         responses += [{"role": "assistant", "tool_calls": [self.tool_call("read_webpage", url, "release")]},
@@ -890,7 +932,8 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.db.set_ai_config(10, ai_web_enabled=1)
         await self.engine.listen(self.message(ping=True))
         self.engine.web = SimpleNamespace(
-            search_web=AsyncMock(return_value={"results": [{"url": f"https://docs.example/{index}", "title": "Documento"} for index in range(5)]}),
+            search_web=AsyncMock(return_value={"results": [{"url": "https://example.com/", "title": "Example Domain"}] +
+                [{"url": f"https://docs.example/{index}", "title": "Documento"} for index in range(4)]}),
             read_webpage=AsyncMock(return_value={"url": "https://example.com/", "title": "Example Domain", "text": "Example Domain"}), close=AsyncMock())
         responses = [
             {"role": "assistant", "content": None, "tool_calls": [self.tool_call(), self.tool_call("read_webpage", "https://example.com/", "call_2")]},
@@ -911,7 +954,8 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 {"results": [{"url": "https://official.example/releases", "snippet": "Official releases"}]}]),
             read_webpage=AsyncMock(side_effect=[
                 {"url": "https://official.example/releases", "text": "See changelog", "links": [{"url": "https://official.example/changelog"}]},
-                {"url": "https://official.example/changelog", "text": "Current release 9", "modified_at_untrusted": "2026-10-27"},
+                {"url": "https://official.example/changelog", "text": "Current release 9", "modified_at_untrusted": "2026-10-27",
+                 "links": [{"url": "https://official.example/status"}]},
                 {"url": "https://official.example/status", "text": "Release available"}]), close=AsyncMock())
         responses = [
             {"role": "assistant", "tool_calls": [self.tool_call(argument="Example latest", call_id="a")]},
@@ -1654,7 +1698,8 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         reply = message.reply.await_args.args[0]
         self.assertIn("No pude verificar la última versión", reply)
         self.assertNotIn("Fuentes consultadas:", reply)
-        self.assertIn("public_web_unavailable", request.await_args.args[2][-1]["content"])
+        context = json.loads(request.await_args.args[2][1]["content"])
+        self.assertIn("public_web_unavailable", json.dumps(context["web_research_untrusted"]))
 
     async def test_invalid_web_arguments_are_not_executed(self):
         self.db.set_ai_config(10, ai_web_enabled=1)

@@ -3,7 +3,7 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from tests import test_conversation_memory as fixtures
 
@@ -31,9 +31,75 @@ class ModelResearchTests(unittest.IsolatedAsyncioTestCase):
     def call(self, name, argument, index=0):
         return {"role": "assistant", "tool_calls": [self.fixture.tool_call(name, argument, f"call{index}")]}
 
+    async def test_failed_search_rejects_guessed_url_then_uses_remaining_search_and_reads_real_source(self):
+        self.job["deep_think"] = False
+        found = "https://official.example/statement"
+        self.engine.web = SimpleNamespace(close=AsyncMock(), search_web=AsyncMock(side_effect=[ValueError("search unavailable"),
+            {"results": [{"url": found, "snippet": "Official statement"}]}]),
+            read_webpage=AsyncMock(return_value={"url": found, "text": "The company remains privately held."}))
+        replies = [self.call("search_web", "Example listing latest", 1),
+            self.call("read_webpage", "https://news.example/invented-article", 2),
+            self.call("search_web", "Example official listing statement", 3), self.call("read_webpage", found, 4)]
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)) as provider:
+            result = await self.engine.web_context(self.job)
+        self.assertEqual(self.engine.web.search_web.await_count, 2)
+        self.engine.web.read_webpage.assert_awaited_once_with(found, query=self.job["message"].content, max_text=ANY)
+        self.assertIn("url_not_discovered", json.dumps(provider.await_args_list[2].args[2]))
+        self.assertIn("The company remains privately held.", json.dumps(result["page_evidence_untrusted"]))
+        self.assertEqual(result["diagnostics"]["search_attempts"], 2)
+        self.assertEqual(result["diagnostics"]["read_attempts"], 1)
+        self.assertEqual(result["diagnostics"]["stop_reason"], "round_limit")
+
+    async def test_search_results_do_not_authorize_unrelated_urls_and_extracted_links_survive_redirects(self):
+        self.job["deep_think"] = False
+        initial, redirected, linked = "https://official.example/start", "https://official.example/redirected", "https://official.example/details"
+        self.engine.web = SimpleNamespace(close=AsyncMock(), search_web=AsyncMock(return_value={"results": [{"url": initial}]}),
+            read_webpage=AsyncMock(side_effect=[{"url": redirected, "text": "Read the public statement.", "links": [{"url": linked}]},
+                {"url": linked, "text": "The company remains privately held."}]))
+        replies = [self.call("search_web", "Example listing", 1), self.call("read_webpage", "https://news.example/guessed", 2),
+            self.call("read_webpage", initial, 3), self.call("read_webpage", linked, 4)]
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)):
+            result = await self.engine.web_context(self.job)
+        self.assertEqual([call.args[0] for call in self.engine.web.read_webpage.await_args_list], [initial, linked])
+        self.assertIn(redirected, result["verified_source_urls"])
+        self.assertIn(linked, result["verified_source_urls"])
+
+    async def test_explicit_user_url_remains_readable_after_search_failure(self):
+        from cogs._llm_moderation import fingerprint
+        for url in ("https://official.example/statement", "https://en.wikipedia.org/wiki/Alien_(film)"):
+            with self.subTest(url=url):
+                self.job["message"].content = "Read " + url
+                self.job["fingerprint"] = fingerprint(self.job["message"])
+                self.job["deep_think"] = False
+                self.engine.web = SimpleNamespace(close=AsyncMock(), search_web=AsyncMock(side_effect=ValueError("unavailable")),
+                    read_webpage=AsyncMock(return_value={"url": url, "text": "Public information from the requested source."}))
+                replies = [self.call("search_web", "Example listing", 1), self.call("read_webpage", url, 2), {"content": "done"}]
+                with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)):
+                    result = await self.engine.web_context(self.job)
+                self.assertEqual(self.engine.web.read_webpage.await_count, 1)
+                self.assertIn(url, result["verified_source_urls"])
+
+    async def test_compacted_ledger_keeps_a_read_source_authorized_after_link_cache_eviction(self):
+        urls = [f"https://official.example/page{index}" for index in range(13)]
+        documents = [{"url": url, "text": "Release 9 is current.", "links": [
+            {"url": urls[index + 1] if index < 12 else "https://official.example/final"},
+            *({"url": f"https://links.example/{index}/{n}"} for n in range(9))]} for index, url in enumerate(urls)]
+        self.engine.web = SimpleNamespace(close=AsyncMock(), search_web=AsyncMock(return_value={"results": [{"url": urls[0]}]}),
+            read_webpage=AsyncMock(side_effect=[*documents, documents[0]]))
+        supported = fact("Current version", urls[0], "Release 9 is current.")
+        replies = [self.call("search_web", "Example current", 0),
+            *(self.call("read_webpage", url, index + 1) for index, url in enumerate(urls)),
+            report([supported], gaps=["Need to verify the central source again"]),
+            self.call("read_webpage", urls[0], 99), report([supported], sufficient=True)]
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)):
+            result = await self.engine.web_context(self.job)
+        self.assertEqual(self.engine.web.read_webpage.await_count, 14)
+        self.assertTrue(result["assessment"]["sufficient"])
+
     async def test_normal_retrieval_caps_tools_and_passes_read_passages_without_claiming_completion(self):
         self.job["deep_think"] = False
-        self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": []}), close=AsyncMock(),
+        self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": [
+            {"url": f"https://official.example/{index}"} for index in range(4)]}), close=AsyncMock(),
             read_webpage=AsyncMock(side_effect=lambda url, **_: {"url": url, "text": "Memory: 16 GB.", "retrieved_at_utc": "2030-01-02"}))
         replies = [
             {"tool_calls": [self.fixture.tool_call("search_web", f"query {i}", f"search{i}") for i in range(3)]},
@@ -63,6 +129,61 @@ class ModelResearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["complete"])
         self.assertEqual(result["verified_source_urls"], [])
 
+    async def test_standard_source_cap_below_and_above_three_supports_sequential_reads(self):
+        for cap in (1, 5):
+            with self.subTest(cap=cap):
+                self.fixture.db.set_ai_config(10, ai_web_max_sources=cap)
+                await self.engine.listen(self.fixture.message(200 + cap, ping=True))
+                self.job = self.fixture.cog._queue.get_nowait()
+                urls = [f"https://official.example/{index}" for index in range(cap + 1)]
+                self.engine.web = SimpleNamespace(close=AsyncMock(),
+                    search_web=AsyncMock(return_value={"results": [{"url": url} for url in urls]}),
+                    read_webpage=AsyncMock(side_effect=lambda url, **_: {"url": url, "text": "Supported public fact."}))
+                replies = [self.call("search_web", "Example official", 0)]
+                replies.extend(self.call("read_webpage", url, index + 1) for index, url in enumerate(urls))
+                replies.append({"role": "assistant", "content": "done"})
+                with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)):
+                    result = await self.engine.web_context(self.job)
+                self.assertEqual(self.engine.web.read_webpage.await_count, cap)
+                self.assertEqual(result["diagnostics"]["read_attempts"], cap)
+                self.assertEqual(result["pages_read"], cap)
+
+    async def test_standard_cap_counts_failed_access_but_not_rejected_or_duplicate_urls(self):
+        self.fixture.db.set_ai_config(10, ai_web_max_sources=2)
+        await self.engine.listen(self.fixture.message(202, ping=True))
+        self.job = self.fixture.cog._queue.get_nowait()
+        first, second = "https://official.example/a", "https://official.example/b"
+        self.engine.web = SimpleNamespace(close=AsyncMock(),
+            search_web=AsyncMock(return_value={"results": [{"url": first}, {"url": second}]}),
+            read_webpage=AsyncMock(side_effect=[ValueError("read failed"), {"url": second, "text": "Supported public fact."}]))
+        replies = [
+            {"tool_calls": [self.fixture.tool_call("read_webpage", url, f"read{index}") for index, url in enumerate((
+                "http://localhost/private", "https://cdn.discordapp.com/file"))]},
+            self.call("search_web", "Example official", 0),
+            {"tool_calls": [self.fixture.tool_call("read_webpage", url, f"read{index + 2}") for index, url in enumerate((
+                "https://invented.example/a", first, first + "#fragment", second))]},
+            self.call("read_webpage", "https://official.example/c", 20)]
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)):
+            result = await self.engine.web_context(self.job)
+        self.assertEqual([call.args[0] for call in self.engine.web.read_webpage.await_args_list], [first, second])
+        self.assertEqual(result["diagnostics"]["read_attempts"], 2)
+        self.assertEqual(result["pages_read"], 1)
+
+    async def test_deep_research_ignores_standard_source_cap(self):
+        self.fixture.db.set_ai_config(10, ai_web_max_sources=1)
+        await self.engine.listen(self.fixture.message(201, ping=True))
+        self.job = self.fixture.cog._queue.get_nowait()
+        self.job["deep_think"] = True
+        urls = [f"https://official.example/{index}" for index in range(5)]
+        self.engine.web = SimpleNamespace(close=AsyncMock(), read_webpage=AsyncMock(side_effect=lambda url, **_: {
+            "url": url, "text": "Supported public fact."}))
+        replies = [self.call("read_webpage", url, index) for index, url in enumerate(urls)]
+        replies.append(report([fact("Fact", urls[-1], "Supported public fact.")], sufficient=True))
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)):
+            result = await self.engine.web_context(self.job)
+        self.assertEqual(self.engine.web.read_webpage.await_count, 5)
+        self.assertTrue(result["complete"])
+
     async def test_quick_retrieval_small_context_keeps_a_useful_passage_with_long_urls(self):
         self.job.update(deep_think=False, web_byte_allowance=8192)
         urls = [f"https://official.example/{index}/" + "x" * 1990 for index in range(3)]
@@ -79,7 +200,8 @@ class ModelResearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(json.dumps(result, ensure_ascii=False).encode("utf-8")), 8192)
 
     async def test_model_can_exceed_all_old_search_read_and_round_quotas(self):
-        self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": []}),
+        self.engine.web = SimpleNamespace(search_web=AsyncMock(side_effect=lambda query: {"results": [
+            {"url": f"https://official.example/{int(query.rsplit(' ', 1)[-1]) % 14}"}]}),
             read_webpage=AsyncMock(side_effect=lambda url, **_: {"url": url, "text": "Release 9 is current."}), close=AsyncMock())
         replies = [self.call("search_web", f"Example query {index}", index) for index in range(22)]
         replies += [self.call("read_webpage", f"https://official.example/{index}", index + 22) for index in range(14)]

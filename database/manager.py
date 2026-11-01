@@ -93,6 +93,7 @@ VALID_AI_CONFIG_COLUMNS = frozenset(
         "ai_enabled",
         "ai_provider",
         "ai_web_enabled",
+        "ai_web_max_sources",
         "ai_deep_think",
         "ai_deep_think_daily_limit",
         "ai_memory_messages",
@@ -2329,6 +2330,7 @@ class DatabaseManager:
             ("ai_enabled", "INTEGER DEFAULT 1"),
             ("ai_provider", "VARCHAR(16) DEFAULT 'auto'"),
             ("ai_web_enabled", "INTEGER DEFAULT 0"),
+            ("ai_web_max_sources", "INTEGER DEFAULT 3"),
             ("ai_deep_think", "INTEGER DEFAULT 0"),
             ("ai_deep_think_daily_limit", "INTEGER DEFAULT 3"),
             ("ai_memory_messages", "INTEGER DEFAULT 40"),
@@ -4016,6 +4018,7 @@ class DatabaseManager:
         "ai_enabled": 1,
         "ai_provider": "auto",
         "ai_web_enabled": 0,
+        "ai_web_max_sources": 3,
         "ai_deep_think": 0,
         "ai_deep_think_daily_limit": 3,
         "ai_memory_messages": 40,
@@ -4055,6 +4058,11 @@ class DatabaseManager:
 
         if "ai_memory_messages" in kwargs and (type(kwargs["ai_memory_messages"]) is not int or not 0 <= kwargs["ai_memory_messages"] <= 5000):
             raise ValueError("ai_memory_messages debe ser un entero entre 0 y 5000")
+
+        if "ai_web_max_sources" in kwargs and (
+            type(kwargs["ai_web_max_sources"]) is not int or not 1 <= kwargs["ai_web_max_sources"] <= 20
+        ):
+            raise ValueError("ai_web_max_sources debe ser un entero entre 1 y 20")
 
         if "ai_deep_think_daily_limit" in kwargs and (
             type(kwargs["ai_deep_think_daily_limit"]) is not int

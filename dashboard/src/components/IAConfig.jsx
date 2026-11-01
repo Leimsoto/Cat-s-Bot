@@ -54,8 +54,10 @@ function IASettings({ guildId, onNavigate }) {
 
   const save = async () => {
     if (!cfg || saving || loading) return;
-    const quotaInput = document.getElementById("ia-deep-think-daily-limit");
-    if (quotaInput && !quotaInput.reportValidity()) return;
+    for (const id of ["ia-web-max-sources", "ia-deep-think-daily-limit"]) {
+      const input = document.getElementById(id);
+      if (input && !input.reportValidity()) return;
+    }
     const version = requestVersion.current;
     setSaving(true);
     try {
@@ -72,6 +74,7 @@ function IASettings({ guildId, onNavigate }) {
         ai_limit_hours: cfg.ai_limit_hours ?? 12,
         ai_imagine_enabled: cfg.ai_imagine_enabled ? 1 : 0,
         ai_web_enabled: cfg.ai_web_enabled ? 1 : 0,
+        ai_web_max_sources: cfg.ai_web_max_sources ?? 3,
         ai_deep_think: cfg.ai_deep_think ? 1 : 0,
         ai_deep_think_daily_limit: cfg.ai_deep_think_daily_limit ?? 3,
         ai_memory_messages: cfg.ai_memory_messages ?? 40};
@@ -327,7 +330,7 @@ function IASettings({ guildId, onNavigate }) {
 
         {usingStrata && <div className="config-item inline-check">
           <div>
-            <div style={{ fontWeight: 700 }}>Internet: DuckDuckGo y Chrome Headless</div>
+            <div style={{ fontWeight: 700 }}>Internet: DuckDuckGo, Brave y Chrome Headless</div>
             <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
               Permite buscar en la web pública y leer páginas para responder con fuentes. Se activa solo para la conversación, independientemente de Moderación IA.
             </div>
@@ -339,6 +342,15 @@ function IASettings({ guildId, onNavigate }) {
           </label>
         </div>}
         {usingStrata && <p className="muted-text">La búsqueda web puede usar el contexto de la conversación para entender referencias como «busca sobre eso». Solo accede a páginas públicas: sin sitios privados o locales, inicios de sesión ni formularios. Desactivada, no usa estas herramientas web.</p>}
+
+        {usingStrata && <div className="config-item">
+          <label htmlFor="ia-web-max-sources">Máximo de fuentes · búsqueda estándar</label>
+          <input id="ia-web-max-sources" type="number" min={1} max={20} step={1} required
+            aria-describedby="ia-web-max-sources-help"
+            value={cfg.ai_web_max_sources ?? 3}
+            onChange={(e) => set("ai_web_max_sources", e.target.value === "" ? "" : Number(e.target.value))} />
+          <span id="ia-web-max-sources-help" className="muted-text">De 1 a 20. Máximo de páginas que el bot intentará consultar por respuesta. Puede terminar antes si ya tiene suficiente información o alcanza los 30 segundos del modo estándar. No cambia Deep Think.</span>
+        </div>}
 
         {usingStrata && <div className="config-item inline-check">
           <div><div style={{ fontWeight: 700 }}>Permitir Deep Think mediante /deepthink</div><div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Cada persona puede usar /deepthink consulta para investigar a fondo solo esa consulta; las conversaciones normales mantienen el modo rápido. Contrasta fuentes, alternativas y dudas relevantes hasta que el modelo considere suficiente la información. Puede tardar más y consumir más tokens y recursos del proveedor. Requiere tener Internet activado.</div></div>

@@ -371,7 +371,7 @@ class WebAccess:
             except ImportError:
                 raise ValueError("La búsqueda web requiere instalar la dependencia ddgs.") from None
             except Exception:
-                raise ValueError("DuckDuckGo no está disponible o agotó el tiempo de búsqueda.") from None
+                raise ValueError("Los buscadores públicos no están disponibles o agotaron el tiempo de búsqueda.") from None
             result = {"results": results, "source_kind": "search_snippets", "query": query,
                       "retrieved_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds")}
             self._cache[query] = (time.monotonic(), result)
@@ -383,7 +383,7 @@ class WebAccess:
     @staticmethod
     def _search(query: str):
         from ddgs import DDGS
-        return DDGS(timeout=8).text(query, backend="duckduckgo", max_results=MAX_RESULTS)
+        return DDGS(timeout=8).text(query, backend="duckduckgo,brave", max_results=MAX_RESULTS)
 
     async def read_webpage(self, url: str, *, query: str = "", max_text: int = MAX_TEXT) -> dict:
         if self._closed:

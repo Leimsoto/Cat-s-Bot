@@ -123,7 +123,7 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await web.search_web(query)
         with patch.object(web, "_search", Mock(side_effect=RuntimeError("secret"))):
-            with self.assertRaisesRegex(ValueError, "DuckDuckGo") as error:
+            with self.assertRaisesRegex(ValueError, "buscadores públicos") as error:
                 await web.search_web("test")
             self.assertNotIn("secret", str(error.exception))
         await web.close()
@@ -131,13 +131,13 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await web.read_webpage("https://example.com")
 
-    def test_ddgs_is_explicitly_duckduckgo_without_fallback(self):
+    def test_ddgs_uses_only_the_two_supported_search_backends(self):
         client = Mock()
         constructor = Mock(return_value=client)
         with patch.dict("sys.modules", {"ddgs": Mock(DDGS=constructor)}):
             WebAccess._search("short query")
         constructor.assert_called_once_with(timeout=8)
-        client.text.assert_called_once_with("short query", backend="duckduckgo", max_results=5)
+        client.text.assert_called_once_with("short query", backend="duckduckgo,brave", max_results=5)
 
     async def test_timeout_during_driver_start_closes_context_manager(self):
         async def blocked_start():

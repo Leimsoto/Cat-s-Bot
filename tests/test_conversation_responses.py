@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import discord
+from cogs._conversation import FINAL_WEB_GROUNDING
 
 from tests import test_conversation_memory as conversation_fixtures
 
@@ -145,6 +146,72 @@ class ResponsesConversationTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn('"status": "unknown"', final.replace('\\"', '"'))
                     if pages_read:
                         self.assertIn('"status": "supported"', final.replace('\\"', '"'))
+
+    async def test_invalid_web_intent_has_one_stateless_canonical_repair_and_valid_intent_needs_none(self):
+        self.db.set_ai_config(10, ai_web_enabled=1)
+        brief = {"topic": "Example listing", "question": "Is Example publicly listed?"}
+        web = {"sources": [], "verified_source_urls": [], "complete": True, "assessment": {"sufficient": True}}
+        for protocol_index, protocol in enumerate(("chat_completions", "responses")):
+            self.db.set_automod_config(10, rules={"llm": {"endpoint_url": "https://provider.example/v1",
+                "api_type": protocol, "model": "fictitious", "enabled": False}})
+            for invalid in (False, True):
+                with self.subTest(protocol=protocol, invalid=invalid):
+                    message = self.fixture.message(400 + protocol_index * 2 + invalid, ping=True)
+                    message.content = brief["question"]
+                    await self.engine.listen(message)
+                    args = {"query": "Example listing"} if invalid else {"public_brief": brief}
+                    if protocol == "responses":
+                        replies = [response(reasoning("INITIAL_OPAQUE_SIDECAR"), function_item("request_public_web_research", args, "first", "first_item"))]
+                        if invalid:
+                            replies.append(response(function_item("request_public_web_research", {"public_brief": brief}, "repair", "repair_item")))
+                        replies.append(response(text_item("Example remains privately held.")))
+                    else:
+                        arguments = [args, {"public_brief": brief}] if invalid else [args]
+                        replies = [{"choices": [{"finish_reason": "tool_calls", "message": {"content": None,
+                            "tool_calls": [{"id": f"call{index}", "type": "function", "function": {
+                                "name": "request_public_web_research", "arguments": json.dumps(value)}}]}}]}
+                            for index, value in enumerate(arguments)]
+                        replies.append({"choices": [{"finish_reason": "stop", "message": {"content": "Example remains privately held."}}]})
+                    with patch.object(self.engine, "web_context", new=AsyncMock(return_value=web)) as research, patch(
+                            "cogs._llm_moderation.endpoint_json", new=AsyncMock(side_effect=replies)) as provider:
+                        await self.engine.process(self.fixture.cog._queue.get_nowait())
+                    self.assertEqual(provider.await_count, 3 if invalid else 2)
+                    self.assertEqual(research.await_args.args[0]["public_web_brief"], brief)
+                    self.assertEqual(message.reply.await_args.args[0], "Example remains privately held.")
+                    if invalid:
+                        payload = provider.await_args_list[1].args[2]
+                        names = [tool["name"] if protocol == "responses" else tool["function"]["name"] for tool in payload["tools"]]
+                        self.assertEqual(names, ["request_public_web_research"])
+                        self.assertEqual(payload["max_output_tokens" if protocol == "responses" else "max_tokens"], 512)
+                        self.assertNotIn("INITIAL_OPAQUE_SIDECAR", json.dumps(payload))
+
+    async def test_final_grounding_is_after_web_data_and_included_in_budget_for_both_protocols(self):
+        self.db.set_ai_config(10, ai_web_enabled=1)
+        brief = {"topic": "Example", "question": "Is Example publicly listed?"}
+        web = {"sources": [], "verified_source_urls": [], "complete": False, "assessment": {"sufficient": False}}
+        for index, protocol in enumerate(("chat_completions", "responses")):
+            with self.subTest(protocol=protocol):
+                self.db.set_automod_config(10, rules={"llm": {"endpoint_url": "https://provider.example/v1",
+                    "api_type": protocol, "model": "fictitious", "enabled": False}})
+                message = self.fixture.message(500 + index, ping=True)
+                message.content = brief["question"]
+                await self.engine.listen(message)
+                if protocol == "responses":
+                    replies = [response(function_item("request_public_web_research", {"public_brief": brief}, "intent", "intent_item")), response(text_item("Public answer."))]
+                else:
+                    replies = [{"choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [{"id": "intent", "type": "function",
+                        "function": {"name": "request_public_web_research", "arguments": json.dumps({"public_brief": brief})}}]}}]},
+                        {"choices": [{"finish_reason": "stop", "message": {"content": "Public answer."}}]}]
+                with patch.object(self.engine, "web_context", new=AsyncMock(return_value=web)), patch.object(
+                        self.engine.budget, "fit", new=AsyncMock(wraps=self.engine.budget.fit)) as fit, patch(
+                        "cogs._llm_moderation.endpoint_json", new=AsyncMock(side_effect=replies)) as provider:
+                    await self.engine.process(self.fixture.cog._queue.get_nowait())
+                payload = provider.await_args.args[2]
+                messages = payload["input" if protocol == "responses" else "messages"]
+                self.assertEqual(messages[-1], {"role": "system", "content": FINAL_WEB_GROUNDING})
+                self.assertIn("web_research_untrusted", json.dumps(messages[-2]))
+                self.assertIn(messages[-1]["content"], fit.await_args.args[2])
+                self.assertEqual(message.reply.await_args.args[0], "Public answer.")
 
     async def test_protocol_change_during_responses_call_discards_output(self):
         message = self.fixture.message(ping=True)

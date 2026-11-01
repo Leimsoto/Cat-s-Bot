@@ -1,7 +1,7 @@
 # Chrome Headless opcional para las herramientas web
 
-El acceso web se activa por servidor en el panel de IA. DuckDuckGo usa `ddgs`
-con el backend `duckduckgo`; la lectura usa Google Chrome instalado, por el canal
+El acceso web se activa por servidor en el panel de IA. DuckDuckGo y Brave usan `ddgs`
+con los backends acotados `duckduckgo,brave` (sin selección `auto`); la lectura usa Google Chrome instalado, por el canal
 `chrome` de Playwright. No se sustituye por Chromium ni se instala un navegador
 al arrancar el bot. Los errores de instalación, sandbox y bloqueo del sitio se
 devuelven como errores de herramienta. Las páginas y búsquedas no reciben la
@@ -85,7 +85,7 @@ Las fixtures conectan únicamente a su servidor HTTP temporal de pruebas mediant
 una sustitución explícita del transporte; el código de producción no incorpora
 esa excepción. Las pruebas ordinarias comprueban el DNS público y la conexión
 numérica fijada por separado. Una prueba pasada en Windows no confirma el
-sandbox de Linux, el servicio ni la disponibilidad de DuckDuckGo en WSL.
+sandbox de Linux, el servicio ni la disponibilidad de los buscadores en WSL.
 
 Documentación: [Chrome Headless](https://developer.chrome.com/docs/automation-and-testing/headless),
 [canales de navegador de Playwright](https://playwright.dev/python/docs/browsers).
