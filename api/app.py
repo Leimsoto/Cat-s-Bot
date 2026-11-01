@@ -106,10 +106,12 @@ def create_app(db=None, bot=None) -> FastAPI:
         autoroles,
         autoresponses,
         channels,
+        channel_settings,
         custom_commands,
         embeds,
         giveaways,
         moderation,
+        rag,
         radio,
         reports,
         schedules,
@@ -133,9 +135,11 @@ def create_app(db=None, bot=None) -> FastAPI:
     app.include_router(schedules.router)
     app.include_router(giveaways.router)
     app.include_router(autoroles.router)
+    app.include_router(rag.router)
     app.include_router(radio.router)
     app.include_router(embeds.router)
     app.include_router(channels.router)
+    app.include_router(channel_settings.router)
     app.include_router(voice_gen.router)
     app.include_router(autoresponses.router)
     app.include_router(custom_commands.router)

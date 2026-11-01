@@ -11,6 +11,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps import get_bot, require_guild_admin
+from api.discord_bridge import DiscordBridgeTimeout, DiscordBridgeUnavailable, run_on_bot_loop
 
 logger = logging.getLogger("API.emojis")
 router = APIRouter(prefix="/api/guilds", tags=["emojis"])
@@ -54,7 +55,14 @@ async def list_emojis(
     catbot = getattr(bot, "catbot", {}) or {}
     if catbot:
         try:
-            app_emojis = await bot.fetch_application_emojis()
+            app_emojis = await run_on_bot_loop(
+                bot,
+                lambda: bot.fetch_application_emojis(),
+                timeout=15,
+            )
+        except (DiscordBridgeUnavailable, DiscordBridgeTimeout) as exc:
+            logger.warning("No se pudieron consultar emojis de aplicación: %s", exc)
+            app_emojis = []
         except Exception as exc:
             logger.debug("fetch_application_emojis falló: %s", exc)
             app_emojis = []

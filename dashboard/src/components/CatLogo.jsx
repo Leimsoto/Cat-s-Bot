@@ -1,6 +1,6 @@
 /**
  * CatLogo — Brand mark (Cat's Bot).
- * Renders the new brand SVG logo.
+ * Renders the original cat artwork without modifying the source asset.
  *
  * Props:
  *   size      — px size of square box (default 40)
@@ -8,7 +8,7 @@
  *   className — additional className
  *   rounded   — apply rounded corners (default true)
  */
-import logoSvg from "../assets/logo.svg";
+const logoUrl = `${import.meta.env.BASE_URL}logo.png`;
 
 export default function CatLogo({
   size = 40,
@@ -17,7 +17,7 @@ export default function CatLogo({
   rounded = true}) {
   return (
     <img
-      src={logoSvg}
+      src={logoUrl}
       alt={ariaLabel}
       width={size}
       height={size}

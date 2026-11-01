@@ -1,3 +1,4 @@
+import { useSaveBar } from "../lib/SaveBarContext";
 /**
  * components/Schedules.jsx
  * ────────────────────────
@@ -77,12 +78,13 @@ function makeForm() {
   };
 }
 
-export default function Schedules({ selectedGuild, onToast }) {
+export default function Schedules({ selectedGuild, onToast, channelIds = null, channelOptions = null }) {
   const guildId = selectedGuild;
   const [schedules, setSchedules] = useState([]);
   const [limits, setLimits] = useState({ max_schedules: 10, min_interval: 600, max_interval: 2592000 });
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
+  const [initialForm, setInitialForm] = useState(null);
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState(null);
   const [form, setForm] = useState(makeForm());
@@ -115,7 +117,15 @@ export default function Schedules({ selectedGuild, onToast }) {
     return Array.from(set);
   }, []);
 
-  const startNew = () => { setForm(makeForm()); setEditing(true); };
+  const visibleSchedules = channelIds
+    ? schedules.filter((s) => channelIds.includes(String(s.channel_id)))
+    : schedules;
+
+  const startNew = () => {
+    const next = { ...makeForm(), channel_id: channelOptions?.[0]?.id || channelIds?.[0] || null };
+    setForm(next); setInitialForm(next);
+    setEditing(true);
+  };
 
   const startEdit = (s) => {
     let msg = normalizeMessage(EMPTY_MESSAGE);
@@ -131,7 +141,7 @@ export default function Schedules({ selectedGuild, onToast }) {
         if (Array.isArray(parsed)) weekdays = parsed.map((x) => Number(x));
       } catch { /* */ }
     }
-    setForm({
+    const next = {
       id: s.id,
       name: s.name,
       channel_id: s.channel_id ? String(s.channel_id) : null,
@@ -143,7 +153,8 @@ export default function Schedules({ selectedGuild, onToast }) {
       cron_weekdays: weekdays,
       timezone: s.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
       message: msg,
-    });
+    };
+    setForm(next); setInitialForm(next);
     setEditorTab(msg.enabled ? "embed-content" : "content");
     setEditing(true);
   };
@@ -250,6 +261,8 @@ export default function Schedules({ selectedGuild, onToast }) {
     }
   };
 
+  useSaveBar({ dirty: editing && JSON.stringify(form) !== JSON.stringify(initialForm), saving, onSave: save, onRevert: () => { setEditing(false); setForm(initialForm || makeForm()); } });
+
   if (loading) return <div className="loader">Cargando horarios…</div>;
 
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -266,7 +279,7 @@ export default function Schedules({ selectedGuild, onToast }) {
           </div>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
             <span style={{ padding: "6px 14px", borderRadius: 999, fontSize: "0.8rem", fontWeight: 700, background: "rgba(99,102,241,0.15)", border: "1px solid rgba(139,92,246,0.3)", color: "var(--accent)" }}>
-              {schedules.filter((s) => s.enabled).length} activos · {schedules.length}/{limits.max_schedules}
+              {visibleSchedules.filter((s) => s.enabled).length} activos · {schedules.length}/{limits.max_schedules} en el servidor
             </span>
             {!editing && (
               <button
@@ -301,7 +314,8 @@ export default function Schedules({ selectedGuild, onToast }) {
               <SearchableSelect
                 value={form.channel_id}
                 onChange={(v) => setF("channel_id", v ? String(v) : null)}
-                endpoint={`/api/guilds/${guildId}/channels?type=text`}
+                options={channelOptions}
+                endpoint={channelOptions ? null : `/api/guilds/${guildId}/channels?type=text`}
                 itemsKey="channels"
                 placeholder="Seleccionar canal…"
                 renderOption={(o) => <span># {o.name}</span>}
@@ -457,7 +471,7 @@ export default function Schedules({ selectedGuild, onToast }) {
         </div>
       )}
 
-      {schedules.length === 0 && !editing && (
+      {visibleSchedules.length === 0 && !editing && (
         <div className="glass-panel" style={{ padding: 48, textAlign: "center" }}>
           <Icon name="schedules" />
           <h3 style={{ margin: "12px 0 8px" }}>Sin horarios configurados</h3>
@@ -468,7 +482,7 @@ export default function Schedules({ selectedGuild, onToast }) {
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        {schedules.map((s) => {
+        {visibleSchedules.map((s) => {
           const enabled = !!Number(s.enabled);
           const mode = (s.schedule_mode || "interval").toLowerCase();
           const scheduleLabel = mode === "cron"

@@ -1,3 +1,4 @@
+import { useSaveBar } from "../lib/SaveBarContext";
 /**
  * components/Autoroles.jsx
  * ────────────────────────
@@ -155,6 +156,7 @@ export default function Autoroles({ selectedGuild, onToast }) {
     }
   };
 
+  useSaveBar({ dirty: Boolean(newJoinRoleId || panelMsgId || panelChannelId || panelMapping !== '{\n  "👍": 0\n}'), saving: adding || savingPanel, onRevert: () => { setNewJoinRoleId(null); setPanelMsgId(""); setPanelChannelId(null); setPanelMapping('{\n  "👍": 0\n}'); } });
   if (loading) return <div className="loader">Cargando autoroles…</div>;
 
   return (
@@ -191,8 +193,8 @@ export default function Autoroles({ selectedGuild, onToast }) {
               Cuando un usuario nuevo entre al servidor, se le asignarán todos los
               roles de esta lista. El rol del bot debe estar por encima.
             </p>
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <div style={{ flex: 1 }}>
+            <div className="inline-role-picker">
+              <div style={{ flex: "1 1 160px", minWidth: 0 }}>
                 <SearchableSelect
                   value={newJoinRoleId}
                   onChange={setNewJoinRoleId}
@@ -254,11 +256,13 @@ export default function Autoroles({ selectedGuild, onToast }) {
                           </p>
                         )}
                       </div>
-                      <button
-                        onClick={() => removeJoinRole(r.role_id)}
-                        className="btn-danger"
-                      >
-                        <Icon name="delete" /> Eliminar
+                       <button
+                         type="button"
+                         onClick={() => removeJoinRole(r.role_id)}
+                         className="btn-danger"
+                         aria-label={`Eliminar el autorol ${meta?.name || r.role_id}`}
+                       >
+                         <Icon name="delete" /> Eliminar
                       </button>
                     </div>
                   );
@@ -354,7 +358,7 @@ export default function Autoroles({ selectedGuild, onToast }) {
                         gap: 12,
                         flexDirection: "column"}}
                     >
-                      <div style={{ display: "flex", alignItems: "center", gap: 12, width: "100%" }}>
+                      <div className="autorole-panel-head">
                         <div
                           className="ov-activity-badge"
                           style={{
@@ -364,20 +368,22 @@ export default function Autoroles({ selectedGuild, onToast }) {
                         >
                           <Icon name="tags" />
                         </div>
-                        <div style={{ flex: 1 }}>
+                        <div className="autorole-panel-copy">
                           <strong>Mensaje #{p.message_id}</strong>
                           <p className="ov-subtitle" style={{ margin: 0, fontSize: "0.78rem" }}>
                             Canal: #{ch?.name || `ID:${p.channel_id}`}
                           </p>
                         </div>
                         <button
+                          type="button"
                           onClick={() => deletePanel(p.message_id)}
                           className="btn-danger"
+                          aria-label={`Eliminar el panel del mensaje ${p.message_id}`}
                         >
                           <Icon name="delete" /> Eliminar
                         </button>
                       </div>
-                      <div style={{ paddingLeft: 56, fontSize: "0.85rem", color: "var(--text-muted)" }}>
+                      <div className="autorole-panel-mapping">
                         {Object.entries(mapping).map(([emoji, rid]) => {
                           const role = roleNameById.get(String(rid));
                           return (

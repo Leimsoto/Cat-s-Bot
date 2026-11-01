@@ -1,3 +1,4 @@
+import { useSaveBar } from "../lib/SaveBarContext";
 /**
  * components/Giveaways.jsx
  * ────────────────────────
@@ -137,6 +138,8 @@ export default function Giveaways({ selectedGuild, onToast }) {
     }
   };
 
+  useSaveBar({ dirty: showCreate && JSON.stringify(form) !== JSON.stringify(EMPTY_FORM), saving: creating || busyId != null, onRevert: () => { setForm(EMPTY_FORM); setShowCreate(false); } });
+
   if (loading) return <div className="loader">Cargando sorteos…</div>;
 
   return (
@@ -261,7 +264,7 @@ export default function Giveaways({ selectedGuild, onToast }) {
           <p className="subtitle" style={{ margin: 0 }}>Crea uno con el botón de arriba.</p>
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(min(100%,320px),1fr))", gap: 16 }}>
           {filtered.map((g) => {
             const stColor = STATUS_COLOR[g.status] || "#7a9bb5";
             const isActive = g.status === "active";

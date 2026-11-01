@@ -1,349 +1,103 @@
-/**
- * components/Welcome.jsx
- * ──────────────────────
- * Hub unificado de Bienvenidas + Boosters + Invitaciones (merge Fase 12).
- *
- * Tabs:
- *   • Bienvenidas — canal + toggle. Embed se diseña con /configurar bienvenidas.
- *   • Boosters    — canal + GIF + toggle. Embed se diseña con /configurar boosters.
- *   • Invitaciones — canal de log + toggle + leaderboard top 20.
- *
- * Endpoints:
- *   GET  /api/guilds/{g}/welcome
- *   PATCH /api/guilds/{g}/welcome
- *   PATCH /api/guilds/{g}/welcome/boost
- *   PATCH /api/guilds/{g}/welcome/invites
- *   GET  /api/guilds/{g}/invites          (leaderboard enriquecido)
- */
-
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPatch } from "../lib/api";
 import SearchableSelect from "./ui/SearchableSelect";
 import { Icon } from "../lib/icons";
 import { useSaveBar } from "../lib/SaveBarContext";
 import MessageEditor, { normalizeMessage } from "./MessageEditor";
+import "./DashboardPanels.css";
 
-const TABS = [
-  { id: "welcome", label: "Bienvenidas", icon: "welcome" },
-  { id: "boost", label: "Boosters", icon: "giveaways" },
-  { id: "invites", label: "Invitaciones", icon: "invites" },
-];
+const TABS = [["welcome", "Bienvenidas", "welcome"], ["boost", "Boosters", "giveaways"], ["invites", "Invitaciones", "invites"]];
+const ENDPOINTS = { welcome: "welcome", boost: "welcome/boost", invites: "welcome/invites" };
+const parseMessage = (raw, fallback) => {
+  if (raw) { try { return normalizeMessage(typeof raw === "string" ? JSON.parse(raw) : raw); } catch { /* Un mensaje heredado inválido conserva una propuesta editable. */ } }
+  return normalizeMessage(fallback);
+};
 
-export default function Welcome({ selectedGuild: guildId, onToast }) {
+export default function Welcome({ selectedGuild, onToast }) {
+  return <WelcomeSettings key={selectedGuild} guildId={selectedGuild} onToast={onToast} />;
+}
+
+function WelcomeSettings({ guildId, onToast }) {
   const [tab, setTab] = useState("welcome");
   const [data, setData] = useState(null);
-  const [leaderboard, setLeaderboard] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [dirty, setDirty] = useState(false);
+  const [changed, setChanged] = useState({});
   const [saving, setSaving] = useState(false);
-
-  const toast = (kind, msg) => onToast?.({ type: kind, message: msg });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [leaderboard, setLeaderboard] = useState([]);
+  const [inviteStatus, setInviteStatus] = useState("idle");
+  const [inviteError, setInviteError] = useState("");
+  const [wTab, setWTab] = useState("content");
+  const [bTab, setBTab] = useState("embed-content");
+  const requestVersion = useRef(0);
+  const inviteVersion = useRef(0);
+  const dirty = Object.keys(changed).length > 0;
+  const toast = (type, message) => onToast?.({ type, message });
 
   const load = useCallback(async () => {
-    if (!guildId) return;
-    setLoading(true);
-    setDirty(false);
+    const version = ++requestVersion.current;
+    setLoading(true);setError("");
     try {
-      const wData = await apiGet(`/api/guilds/${guildId}/welcome`);
-      setData(wData);
-      // Leaderboard sólo cuando se mire la pestaña, pero pre-cargamos en background
-      const iData = await apiGet(`/api/guilds/${guildId}/invites`, { cache: false }).catch(() => ({ leaderboard: [] }));
-      setLeaderboard(iData?.leaderboard || []);
-    } catch (e) {
-      toast("error", e?.message || "Error cargando configuración");
-    } finally {
-      setLoading(false);
-    }
-  // eslint-disable-next-line
+      const result = await apiGet(`/api/guilds/${guildId}/welcome`, { cache: false });
+      if (version !== requestVersion.current) return;
+      setData(result);setChanged({});
+    } catch (failure) { if (version === requestVersion.current) setError(failure.message || "No pudimos cargar los mensajes del servidor."); }
+    finally { if (version === requestVersion.current) setLoading(false); }
   }, [guildId]);
+  useEffect(() => { load(); return () => { requestVersion.current += 1; inviteVersion.current += 1; }; }, [load]);
 
-  useEffect(() => { load(); }, [load]);
-
-  const save = async () => {
-    if (!data) return;
-    setSaving(true);
+  const loadInvites = useCallback(async () => {
+    const version = ++inviteVersion.current;
+    setInviteStatus("loading");setInviteError("");
     try {
-      if (tab === "welcome") {
-        await apiPatch(`/api/guilds/${guildId}/welcome`, data.welcome || {});
-      } else if (tab === "boost") {
-        await apiPatch(`/api/guilds/${guildId}/welcome/boost`, data.boost || {});
-      } else if (tab === "invites") {
-        await apiPatch(`/api/guilds/${guildId}/welcome/invites`, data.invites || {});
-      }
-      setDirty(false);
-      toast("success", "Configuración guardada");
-    } catch (e) {
-      toast("error", e?.message || "Error guardando");
-    } finally {
-      setSaving(false);
-    }
+      const result = await apiGet(`/api/guilds/${guildId}/invites`, { cache: false });
+      if (version !== inviteVersion.current) return;
+      setLeaderboard(result?.leaderboard || []);setInviteStatus("loaded");
+    } catch (failure) { if (version === inviteVersion.current) { setInviteError(failure.message || "No pudimos cargar las invitaciones.");setInviteStatus("error"); } }
+  }, [guildId]);
+  const changeTab = (next) => {
+    setTab(next);
+    if (next === "invites" && inviteStatus === "idle") loadInvites();
   };
 
-  const setW = (k, v) => { setData((p) => ({ ...p, welcome: { ...(p?.welcome || {}), [k]: v } })); setDirty(true); };
-  const setB = (k, v) => { setData((p) => ({ ...p, boost: { ...(p?.boost || {}), [k]: v } })); setDirty(true); };
-  const setI = (k, v) => { setData((p) => ({ ...p, invites: { ...(p?.invites || {}), [k]: v } })); setDirty(true); };
-
-  const welcomeMessage = useMemo(() => {
-    const raw = data?.welcome?.embed_data;
-    if (raw) {
-      try { return normalizeMessage(typeof raw === "string" ? JSON.parse(raw) : raw); } catch { /* */ }
-    }
-    return normalizeMessage({
-      enabled: true,
-      embed: {
-        title: "👋 ¡Bienvenido a {server}!",
-        description: "{user}, eres el miembro número **{count}**.",
-        color: "#5865f2",
-      },
-    });
-  }, [data?.welcome?.embed_data]);
-
-  const boostMessage = useMemo(() => {
-    const raw = data?.boost?.embed_data;
-    if (raw) {
-      try { return normalizeMessage(typeof raw === "string" ? JSON.parse(raw) : raw); } catch { /* */ }
-    }
-    return normalizeMessage({
-      enabled: true,
-      embed: {
-        title: "💜 ¡Nuevo Booster!",
-        description: "Gracias {user} por mejorar nuestro servidor.",
-        color: "#f47fff",
-      },
-    });
-  }, [data?.boost?.embed_data]);
-
-  const [wTab, setWTab] = useState("embed-content");
-  const [bTab, setBTab] = useState("embed-content");
-
+  const setSection = (section, key, value) => {
+    setData((previous) => ({ ...previous, [section]: { ...previous[section], [key]: value } }));
+    setChanged((previous) => ({ ...previous, [section]: true }));setError("");
+  };
+  const save = async () => {
+    if (!data || saving || !dirty) return;
+    const version = requestVersion.current;
+    const sections = Object.keys(changed);
+    const snapshot = data;
+    setSaving(true);setError("");
+    const results = await Promise.allSettled(sections.map((section) => apiPatch(`/api/guilds/${guildId}/${ENDPOINTS[section]}`, snapshot[section] || {})));
+    if (version !== requestVersion.current) return;
+    const failed = sections.filter((_, index) => results[index].status === "rejected");
+    setChanged((previous) => Object.fromEntries(Object.entries(previous).filter(([section]) => !sections.includes(section) || failed.includes(section))));
+    setSaving(false);
+    if (failed.length) {
+      const names = failed.map((section) => TABS.find(([id]) => id === section)[1]).join(", ");
+      const reasons = results.filter((result) => result.status === "rejected").map((result) => result.reason?.message).filter(Boolean).join(" · ");
+      const message = `Quedan cambios sin guardar en ${names}.${reasons ? ` ${reasons}` : " Vuelve a intentarlo."}`;
+      setError(message);toast("error",message);
+    } else toast("success","Mensajes guardados en todas las secciones modificadas.");
+  };
   useSaveBar({ dirty, saving, onSave: save, onRevert: load });
 
-  if (loading) return <div className="loader">Cargando bienvenidas…</div>;
+  if (loading) return <div className="cr-page cr-loading" role="status"><div className="loading-spinner" /><p>Cargando mensajes de tu comunidad…</p></div>;
+  if (!data) return <div className="cr-page cr-empty" role="alert"><Icon name="warning" /><h2>No pudimos cargar las bienvenidas</h2><p>{error}</p><button className="btn-secondary" onClick={load}>Reintentar</button></div>;
 
-  return (
-    <div className="ov-container animate-fade-in">
-      <div className="section-header">
-        <h2 className="glow-text" style={{ margin: 0 }}>Mensajes — Bienvenidas, Boosters e Invitaciones</h2>
-        <p className="subtitle" style={{ margin: "4px 0 0" }}>
-          Configura los mensajes de entrada, agradecimiento a boosters y el canal de log de invitaciones.
-        </p>
-      </div>
+  const welcomeMessage = parseMessage(data.welcome?.embed_data, { enabled: true, embed: { title: "¡Bienvenido a {server}!", description: "{user}, eres el miembro número **{count}**.", color: "#b58ce0" } });
+  const boostMessage = parseMessage(data.boost?.embed_data, { enabled: true, embed: { title: "¡Nuevo Booster!", description: "Gracias {user} por mejorar nuestro servidor.", color: "#b58ce0" } });
+  const channelField = (section, label) => <div className="cr-field"><label>{label}</label><SearchableSelect ariaLabel={label} value={data[section]?.channel_id || null} onChange={(value) => setSection(section, "channel_id", value ? String(value) : null)} endpoint={`/api/guilds/${guildId}/channels?type=text`} itemsKey="channels" placeholder="Seleccionar canal…" renderOption={(option) => <span>#{option.name}</span>} renderSelected={(option) => <span>#{option.name}</span>} /></div>;
 
-      <div className="tab-bar">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            className={`tab-btn ${tab === t.id ? "active" : ""}`}
-            onClick={() => { setTab(t.id); setDirty(false); }}
-          >
-            <Icon name={t.icon} /> {t.label}
-          </button>
-        ))}
-      </div>
-
-      {tab === "welcome" && data?.welcome && (
-        <div className="glass-panel mod-section" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
-          <div className="config-item inline-check">
-            <div>
-              <div style={{ fontWeight: 800 }}>Sistema de Bienvenidas</div>
-              <div className="hint">Envía un mensaje cuando alguien se une al servidor</div>
-            </div>
-            <label className="toggle-switch">
-              <input
-                type="checkbox"
-                checked={!!data.welcome.enabled}
-                onChange={(e) => setW("enabled", e.target.checked ? 1 : 0)}
-              />
-              <span className="slider" />
-            </label>
-          </div>
-          <div className="form-field">
-            <label>Canal de bienvenidas</label>
-            <SearchableSelect
-              value={data.welcome.channel_id || null}
-              onChange={(v) => setW("channel_id", v ? String(v) : null)}
-              endpoint={`/api/guilds/${guildId}/channels?type=text`}
-              itemsKey="channels"
-              placeholder="Seleccionar canal…"
-              renderOption={(o) => <span>#{o.name}</span>}
-              renderSelected={(o) => <span>#{o.name}</span>}
-            />
-          </div>
-          <MessageEditor
-            value={welcomeMessage}
-            onChange={(next) => setW("embed_data", JSON.stringify(next))}
-            mode="both"
-            tab={wTab}
-            setTab={setWTab}
-            variablesHelp={"Variables: {user}, {username}, {server}, {count}."}
-            placeholders={{
-              title: "👋 ¡Bienvenido a {server}!",
-              description: "{user}, eres el miembro número **{count}**.",
-              content: "Mensaje opcional fuera del embed (ej. {user})",
-            }}
-            showJson
-          />
-        </div>
-      )}
-
-      {tab === "boost" && data?.boost && (
-        <div className="glass-panel mod-section" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
-          <div className="config-item inline-check">
-            <div>
-              <div style={{ fontWeight: 800 }}>Agradecimiento a Boosters</div>
-              <div className="hint">Envía un mensaje cuando alguien hace boost</div>
-            </div>
-            <label className="toggle-switch">
-              <input
-                type="checkbox"
-                checked={!!data.boost.enabled}
-                onChange={(e) => setB("enabled", e.target.checked ? 1 : 0)}
-              />
-              <span className="slider" />
-            </label>
-          </div>
-          <div className="form-field">
-            <label>Canal de boosters</label>
-            <SearchableSelect
-              value={data.boost.channel_id || null}
-              onChange={(v) => setB("channel_id", v ? String(v) : null)}
-              endpoint={`/api/guilds/${guildId}/channels?type=text`}
-              itemsKey="channels"
-              placeholder="Seleccionar canal…"
-              renderOption={(o) => <span>#{o.name}</span>}
-              renderSelected={(o) => <span>#{o.name}</span>}
-            />
-          </div>
-          <div className="form-field">
-            <label>URL del GIF animado</label>
-            <input
-              type="text"
-              placeholder="https://media.giphy.com/…"
-              value={data.boost.gif_url || ""}
-              onChange={(e) => setB("gif_url", e.target.value)}
-            />
-            <span className="hint">Se mostrará en el mensaje de agradecimiento</span>
-          </div>
-          <MessageEditor
-            value={boostMessage}
-            onChange={(next) => setB("embed_data", JSON.stringify(next))}
-            mode="both"
-            tab={bTab}
-            setTab={setBTab}
-            variablesHelp={"Variables: {user}, {username}, {server}. El GIF de arriba sobreescribe la imagen del embed."}
-            placeholders={{
-              title: "💜 ¡Nuevo Booster!",
-              description: "Gracias {user} por mejorar nuestro servidor.",
-              content: "Mensaje opcional fuera del embed",
-            }}
-            showJson
-          />
-        </div>
-      )}
-
-      {tab === "invites" && data?.invites && (
-        <>
-          <div className="glass-panel mod-section" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16, marginBottom: 16 }}>
-            <div className="config-item inline-check">
-              <div>
-                <div style={{ fontWeight: 800 }}>Log de invitaciones</div>
-                <div className="hint">Registra quién invitó a cada nuevo miembro y las salidas</div>
-              </div>
-              <label className="toggle-switch">
-                <input
-                  type="checkbox"
-                  checked={!!data.invites.enabled}
-                  onChange={(e) => setI("enabled", e.target.checked ? 1 : 0)}
-                />
-                <span className="slider" />
-              </label>
-            </div>
-            <div className="form-field">
-              <label>Canal de log</label>
-              <SearchableSelect
-                value={data.invites.channel_id || null}
-                onChange={(v) => setI("channel_id", v ? String(v) : null)}
-                endpoint={`/api/guilds/${guildId}/channels?type=text`}
-                itemsKey="channels"
-                placeholder="Seleccionar canal…"
-                renderOption={(o) => <span>#{o.name}</span>}
-                renderSelected={(o) => <span>#{o.name}</span>}
-              />
-              <span className="hint">Recomendado: #invitaciones</span>
-            </div>
-          </div>
-
-          <div className="glass-panel" style={{ overflow: "hidden" }}>
-            <div style={{ padding: "18px 20px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <h3 style={{ margin: 0, fontSize: "1rem" }}>
-                <Icon name="giveaways" /> Top invitadores
-              </h3>
-              <button className="btn-icon" onClick={load} title="Recargar">
-                <Icon name="refresh" />
-              </button>
-            </div>
-            {leaderboard.length === 0 ? (
-              <div className="no-results"><p>Aún no hay datos de invitaciones registrados.</p></div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column" }}>
-                {leaderboard.map((entry, i) => (
-                  <div
-                    key={entry.user_id}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 14,
-                      padding: "12px 20px",
-                      borderBottom: i < leaderboard.length - 1 ? "1px solid var(--border)" : "none"}}
-                  >
-                    <div
-                      style={{
-                        width: 32, height: 32, borderRadius: "50%", flexShrink: 0,
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        fontWeight: 900, fontSize: "0.85rem",
-                        background:
-                          i === 0 ? "rgba(251,191,36,0.15)" :
-                          i === 1 ? "rgba(156,163,175,0.15)" :
-                          i === 2 ? "rgba(180,107,55,0.15)" :
-                          "rgba(255,255,255,0.04)",
-                        color:
-                          i === 0 ? "#fbbf24" :
-                          i === 1 ? "#9ca3af" :
-                          i === 2 ? "#b46b37" :
-                          "var(--muted)"}}
-                    >
-                      #{i + 1}
-                    </div>
-                    {entry.avatar ? (
-                      <img src={entry.avatar} alt="" style={{ width: 36, height: 36, borderRadius: "50%", flexShrink: 0 }} />
-                    ) : (
-                      <div
-                        style={{
-                          width: 36, height: 36, borderRadius: "50%", flexShrink: 0,
-                          background: "var(--accent-light)",
-                          display: "flex", alignItems: "center", justifyContent: "center",
-                          color: "var(--accent)", fontWeight: 700}}
-                      >
-                        {entry.username?.[0]?.toUpperCase() || "?"}
-                      </div>
-                    )}
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 700, fontSize: "0.9rem" }}>{entry.username}</div>
-                      <div style={{ fontSize: "0.72rem", color: "var(--muted)" }}>ID: {entry.user_id}</div>
-                    </div>
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontWeight: 900, fontSize: "1.1rem", color: "var(--accent)" }}>{entry.total}</div>
-                      <div style={{ fontSize: "0.68rem", color: "var(--muted)" }}>invitaciones</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </>
-      )}
-
-
-    </div>
-  );
+  return <div className="cr-page cr-welcome"><header className="cr-heading"><span className="cr-heading-icon"><Icon name="welcome" /></span><div><span className="cr-eyebrow">Comunidad</span><h1>Bienvenidas</h1><p>El primer mensaje también habla de tu comunidad.</p></div></header>
+    <nav className="cr-tabs" aria-label="Mensajes de comunidad">{TABS.map(([id, label, icon]) => <button key={id} type="button" aria-pressed={tab === id} onClick={() => changeTab(id)}><Icon name={icon} />{label}{changed[id] && <span className="cr-unsaved-dot" aria-label="Cambios sin guardar" />}</button>)}</nav>
+    {error && <p className="cr-inline-error" role="alert">{error}</p>}
+    <fieldset className="cr-fieldset" disabled={saving}>
+      {tab === "welcome" && <><div className="cr-status-strip"><div><h2>Recibir a nuevos miembros</h2><p>Publica un saludo cuando alguien se une al servidor.</p></div><label className="cr-switch"><input type="checkbox" aria-label="Activar bienvenidas" checked={!!data.welcome?.enabled} onChange={(event) => setSection("welcome","enabled",event.target.checked ? 1 : 0)} /><span aria-hidden="true" /></label></div>{channelField("welcome","Canal de bienvenida")}<MessageEditor value={welcomeMessage} onChange={(next) => setSection("welcome","embed_data",JSON.stringify(next))} mode="both" tab={wTab} setTab={setWTab} variablesHelp="Variables: {user}, {username}, {server}, {count}." placeholders={{title:"¡Bienvenido a {server}!",description:"{user}, eres el miembro número **{count}**.",content:"Mensaje opcional fuera del embed"}} showJson /></>}
+      {tab === "boost" && <><div className="cr-status-strip"><div><h2>Agradecer a tus boosters</h2><p>Un mensaje para quienes mejoran el servidor.</p></div><label className="cr-switch"><input type="checkbox" aria-label="Activar agradecimiento a boosters" checked={!!data.boost?.enabled} onChange={(event) => setSection("boost","enabled",event.target.checked ? 1 : 0)} /><span aria-hidden="true" /></label></div><div className="cr-form-grid">{channelField("boost","Canal de boosters")}<label className="cr-field"><span>URL del GIF animado</span><input type="url" value={data.boost?.gif_url || ""} placeholder="https://media.giphy.com/…" onChange={(event) => setSection("boost","gif_url",event.target.value)} /><small>Se mostrará en el mensaje de agradecimiento.</small></label></div><MessageEditor value={boostMessage} onChange={(next) => setSection("boost","embed_data",JSON.stringify(next))} mode="both" tab={bTab} setTab={setBTab} variablesHelp="Variables: {user}, {username}, {server}. El GIF de arriba reemplaza la imagen del embed." showJson /></>}
+      {tab === "invites" && <><div className="cr-status-strip"><div><h2>Registro de invitaciones</h2><p>Registra quién invitó a cada miembro y sus salidas.</p></div><label className="cr-switch"><input type="checkbox" aria-label="Activar registro de invitaciones" checked={!!data.invites?.enabled} onChange={(event) => setSection("invites","enabled",event.target.checked ? 1 : 0)} /><span aria-hidden="true" /></label></div>{channelField("invites","Canal de registro de invitaciones")}<section className="cr-invites"><header className="cr-section-heading"><h2>Top invitadores</h2><button type="button" className="btn-secondary" disabled={inviteStatus === "loading"} onClick={loadInvites}><Icon name="refresh" />Actualizar</button></header>{inviteStatus === "loading" && <p role="status">Cargando invitaciones…</p>}{inviteError && <p className="cr-inline-error" role="alert">{inviteError}</p>}{inviteStatus === "loaded" && !leaderboard.length && <p className="cr-empty-inline">Aún no hay invitaciones registradas.</p>}{leaderboard.map((entry,index) => <div className="cr-invite-row" key={entry.user_id}><span className="cr-rank">{index+1}</span>{entry.avatar ? <img src={entry.avatar} alt="" /> : <span className="cr-row-icon"><Icon name="user" /></span>}<div><h3>{entry.username}</h3><small>{entry.user_id}</small></div><strong>{entry.total}<small>invitaciones</small></strong></div>)}</section></>}
+    </fieldset>
+  </div>;
 }

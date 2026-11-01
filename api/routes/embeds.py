@@ -9,8 +9,10 @@ POST   /api/guild/{guild_id}/embeds          → Guarda embed
 DELETE /api/guild/{guild_id}/embeds/{id}     → Elimina embed
 """
 
-from fastapi import APIRouter, Depends, HTTPException
-from api.deps import get_db, require_guild_admin
+import discord
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from api.deps import get_bot, get_db, get_live_guild_member, require_guild_admin
 from pydantic import BaseModel
 import json
 
@@ -67,7 +69,7 @@ async def create_embed(
         # Si ya existe uno con ese nombre, eliminarlo primero (upsert)
         existing = db.get_saved_embed_by_name(guild_id, body.name)
         if existing:
-            db.delete_saved_embed(existing["id"])
+            db.delete_saved_embed(existing["id"], guild_id)
 
         db.save_embed(guild_id, creator_id, body.name, body.embed_data)
     except Exception as e:
@@ -83,7 +85,7 @@ async def delete_embed(
     _user=Depends(require_guild_admin),
 ):
     """Elimina una plantilla de embed por su ID."""
-    db.delete_saved_embed(embed_id)
+    db.delete_saved_embed(embed_id, guild_id)
     return {"status": "ok", "message": "Embed eliminado."}
 
 
@@ -106,7 +108,9 @@ _send_router = APIRouter(prefix="/api/guilds/{guild_id}/embeds", tags=["embeds"]
 async def send_embed_to_channel(
     guild_id: int,
     body: SendEmbedBody,
+    request: Request,
     db=Depends(get_db),
+    bot=Depends(get_bot),
     _user=Depends(require_guild_admin),
 ):
     """Envía un embed directamente a un canal de Discord usando el bot token.
@@ -115,6 +119,65 @@ async def send_embed_to_channel(
     bot_token = _os.getenv("TOKEN", "")
     if not bot_token:
         raise HTTPException(503, "Bot TOKEN no configurado")
+
+    if bot is None:
+        raise HTTPException(503, "Bot no conectado")
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        raise HTTPException(404, "Servidor no encontrado en el bot")
+    try:
+        channel_id = int(body.channel_id)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "channel_id invalido")
+    get_channel = getattr(guild, "get_channel_or_thread", guild.get_channel)
+    channel = get_channel(channel_id)
+    if channel is None:
+        raise HTTPException(404, "Canal no encontrado en este servidor")
+
+    webhook_mode = bool(body.webhook_name or body.webhook_avatar)
+    is_thread = isinstance(channel, discord.Thread)
+    if webhook_mode and is_thread:
+        raise HTTPException(400, "El modo webhook no admite threads")
+    send_permission = "send_messages_in_threads" if is_thread else "send_messages"
+    thread_state_permissions = (
+        ("manage_threads",) if is_thread and getattr(channel, "locked", False) else ()
+    )
+
+    if not _user.get("is_master_admin"):
+        resolved = await get_live_guild_member(request, guild_id, _user)
+        member = resolved.get("member")
+        if member is None:
+            raise HTTPException(403, "No se pudieron comprobar tus permisos en ese canal")
+        caller_permissions = channel.permissions_for(member)
+        caller_required = (
+            ("view_channel", "manage_webhooks")
+            if webhook_mode
+            else (
+                "view_channel",
+                send_permission,
+                "embed_links",
+                *thread_state_permissions,
+            )
+        )
+        if not all(getattr(caller_permissions, permission, False) for permission in caller_required):
+            raise HTTPException(403, "No tienes permisos suficientes en ese canal")
+
+    bot_member = getattr(guild, "me", None)
+    if bot_member is None:
+        raise HTTPException(503, "No se pudieron comprobar los permisos del bot")
+    permissions = channel.permissions_for(bot_member)
+    required = (
+        ("view_channel", "manage_webhooks")
+        if webhook_mode
+        else (
+            "view_channel",
+            send_permission,
+            "embed_links",
+            *thread_state_permissions,
+        )
+    )
+    if not all(getattr(permissions, permission, False) for permission in required):
+        raise HTTPException(403, "El bot no tiene permisos suficientes en ese canal")
 
     color_str = body.embed.get("color", "#6366f1").lstrip("#")
     try:
@@ -143,10 +206,10 @@ async def send_embed_to_channel(
     if footer_data: discord_embed["footer"] = footer_data
 
     async with _httpx.AsyncClient(timeout=10) as client:
-        if body.webhook_name or body.webhook_avatar:
+        if webhook_mode:
             # Crear webhook temporal y enviar
             wh_r = await client.post(
-                f"https://discord.com/api/v10/channels/{body.channel_id}/webhooks",
+                f"https://discord.com/api/v10/channels/{channel_id}/webhooks",
                 headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
                 json={"name": body.webhook_name or "Bot ES"},
             )
@@ -170,7 +233,7 @@ async def send_embed_to_channel(
             return {"status": "ok", "message_id": msg_r.json().get("id") if msg_r.content else None}
         else:
             r = await client.post(
-                f"https://discord.com/api/v10/channels/{body.channel_id}/messages",
+                f"https://discord.com/api/v10/channels/{channel_id}/messages",
                 headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
                 json={"embeds": [discord_embed]},
             )

@@ -118,7 +118,8 @@ class Logging(commands.Cog):
         self._last_log[guild.id] = now
 
         try:
-            await channel.send(embed=embed)
+            from cogs._managed_messages import send_managed
+            await send_managed(self.bot, guild.id, "serverutils", channel.send, embed=embed)
         except discord.Forbidden:
             logger.warning("Sin permisos para enviar serverlog en %s", guild.name)
             self._enqueue_serverlog_outbox(guild, embed, event_name, resolved_ch_id, "missing_send_messages")

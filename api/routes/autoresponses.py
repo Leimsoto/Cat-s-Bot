@@ -15,7 +15,7 @@ from api.snowflakes import coerce_optional_snowflake, stringify_rows
 
 router = APIRouter(prefix="/api/guilds/{guild_id}/autoresponses", tags=["autoresponses"])
 
-MATCH_TYPES = {"contains", "exact", "word", "starts_with", "regex"}
+MATCH_TYPES = {"contains", "exact", "word", "starts_with"}
 
 
 @router.get("")
@@ -47,7 +47,7 @@ async def create_autoresponse(
       response (str)           texto plano legacy (puede estar vacío si hay response_data)
       response_data (str|None) JSON serializado del MessageEditor
       channel_id (int|None)
-      match_type (str)         "contains" | "exact" | "word" | "starts_with" | "regex"
+      match_type (str)         "contains" | "exact" | "word" | "starts_with"
       case_sensitive (bool)
       enabled (bool)
     """
@@ -110,7 +110,7 @@ async def update_autoresponse(
         raise HTTPException(400, "Sin campos válidos para actualizar")
 
     try:
-        db.update_autoresponse(ar_id, **payload)
+        db.update_autoresponse(ar_id, guild_id, **payload)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"status": "ok"}
@@ -124,5 +124,5 @@ async def delete_autoresponse(
     _user=Depends(require_guild_admin),
 ):
     """Eliminar una auto-respuesta."""
-    db.remove_autoresponse(ar_id)
+    db.remove_autoresponse(ar_id, guild_id)
     return {"status": "ok"}

@@ -30,6 +30,7 @@ GET  /api/guilds/{id}/members               → autocomplete de miembros (search
 GET  /api/guilds/{id}/music                 → estado reproducción
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -37,8 +38,28 @@ from datetime import datetime, timedelta, timezone
 import discord
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from api.deps import get_bot, get_current_user, get_db, require_guild_admin
+from api.deps import (
+    get_bot,
+    get_current_user,
+    get_db,
+    get_guild_admin_status,
+    get_live_guild_member,
+    require_guild_admin,
+)
 from api.snowflakes import coerce_snowflake, stringify_fields, stringify_rows
+from api.discord_bridge import DiscordBridgeTimeout, DiscordBridgeUnavailable, run_on_bot_loop
+from api.routes.radio import RadioConfigUpdate, patch_radio_config as apply_radio_config
+from llm_moderation_config import (
+    EndpointConfirmationRequired, allowed_endpoint_hosts, parse_endpoint_url,
+    ENDPOINT_CONFIG_FIELDS, public_automod_config, resolve_endpoint_addresses, validate_llm_config,
+)
+from cogs._conversation import provider_for, current_channel_members
+from cogs._managed_messages import CATEGORIES, category_settings
+from cogs._moderation_history import IdentityResolver, moderation_details, record_extra
+from cogs._role_safety import (
+    delegated_moderation_role_ids,
+    safe_for_automatic_assignment,
+)
 
 logger = logging.getLogger("API.guild")
 
@@ -56,6 +77,164 @@ def _coerce_optional_snowflake(value, field_name: str) -> int | None:
         return int(str(value))
     except (TypeError, ValueError):
         raise HTTPException(400, f"{field_name} inválido")
+
+
+def _normalize_role_id_list(value, field_name: str) -> list[int]:
+    if value in (None, ""):
+        raw_values = []
+    elif isinstance(value, str):
+        try:
+            raw_values = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, f"{field_name} debe ser una lista JSON") from exc
+    else:
+        raw_values = value
+    if not isinstance(raw_values, list):
+        raise HTTPException(400, f"{field_name} debe ser una lista")
+
+    role_ids = []
+    for index, raw_role_id in enumerate(raw_values):
+        role_id = _coerce_optional_snowflake(
+            raw_role_id,
+            f"{field_name}[{index}]",
+        )
+        if role_id is None:
+            raise HTTPException(400, f"{field_name}[{index}] inválido")
+        role_ids.append(role_id)
+    return role_ids
+
+
+async def _validate_privileged_role_updates(
+    request: Request,
+    guild_id: int,
+    updates: dict,
+    bot,
+    user: dict,
+    current_values: dict | None = None,
+) -> dict:
+    """Normaliza cambios delegados y descarta valores sensibles sin cambios."""
+    role_updates = {}
+    for key in (
+        "mod_role_id",
+        "staff_role_id",
+        "users_role_id",
+        "channels_role_id",
+        "embed_role_id",
+        "ai_role_id",
+    ):
+        if key not in updates:
+            continue
+        role_id = _coerce_optional_snowflake(updates[key], key)
+        if current_values is not None:
+            try:
+                current_role_id = _coerce_optional_snowflake(
+                    current_values.get(key),
+                    key,
+                )
+            except HTTPException:
+                current_role_id = object()
+            if role_id == current_role_id:
+                updates.pop(key, None)
+                continue
+        role_updates[key] = role_id
+    await _authorize_delegated_role_updates(
+        request,
+        guild_id,
+        role_updates,
+        bot,
+        user,
+    )
+    return role_updates
+
+
+async def _authorize_delegated_role_updates(
+    request: Request,
+    guild_id: int,
+    role_updates: dict,
+    bot,
+    user: dict,
+) -> None:
+    """Exige owner/admin y comprueba contra roles y miembro del bot actuales."""
+    if not role_updates:
+        return
+
+    guild = bot.get_guild(guild_id) if bot is not None else None
+    if guild is None or getattr(bot, "user", None) is None:
+        raise HTTPException(503, "No se pudo verificar la jerarquía de roles")
+
+    actor = None
+    if not user.get("is_master_admin"):
+        resolved = await get_live_guild_member(request, guild_id, user)
+        actor = resolved.get("member")
+        if actor is None:
+            raise HTTPException(403, "No se pudieron verificar tus permisos actuales")
+
+    async def fetch_current_context():
+        return await asyncio.gather(
+            guild.fetch_member(bot.user.id),
+            guild.fetch_roles(),
+            bot.fetch_guild(guild_id),
+        )
+
+    try:
+        bot_member, fresh_roles, live_guild = await run_on_bot_loop(
+            bot,
+            fetch_current_context,
+            timeout=10,
+        )
+    except (DiscordBridgeUnavailable, DiscordBridgeTimeout) as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(409, "No se pudo verificar la jerarquía actual") from exc
+
+    if (
+        getattr(bot_member, "id", None) != int(bot.user.id)
+        or getattr(getattr(bot_member, "guild", None), "id", None) != guild_id
+        or getattr(live_guild, "id", None) != guild_id
+    ):
+        raise HTTPException(409, "La identidad actual del bot no coincide")
+    owner_id = int(live_guild.owner_id)
+
+    roles_by_id = {int(role.id): role for role in fresh_roles}
+
+    def current_role_state(member):
+        role_ids = {guild_id}
+        role_ids.update(int(role_id) for role_id in getattr(member, "_roles", ()))
+        if any(role_id not in roles_by_id for role_id in role_ids):
+            raise HTTPException(409, "No se pudo verificar la jerarquía completa")
+        roles = [roles_by_id[role_id] for role_id in role_ids]
+        permissions_value = 0
+        for role in roles:
+            permissions_value |= int(role.permissions.value)
+        return discord.Permissions(permissions_value), max(roles)
+
+    _, bot_top_role = current_role_state(bot_member)
+    if actor is not None:
+        actor_permissions, actor_top_role = current_role_state(actor)
+        if actor.id != owner_id and not actor_permissions.administrator:
+            raise HTTPException(
+                403,
+                "Solo el dueño o un administrador puede cambiar roles delegados.",
+            )
+    else:
+        actor_top_role = None
+
+    for key, raw_role_ids in role_updates.items():
+        role_ids = raw_role_ids if isinstance(raw_role_ids, list) else [raw_role_ids]
+        for role_id in role_ids:
+            if role_id is None:
+                continue
+            role = roles_by_id.get(int(role_id))
+            if role is None or role.is_default() or role.managed:
+                raise HTTPException(400, f"{key} debe referirse a un rol asignable")
+            if role >= bot_top_role:
+                raise HTTPException(400, f"{key} debe estar debajo del rol del bot")
+            if (
+                actor is not None
+                and actor.id != owner_id
+                and role >= actor_top_role
+            ):
+                raise HTTPException(403, f"{key} debe estar debajo de tu rol")
 
 
 def _is_messageable_log_channel(channel) -> bool:
@@ -136,14 +315,15 @@ async def list_guilds(
     if not user_guilds:
         return {"guilds": [], "user": _format_user(user)}
 
-    # Usuarios normales: filtrar sus guilds por los que el bot conoce en memoria
+    # El JWT solo sirve como índice. La autorización real se confirma contra el
+    # miembro actual para que una revocación sea efectiva también en esta lista.
     result = []
     for g in user_guilds:
         guild_id = int(g["id"])
-        # Si el bot está disponible, chequeamos en memoria (sin API call)
         if bot is not None:
+            live_status = await get_guild_admin_status(request, guild_id, user)
             discord_guild = bot.get_guild(guild_id)
-            if discord_guild is not None:
+            if discord_guild is not None and live_status.get("allowed"):
                 result.append(
                     {
                         "id": str(guild_id),
@@ -154,16 +334,8 @@ async def list_guilds(
                         "onlineCount": None,
                     }
                 )
-        else:
-            # Fallback: el bot no está disponible (startup), devolver info del usuario
-            result.append(
-                {
-                    "id": str(guild_id),
-                    "name": g["name"],
-                    "icon": _icon_url(str(guild_id), g.get("icon")),
-                    "has_bot": False,
-                }
-            )
+        # Sin bot no existe una fuente viva para confirmar una autorización
+        # posiblemente revocada; el guild se omite en vez de confiar en el JWT.
 
     return {"guilds": result, "user": _format_user(user)}
 
@@ -175,12 +347,13 @@ async def list_guilds(
 
 @router.get("/{guild_id}/channels")
 async def get_guild_channels(
+    request: Request,
     guild_id: int,
     search: str = "",
     type: str = "",
     limit: int = 200,
     bot=Depends(get_bot),
-    _user=Depends(require_guild_admin),
+    user=Depends(require_guild_admin),
 ):
     """
     Lista canales del servidor leyendo directamente del bot.
@@ -197,6 +370,13 @@ async def get_guild_channels(
     if guild is None:
         raise HTTPException(404, "Servidor no encontrado en el bot")
 
+    member = None
+    if not user.get("is_master_admin"):
+        resolved = await get_live_guild_member(request, guild_id, user)
+        member = resolved.get("member")
+        if member is None:
+            raise HTTPException(403, "No se pudieron verificar tus permisos actuales")
+
     limit = max(1, min(int(limit), 500))
     type_filter = {t.strip() for t in type.split(",") if t.strip()} if type else set()
     search_lower = search.strip().lower()
@@ -205,6 +385,10 @@ async def get_guild_channels(
     for ch in sorted(
         guild.channels, key=lambda c: c.position if hasattr(c, "position") else 0
     ):
+        if member is not None and not getattr(
+            ch.permissions_for(member), "view_channel", False
+        ):
+            continue
         ch_type = str(ch.type).split(".")[-1]
         if type_filter and ch_type not in type_filter:
             continue
@@ -231,11 +415,12 @@ async def get_guild_channels(
 
 @router.get("/{guild_id}/categories")
 async def get_guild_categories(
+    request: Request,
     guild_id: int,
     search: str = "",
     limit: int = 200,
     bot=Depends(get_bot),
-    _user=Depends(require_guild_admin),
+    user=Depends(require_guild_admin),
 ):
     """Atajo: lista solo las categorías del servidor (CategoryChannel)."""
     if bot is None:
@@ -244,11 +429,22 @@ async def get_guild_categories(
     if guild is None:
         raise HTTPException(404, "Servidor no encontrado en el bot")
 
+    member = None
+    if not user.get("is_master_admin"):
+        resolved = await get_live_guild_member(request, guild_id, user)
+        member = resolved.get("member")
+        if member is None:
+            raise HTTPException(403, "No se pudieron verificar tus permisos actuales")
+
     limit = max(1, min(int(limit), 500))
     search_lower = search.strip().lower()
 
     categories = []
     for cat in sorted(guild.categories, key=lambda c: c.position):
+        if member is not None and not getattr(
+            cat.permissions_for(member), "view_channel", False
+        ):
+            continue
         if search_lower and search_lower not in cat.name.lower():
             continue
         categories.append(
@@ -387,17 +583,10 @@ async def get_guild_overview(
             if hasattr(db, "get_mod_actions")
             else []
         )
-        tickets = (
-            db.get_tickets_by_guild(guild_id)
-            if hasattr(db, "get_tickets_by_guild")
-            else []
-        )
-        open_t = [t for t in tickets if t.get("status") in ("OPEN", "abierto")]
-        members = (
-            db.get_member_count(guild_id) if hasattr(db, "get_member_count") else 0
-        )
+        open_ticket_count = db.count_open_tickets_by_guild(guild_id)
+        members = 0
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         charts = []
         for i in range(7):
             day_start = now - timedelta(days=6 - i)
@@ -465,7 +654,7 @@ async def get_guild_overview(
                 "automodTriggers": 0,
                 "securityAlerts": 0,
                 "moderationActions": len(mod_cases),
-                "openTickets": len(open_t),
+                "openTickets": open_ticket_count,
                 "memberCount": member_count,
             },
             "charts": charts,
@@ -500,11 +689,32 @@ async def get_guild_config_new(
 async def patch_guild_config(
     guild_id: int,
     body: dict,
+    request: Request,
     db=Depends(get_db),
-    _user=Depends(require_guild_admin),
+    bot=Depends(get_bot),
+    user=Depends(require_guild_admin),
 ):
     if "guild" in body:
-        db.set_config(guild_id, **body["guild"])
+        payload = body["guild"]
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "guild must be an object")
+        payload = dict(payload)
+        if "guild_id" in payload:
+            raise HTTPException(400, "guild_id is not editable")
+        payload.update(
+            await _validate_privileged_role_updates(
+                request,
+                guild_id,
+                payload,
+                bot,
+                user,
+                db.get_config(guild_id) or {},
+            )
+        )
+        try:
+            db.set_config(guild_id, **payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
     return {"status": "ok"}
 
 
@@ -517,22 +727,122 @@ async def patch_guild_config(
 async def get_ia_config(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
 ):
-    return stringify_fields(db.get_ai_config(guild_id) or {}, ("guild_id", "ai_channel_id", "ai_role_id"))
+    return _public_ia_config(db, guild_id)
+
+
+@router.get("/{guild_id}/ai-messages")
+async def get_ai_message_settings(guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)):
+    settings = category_settings(db, guild_id)
+    return {"categories": {key: settings.get(key, False) for key in CATEGORIES}, "labels": CATEGORIES}
+
+
+@router.patch("/{guild_id}/ai-messages")
+async def patch_ai_message_settings(guild_id: int, body: dict, db=Depends(get_db), _user=Depends(require_guild_admin)):
+    values = body.get("categories")
+    if set(body) != {"categories"} or not isinstance(values, dict):
+        raise HTTPException(400, "categories debe ser un objeto de booleanos")
+    if set(values) - set(CATEGORIES) or any(type(value) is not bool for value in values.values()):
+        raise HTTPException(400, "Categoría desconocida o valor no booleano")
+    settings = {**category_settings(db, guild_id), **values}
+    db.set_server_config(guild_id, ai_message_categories=json.dumps(settings))
+    return {"categories": settings, "labels": CATEGORIES}
+
+
+def _public_ia_config(db, guild_id):
+    cfg = db.get_ai_config(guild_id) or {}
+    llm = db.get_automod_config(guild_id).get("rules", {}).get("llm", {}) if hasattr(db, "get_automod_config") else {}
+    provider = provider_for(db, guild_id, cfg) if hasattr(db, "get_automod_config") else "gemini"
+    return stringify_fields({**cfg, "provider": provider,
+        "endpoint_configured": bool(llm.get("endpoint_url") and llm.get("model")),
+        "effective_model": llm.get("model", "") if provider == "strata" else cfg.get("ai_model", "")},
+        ("guild_id", "ai_channel_id", "ai_role_id"))
 
 
 @router.patch("/{guild_id}/ia")
 async def patch_ia_config(
     guild_id: int,
     body: dict,
+    request: Request,
     db=Depends(get_db),
-    _user=Depends(require_guild_admin),
+    bot=Depends(get_bot),
+    user=Depends(require_guild_admin),
 ):
     payload = dict(body or {})
+    if "guild_id" in payload:
+        raise HTTPException(400, "guild_id is not editable")
     for field in ("ai_channel_id", "ai_role_id"):
         if field in payload:
             payload[field] = _coerce_optional_snowflake(payload[field], field)
-    db.set_ai_config(guild_id, **payload)
-    return stringify_fields(db.get_ai_config(guild_id) or payload, ("guild_id", "ai_channel_id", "ai_role_id"))
+    payload.update(
+        await _validate_privileged_role_updates(
+            request,
+            guild_id,
+            payload,
+            bot,
+            user,
+            db.get_ai_config(guild_id) or {},
+        )
+    )
+    try:
+        db.set_ai_config(guild_id, **payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return _public_ia_config(db, guild_id)
+
+
+async def _ai_memory_target(request, guild_id, scope, channel_id, bot, user):
+    if scope not in {"global", "chat"}:
+        raise HTTPException(400, "scope debe ser global o chat")
+    if not user.get("is_master_admin"):
+        status = await get_guild_admin_status(request, guild_id, user)
+        if not (status.get("is_owner") or status.get("administrator")):
+            raise HTTPException(403, "Los recuerdos compartidos requieren Administrator o ser dueño del servidor")
+    if scope == "global":
+        return 0
+    channel_id = coerce_snowflake(channel_id, "channel_id")
+    guild = bot.get_guild(guild_id) if bot else None
+    if guild is None:
+        raise HTTPException(503, "Servidor no disponible")
+    try:
+        async def current_target():
+            return await current_channel_members(guild, channel_id, () if user.get("is_master_admin") else (int(user["user_id"]),))
+        channel, members = await run_on_bot_loop(bot, current_target, timeout=10)
+    except Exception as exc:
+        raise HTTPException(400, "No se pudo verificar el canal de este servidor") from exc
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)) or channel.guild.id != guild_id:
+        raise HTTPException(400, "Selecciona un canal de texto o hilo de este servidor")
+    if members:
+        permissions = channel.permissions_for(members[0])
+        if not permissions.view_channel or not permissions.read_message_history:
+            raise HTTPException(403, "No tienes acceso al historial de este canal")
+    return channel_id
+
+
+@router.get("/{guild_id}/ia/memory")
+async def get_ia_memory(guild_id: int, request: Request, scope: str = "global", channel_id: str | None = None,
+                        db=Depends(get_db), bot=Depends(get_bot), user=Depends(require_guild_admin)):
+    owner = await _ai_memory_target(request, guild_id, scope, channel_id, bot, user)
+    rows = db.get_ai_memories(guild_id, scope, owner)
+    return {"scope": scope, "channel_id": str(owner) if scope == "chat" else None,
+            "content": rows[0]["content"] if rows else ""}
+
+
+@router.put("/{guild_id}/ia/memory")
+async def put_ia_memory(guild_id: int, request: Request, body: dict, scope: str = "global", channel_id: str | None = None,
+                        db=Depends(get_db), bot=Depends(get_bot), user=Depends(require_guild_admin)):
+    owner = await _ai_memory_target(request, guild_id, scope, channel_id, bot, user)
+    if set(body) != {"content"} or not isinstance(body.get("content"), str) or len(body["content"]) > 2000:
+        raise HTTPException(400, "content debe ser texto de hasta 2000 caracteres")
+    db.set_ai_memory(guild_id, scope, owner, owner, body["content"])
+    return {"scope": scope, "channel_id": str(owner) if scope == "chat" else None, "content": body["content"].strip()}
+
+
+@router.delete("/{guild_id}/ia/memory")
+async def delete_ia_memory(guild_id: int, request: Request, scope: str = "global", channel_id: str | None = None,
+                           db=Depends(get_db), bot=Depends(get_bot), user=Depends(require_guild_admin)):
+    owner = await _ai_memory_target(request, guild_id, scope, channel_id, bot, user)
+    db.clear_ai_memory(guild_id, scope, owner)
+    return {"ok": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -563,6 +873,9 @@ async def get_moderation_config(
         "warn_mute_enabled": cfg.get("warn_mute_enabled", 1),
         "warn_mute_duration": cfg.get("warn_mute_duration", 600),
         "warn_embed_config": cfg.get("warn_embed_config"),
+        "message_role_enabled": cfg.get("message_role_enabled", 0),
+        "message_role_id": _serialize_snowflake(cfg.get("message_role_id")),
+        "message_role_notice": cfg.get("message_role_notice", "Necesitas el rol requerido para hablar en este servidor."),
     }
 
 
@@ -570,8 +883,10 @@ async def get_moderation_config(
 async def patch_moderation_config(
     guild_id: int,
     body: dict,
+    request: Request,
     db=Depends(get_db),
-    _user=Depends(require_guild_admin),
+    bot=Depends(get_bot),
+    user=Depends(require_guild_admin),
 ):
     """
     Actualiza la configuración de moderación desde el dashboard.
@@ -595,6 +910,9 @@ async def patch_moderation_config(
         "warn_mute_enabled",
         "warn_mute_duration",
         "warn_embed_config",
+        "message_role_enabled",
+        "message_role_id",
+        "message_role_notice",
     }
     server_keys = {
         "mod_role_id",
@@ -602,9 +920,11 @@ async def patch_moderation_config(
         "modlog_enabled",
     }
 
-    id_keys = {"mute_role_id", "staff_role_id", "mod_role_id", "modlog_channel"}
+    id_keys = {"mute_role_id", "staff_role_id", "mod_role_id", "modlog_channel", "message_role_id"}
 
     def normalize_value(key, value):
+        if key == "message_role_id":
+            return _coerce_optional_snowflake(value, key)
         if key in id_keys:
             if value in (None, "", 0, "0"):
                 return None
@@ -625,11 +945,80 @@ async def patch_moderation_config(
         if k in server_keys
     }
 
+    if {"message_role_enabled", "message_role_id", "message_role_notice"} & config_payload.keys():
+        current_gate = db.get_config(guild_id) or {}
+        gate = {**current_gate, **config_payload}
+        enabled = gate.get("message_role_enabled", 0)
+        if not isinstance(enabled, (bool, int)) or enabled not in (0, 1):
+            raise HTTPException(400, "message_role_enabled debe ser 0 o 1")
+        if "message_role_enabled" in config_payload:
+            config_payload["message_role_enabled"] = int(enabled)
+        notice = gate.get("message_role_notice", "Necesitas el rol requerido para hablar en este servidor.")
+        if not isinstance(notice, str):
+            raise HTTPException(400, "El texto del aviso debe ser texto")
+        try:
+            notice_length = len(notice.encode("utf-16-le")) // 2
+        except UnicodeEncodeError:
+            raise HTTPException(400, "El texto del aviso contiene caracteres inválidos")
+        if notice_length > 1975 or (enabled and not notice.strip()):
+            raise HTTPException(400, "El aviso debe tener texto y un máximo de 1975 caracteres")
+        role_id = gate.get("message_role_id")
+        if enabled and not role_id:
+            raise HTTPException(400, "Selecciona un rol requerido para hablar")
+        if role_id is not None and (enabled or role_id != current_gate.get("message_role_id")):
+            if bot is None:
+                raise HTTPException(503, "Bot no disponible para comprobar el rol")
+            guild = bot.get_guild(guild_id)
+            if guild is None:
+                raise HTTPException(404, "Servidor no encontrado en el bot")
+            role = guild.get_role(role_id)
+            if role is None or role_id == guild_id:
+                raise HTTPException(400, "El rol requerido debe existir en este servidor y no puede ser @everyone")
+
     # staff_role_id existía en ambas tablas; los cogs lo leen desde
     # server_config, así que lo persistimos también ahí para que el dashboard
     # se aplique inmediatamente al bot.
     if "staff_role_id" in config_payload:
         server_payload["staff_role_id"] = config_payload["staff_role_id"]
+
+    privileged_role_keys = {
+        key for key in ("mod_role_id", "staff_role_id") if key in body
+    }
+    if privileged_role_keys:
+        current_config = db.get_config(guild_id) or {}
+        current_server = db.get_server_config(guild_id) or {}
+        current_roles = {
+            "mod_role_id": current_server.get("mod_role_id"),
+            "staff_role_id": current_server.get("staff_role_id")
+            or current_config.get("staff_role_id"),
+        }
+        role_updates = {
+            key: (
+                config_payload.get(key)
+                if key == "staff_role_id"
+                else server_payload.get(key)
+            )
+            for key in privileged_role_keys
+        }
+        normalized_roles = await _validate_privileged_role_updates(
+            request,
+            guild_id,
+            role_updates,
+            bot,
+            user,
+            current_roles,
+        )
+        unchanged_roles = privileged_role_keys - set(normalized_roles)
+        if "mod_role_id" in unchanged_roles:
+            server_payload.pop("mod_role_id", None)
+        if "staff_role_id" in unchanged_roles:
+            config_payload.pop("staff_role_id", None)
+            server_payload.pop("staff_role_id", None)
+        if "mod_role_id" in normalized_roles:
+            server_payload["mod_role_id"] = normalized_roles["mod_role_id"]
+        if "staff_role_id" in normalized_roles:
+            config_payload["staff_role_id"] = normalized_roles["staff_role_id"]
+            server_payload["staff_role_id"] = normalized_roles["staff_role_id"]
 
     if config_payload:
         db.set_config(guild_id, **config_payload)
@@ -656,6 +1045,9 @@ async def patch_moderation_config(
             "warn_mute_enabled": cfg.get("warn_mute_enabled", 1),
             "warn_mute_duration": cfg.get("warn_mute_duration", 600),
             "warn_embed_config": cfg.get("warn_embed_config"),
+            "message_role_enabled": cfg.get("message_role_enabled", 0),
+            "message_role_id": _serialize_snowflake(cfg.get("message_role_id")),
+            "message_role_notice": cfg.get("message_role_notice", "Necesitas el rol requerido para hablar en este servidor."),
         },
     }
 
@@ -663,9 +1055,10 @@ async def patch_moderation_config(
 @router.post("/{guild_id}/moderation/mute-role")
 async def create_mute_role(
     guild_id: int,
+    request: Request,
     db=Depends(get_db),
     bot=Depends(get_bot),
-    _user=Depends(require_guild_admin),
+    user=Depends(require_guild_admin),
 ):
     """Crea (o adopta) un rol de mute para el servidor.
 
@@ -683,7 +1076,23 @@ async def create_mute_role(
     if cog is None or not hasattr(cog, "_ensure_mute_role"):
         raise HTTPException(503, "Cog de moderación no disponible")
 
-    role = await cog._ensure_mute_role(guild)
+    if not user.get("is_master_admin"):
+        live_status = user.get("_live_guild_admin_status") or {}
+        if not live_status.get("allowed"):
+            raise HTTPException(403, "No se pudieron verificar tus permisos actuales")
+        if not (
+            live_status.get("is_owner")
+            or live_status.get("administrator")
+            or live_status.get("manage_roles")
+        ):
+            raise HTTPException(403, "Necesitas Gestionar roles para crear el rol de mute")
+
+    try:
+        role = await run_on_bot_loop(bot, lambda: cog._ensure_mute_role(guild), timeout=30)
+    except DiscordBridgeUnavailable as exc:
+        raise HTTPException(503, str(exc))
+    except DiscordBridgeTimeout as exc:
+        raise HTTPException(504, str(exc))
     if role is None:
         raise HTTPException(
             403,
@@ -703,12 +1112,65 @@ async def create_mute_role(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+async def _validated_llm_update(db, guild_id, value):
+    try:
+        if not isinstance(value, dict):
+            raise ValueError("llm debe ser un objeto")
+        current = db.get_automod_config(guild_id)["rules"].get("llm") or {}
+        endpoint = value.get("endpoint_url", current.get("endpoint_url", ""))
+        addresses = None
+        if endpoint:
+            parsed = parse_endpoint_url(endpoint)
+            changed = endpoint.strip() != (current.get("endpoint_url") or "").strip()
+            approval_changed = ("private_endpoint_confirmed_url" in value
+                                and value["private_endpoint_confirmed_url"] != current.get("private_endpoint_confirmed_url", ""))
+            if (changed or approval_changed) and parsed.hostname.lower() not in allowed_endpoint_hosts():
+                addresses = await resolve_endpoint_addresses(endpoint.strip())
+        validated = validate_llm_config(value, current, resolved_addresses=addresses)
+        if value.get("api_key_clear"):
+            validated["api_key_clear"] = True
+        return validated
+    except EndpointConfirmationRequired as exc:
+        raise HTTPException(409, {"code": exc.code, "endpoint_url": exc.endpoint_url,
+                                  "required_confirmations": exc.required_confirmations, "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/{guild_id}/endpoints")
+async def get_endpoints_config(guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)):
+    llm = public_automod_config(db.get_automod_config(guild_id))["rules"]["llm"]
+    return {"llm": {key: value for key, value in llm.items()
+                    if key in ENDPOINT_CONFIG_FIELDS or key == "api_key_configured"},
+            "integrations": [
+                {"id": "gemini", "label": "Gemini", "managed_by": "ia/key"},
+                {"id": "discord_webhook", "label": "Webhook de respuestas Discord", "managed_by": "ia"}]}
+
+
+@router.patch("/{guild_id}/endpoints")
+async def patch_endpoints_config(guild_id: int, body: dict, db=Depends(get_db), _user=Depends(require_guild_admin)):
+    if set(body) != {"llm"} or not isinstance(body["llm"], dict):
+        raise HTTPException(400, "llm debe ser el único objeto de configuración")
+    if set(body["llm"]) - (ENDPOINT_CONFIG_FIELDS | {"api_key_configured", "api_key_clear"}):
+        raise HTTPException(400, "Campo de conexión desconocido")
+    validated = await _validated_llm_update(db, guild_id, body["llm"])
+    connection = {key: validated[key] for key in body["llm"] if key in ENDPOINT_CONFIG_FIELDS}
+    for field in ("insecure_http_confirmed_url", "private_endpoint_confirmed_url"):
+        connection[field] = validated[field]
+    if body["llm"].get("api_key") in (None, ""):
+        connection.pop("api_key", None)
+    if body["llm"].get("api_key_clear"):
+        connection["api_key_clear"] = True
+    db.set_automod_config(guild_id, rules={"llm": connection})
+    return await get_endpoints_config(guild_id, db, _user)
+
+
 @router.get("/{guild_id}/automod")
 async def get_automod_config(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
 ):
     """Devuelve la configuración completa de automoderación."""
-    return db.get_automod_config(guild_id)
+    return public_automod_config(db.get_automod_config(guild_id))
 
 
 @router.patch("/{guild_id}/automod")
@@ -720,8 +1182,12 @@ async def patch_automod_config(
 ):
     enabled = body.get("enabled")
     rules = body.get("rules")
+    if rules is not None and not isinstance(rules, dict):
+        raise HTTPException(400, "rules debe ser un objeto")
+    if rules is not None and "llm" in rules:
+        rules = {**rules, "llm": await _validated_llm_update(db, guild_id, rules["llm"])}
     db.set_automod_config(guild_id, enabled=enabled, rules=rules)
-    return {"status": "ok", "config": db.get_automod_config(guild_id)}
+    return {"status": "ok", "config": public_automod_config(db.get_automod_config(guild_id))}
 
 
 @router.get("/{guild_id}/automod/log")
@@ -730,8 +1196,19 @@ async def get_automod_log(
     limit: int = 50,
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
+    bot=Depends(get_bot),
 ):
-    return db.get_automod_log(guild_id, limit=min(limit, 200))
+    rows = db.get_automod_log(guild_id, limit=max(1, min(limit, 200)))
+    resolver = IdentityResolver(bot, guild_id)
+    result = []
+    for row in rows:
+        item = stringify_fields(row, ("guild_id", "user_id"))
+        item.update(moderation_details(row, automod=True))
+        target = await resolver.resolve(item.get("user_id"), record_extra(row).get("target_user"))
+        item.update(target_user=target, target_display=target["display"],
+                    target_tag=target["tag"], target_avatar_url=target["avatar_url"])
+        result.append(item)
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -739,14 +1216,37 @@ async def get_automod_log(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _level_rewards_payload(rows: list[dict], guild_id: int, bot) -> list[dict]:
+    """Añade identidad legible del rol sin dejar de exponer el snowflake seguro."""
+    payload = stringify_rows(rows or [], ("guild_id", "role_id"))
+    guild = bot.get_guild(guild_id) if bot is not None and hasattr(bot, "get_guild") else None
+    for item in payload:
+        role = None
+        role_id = item.get("role_id")
+        if guild is not None and role_id:
+            try:
+                role = guild.get_role(int(role_id))
+            except (TypeError, ValueError):
+                role = None
+        item["role_name"] = getattr(role, "name", None)
+        color = getattr(role, "color", None)
+        color_value = getattr(color, "value", 0) if color is not None else 0
+        item["role_color"] = f"#{int(color_value):06x}" if color_value else None
+        item["role_exists"] = role is not None if guild is not None else None
+    return payload
+
+
 @router.get("/{guild_id}/levels")
 async def get_levels_config(
-    guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
+    guild_id: int,
+    db=Depends(get_db),
+    bot=Depends(get_bot),
+    _user=Depends(require_guild_admin),
 ):
     cfg = db.get_xp_config(guild_id) or {}
     cfg = stringify_fields(cfg, ("guild_id", "announcement_channel_id"))
     rewards = db.get_level_rewards(guild_id) or []
-    return {"config": cfg, "rewards": stringify_rows(rewards, ("guild_id", "role_id"))}
+    return {"config": cfg, "rewards": _level_rewards_payload(rewards, guild_id, bot)}
 
 
 @router.patch("/{guild_id}/levels")
@@ -793,9 +1293,12 @@ async def patch_levels_config(
 
 @router.get("/{guild_id}/levels/rewards")
 async def get_level_rewards(
-    guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
+    guild_id: int,
+    db=Depends(get_db),
+    bot=Depends(get_bot),
+    _user=Depends(require_guild_admin),
 ):
-    return {"rewards": stringify_rows(db.get_level_rewards(guild_id) or [], ("guild_id", "role_id"))}
+    return {"rewards": _level_rewards_payload(db.get_level_rewards(guild_id) or [], guild_id, bot)}
 
 
 @router.post("/{guild_id}/levels/rewards")
@@ -803,12 +1306,25 @@ async def add_level_reward(
     guild_id: int,
     body: dict,
     db=Depends(get_db),
+    bot=Depends(get_bot),
     _user=Depends(require_guild_admin),
 ):
     nivel = int(body.get("level", 0))
     role_id = coerce_snowflake(body.get("role_id"), "role_id")
     if nivel < 1 or role_id < 1:
         raise HTTPException(400, "nivel y role_id son requeridos y deben ser > 0")
+    guild = bot.get_guild(guild_id) if bot is not None else None
+    role = guild.get_role(role_id) if guild is not None else None
+    forbidden_role_ids = delegated_moderation_role_ids(db, guild_id)
+    if guild is None or not safe_for_automatic_assignment(
+        role,
+        guild.me,
+        forbidden_role_ids=forbidden_role_ids,
+    ):
+        raise HTTPException(
+            400,
+            "El rol de recompensa debe estar bajo el bot y no conceder permisos administrativos.",
+        )
     db.set_level_reward(guild_id, nivel, role_id)
     return {"status": "ok", "level": nivel, "role_id": str(role_id)}
 
@@ -845,8 +1361,10 @@ async def get_tickets_config(
 async def patch_tickets_config(
     guild_id: int,
     body: dict,
+    request: Request,
     db=Depends(get_db),
-    _user=Depends(require_guild_admin),
+    bot=Depends(get_bot),
+    user=Depends(require_guild_admin),
 ):
     """
     Actualiza la configuración de tickets.
@@ -875,6 +1393,30 @@ async def patch_tickets_config(
     for field in ("panel_channel_id", "category_id", "log_channel_id"):
         if field in filtered:
             filtered[field] = _coerce_optional_snowflake(filtered[field], field)
+    delegated_roles = {}
+    current_ticket_config = db.get_ticket_config(guild_id) or {}
+    for field in ("allowed_roles", "immune_roles"):
+        if field in filtered:
+            role_ids = _normalize_role_id_list(filtered[field], field)
+            try:
+                current_role_ids = _normalize_role_id_list(
+                    current_ticket_config.get(field),
+                    field,
+                )
+            except HTTPException:
+                current_role_ids = None
+            if role_ids == current_role_ids:
+                filtered.pop(field)
+            else:
+                delegated_roles[field] = role_ids
+                filtered[field] = json.dumps(role_ids)
+    await _authorize_delegated_role_updates(
+        request,
+        guild_id,
+        delegated_roles,
+        bot,
+        user,
+    )
     if filtered:
         db.set_ticket_config(guild_id, **filtered)
     return {
@@ -888,9 +1430,10 @@ async def patch_tickets_config(
 async def send_ticket_panel(
     guild_id: int,
     body: dict,
+    request: Request,
     bot=Depends(get_bot),
     db=Depends(get_db),
-    _user=Depends(require_guild_admin),
+    user=Depends(require_guild_admin),
 ):
     """Envía el panel de tickets a un canal usando el bot."""
     if bot is None:
@@ -901,10 +1444,45 @@ async def send_ticket_panel(
     guild = bot.get_guild(guild_id)
     if guild is None:
         raise HTTPException(404, "Servidor no encontrado")
+    channel = guild.get_channel(channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        raise HTTPException(400, "El panel solo puede enviarse a un canal de texto")
+
+    if not user.get("is_master_admin"):
+        resolved = await get_live_guild_member(request, guild_id, user)
+        member = resolved.get("member")
+        if member is None:
+            raise HTTPException(403, "No se pudieron verificar tus permisos actuales")
+        caller_permissions = channel.permissions_for(member)
+        if not all(
+            getattr(caller_permissions, permission, False)
+            for permission in ("view_channel", "send_messages", "embed_links")
+        ):
+            raise HTTPException(403, "No tienes permisos suficientes en ese canal")
+
+    bot_member = guild.me
+    if bot_member is None:
+        raise HTTPException(503, "No se pudieron verificar los permisos del bot")
+    bot_permissions = channel.permissions_for(bot_member)
+    if not all(
+        getattr(bot_permissions, permission, False)
+        for permission in ("view_channel", "send_messages", "embed_links")
+    ):
+        raise HTTPException(403, "El bot no tiene permisos suficientes en ese canal")
+
     tickets_cog = bot.get_cog("Tickets")
     if tickets_cog is None:
         raise HTTPException(503, "Módulo de tickets no disponible")
-    ok, msg = await tickets_cog.send_panel_to_channel(guild, channel_id)
+    try:
+        ok, msg = await run_on_bot_loop(
+            bot,
+            lambda: tickets_cog.send_panel_to_channel(guild, channel_id),
+            timeout=30,
+        )
+    except DiscordBridgeUnavailable as exc:
+        raise HTTPException(503, str(exc))
+    except DiscordBridgeTimeout as exc:
+        raise HTTPException(504, str(exc))
     if not ok:
         raise HTTPException(400, msg)
     return {"status": "ok", "message": msg}
@@ -914,8 +1492,10 @@ async def send_ticket_panel(
 async def add_ticket_category(
     guild_id: int,
     body: dict,
+    request: Request,
     db=Depends(get_db),
-    _user=Depends(require_guild_admin),
+    bot=Depends(get_bot),
+    user=Depends(require_guild_admin),
 ):
     nombre = body.get("name", "").strip()
     emoji = body.get("emoji", "")
@@ -926,6 +1506,20 @@ async def add_ticket_category(
     welcome_data = body.get("welcome_embed_json") or body.get("welcome_embed_data")
     if isinstance(welcome_data, dict):
         welcome_data = json.dumps(welcome_data, ensure_ascii=False)
+
+    staff_role_id = _coerce_optional_snowflake(
+        body.get("staff_role_id"),
+        "staff_role_id",
+    )
+    if staff_role_id is not None:
+        normalized_roles = await _validate_privileged_role_updates(
+            request,
+            guild_id,
+            {"staff_role_id": staff_role_id},
+            bot,
+            user,
+        )
+        staff_role_id = normalized_roles["staff_role_id"]
 
     db.add_ticket_category(
         guild_id,
@@ -940,7 +1534,7 @@ async def add_ticket_category(
         welcome_data,
         description=body.get("description"),
         welcome_embed_template_key=body.get("welcome_embed_template_key"),
-        staff_role_id=_coerce_optional_snowflake(body.get("staff_role_id"), "staff_role_id"),
+        staff_role_id=staff_role_id,
     )
     return {"status": "ok"}
 
@@ -952,12 +1546,9 @@ async def delete_ticket_category(
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
 ):
-    """
-    Elimina una categoría. Antes se llamaba a `delete_ticket_category` con dos
-    argumentos pero la firma del manager solo acepta el id → TypeError.
-    """
+    """Elimina una categoría únicamente dentro del guild de la ruta."""
     if hasattr(db, "delete_ticket_category"):
-        db.delete_ticket_category(cat_id)
+        db.delete_ticket_category(cat_id, guild_id)
     return {"status": "ok"}
 
 
@@ -970,23 +1561,22 @@ async def delete_ticket_category(
 async def get_radio_config(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
 ):
-    cfg = db.get_radio_config(guild_id) if hasattr(db, "get_radio_config") else {}
+    cfg = db.get_lofi_config(guild_id)
     return stringify_fields(cfg or {}, ("guild_id", "channel_id"))
 
 
 @router.patch("/{guild_id}/radio")
 async def patch_radio_config(
     guild_id: int,
-    body: dict,
+    body: RadioConfigUpdate,
+    request: Request,
     db=Depends(get_db),
+    bot=Depends(get_bot),
     _user=Depends(require_guild_admin),
 ):
-    if hasattr(db, "set_radio_config"):
-        if "channel_id" in body:
-            body = {**body, "channel_id": _coerce_optional_snowflake(body.get("channel_id"), "channel_id")}
-        db.set_radio_config(guild_id, **body)
-    cfg = db.get_radio_config(guild_id) if hasattr(db, "get_radio_config") else {}
-    return {"status": "ok", "config": stringify_fields(cfg or {}, ("guild_id", "channel_id"))}
+    result = await apply_radio_config(guild_id, body, request, db, bot, _user)
+    cfg = db.get_lofi_config(guild_id)
+    return {**result, "config": stringify_fields(cfg or {}, ("guild_id", "channel_id"))}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -998,7 +1588,7 @@ async def patch_radio_config(
 async def get_guild_music(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
 ):
-    radio_cfg = db.get_radio_config(guild_id) if hasattr(db, "get_radio_config") else {}
+    radio_cfg = stringify_fields(db.get_lofi_config(guild_id), ("guild_id", "channel_id"))
     return {"nowPlaying": None, "recentTracks": [], "radioConfig": radio_cfg}
 
 
@@ -1065,21 +1655,62 @@ async def get_guild_config_legacy(
 async def update_guild_config_legacy(
     guild_id: int,
     body: dict,
+    request: Request,
     db=Depends(get_db),
-    _user=Depends(require_guild_admin),
+    bot=Depends(get_bot),
+    user=Depends(require_guild_admin),
 ):
-    updated = []
-    for section, method in [
-        ("guild_config", "set_config"),
-        ("server_config", "set_server_config"),
-        ("ai_config", "set_ai_config"),
-        ("welcome_config", "set_welcome_config"),
-        ("boost_config", "set_boost_config"),
-        ("suggestions_config", "set_suggestions_config"),
+    prepared = []
+    for section, method, getter in [
+        ("guild_config", "set_config", "get_config"),
+        ("server_config", "set_server_config", "get_server_config"),
+        ("ai_config", "set_ai_config", "get_ai_config"),
+        ("welcome_config", "set_welcome_config", "get_welcome_config"),
+        ("boost_config", "set_boost_config", "get_boost_config"),
+        ("suggestions_config", "set_suggestions_config", "get_suggestions_config"),
     ]:
         if section in body and hasattr(db, method):
-            getattr(db, method)(guild_id, **body[section])
-            updated.append(section)
+            payload = body[section]
+            if not isinstance(payload, dict):
+                raise HTTPException(400, f"{section} must be an object")
+            payload = dict(payload)
+            if "guild_id" in payload:
+                raise HTTPException(400, "guild_id is not editable")
+            has_delegated_role = any(
+                key in payload
+                for key in (
+                    "mod_role_id",
+                    "staff_role_id",
+                    "users_role_id",
+                    "channels_role_id",
+                    "embed_role_id",
+                    "ai_role_id",
+                )
+            )
+            current_values = (
+                getattr(db, getter)(guild_id) or {}
+                if has_delegated_role
+                else None
+            )
+            payload.update(
+                await _validate_privileged_role_updates(
+                    request,
+                    guild_id,
+                    payload,
+                    bot,
+                    user,
+                    current_values,
+                )
+            )
+            prepared.append((section, method, payload))
+
+    updated = []
+    for section, method, payload in prepared:
+        try:
+            getattr(db, method)(guild_id, **payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        updated.append(section)
     return {"status": "ok", "updated": updated}
 
 
@@ -1094,95 +1725,13 @@ async def get_guild_stats_legacy(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# /api/guilds/{id}/schedules  — Mensajes Programados desde dashboard
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@router.get("/{guild_id}/schedules")
-async def get_schedules(
-    guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
-):
-    schedules = db.get_schedules(guild_id) if hasattr(db, "get_schedules") else []
-    return {"schedules": stringify_rows(schedules, ("guild_id", "channel_id", "creator_id"))}
-
-
-@router.post("/{guild_id}/schedules")
-async def create_schedule(
-    guild_id: int,
-    body: dict,
-    db=Depends(get_db),
-    user=Depends(require_guild_admin),
-):
-    name = body.get("name", "").strip()
-    channel = coerce_snowflake(body.get("channel_id"), "channel_id")
-    content = body.get("content", "").strip()
-    interval = int(body.get("interval_seconds", 3600))
-    creator = int(user.get("user_id", 0))
-
-    if not name:
-        raise HTTPException(400, "name requerido")
-    if not channel:
-        raise HTTPException(400, "channel_id requerido")
-    if not content:
-        raise HTTPException(400, "content requerido")
-    if interval < 60:
-        raise HTTPException(400, "interval_seconds mínimo 60")
-
-    existing = (
-        db.get_schedule_by_name(guild_id, name)
-        if hasattr(db, "get_schedule_by_name")
-        else None
-    )
-    if existing:
-        raise HTTPException(409, f"Ya existe un horario con el nombre '{name}'")
-
-    db.create_schedule(guild_id, name, channel, content, interval, creator)
-    return {"status": "ok", "name": name}
-
-
-@router.patch("/{guild_id}/schedules/{name}")
-async def update_schedule(
-    guild_id: int,
-    name: str,
-    body: dict,
-    db=Depends(get_db),
-    _user=Depends(require_guild_admin),
-):
-    sched = (
-        db.get_schedule_by_name(guild_id, name)
-        if hasattr(db, "get_schedule_by_name")
-        else None
-    )
-    if not sched:
-        raise HTTPException(404, "Horario no encontrado")
-    allowed = {"enabled", "channel_id", "content", "interval_seconds"}
-    filtered = {k: v for k, v in body.items() if k in allowed}
-    if "channel_id" in filtered:
-        filtered["channel_id"] = coerce_snowflake(filtered["channel_id"], "channel_id")
-    if filtered:
-        db.update_schedule(sched["id"], **filtered)
-    return {"status": "ok", "updated": [*filtered.keys()]}
-
-
-@router.delete("/{guild_id}/schedules/{name}")
-async def delete_schedule(
-    guild_id: int,
-    name: str,
-    db=Depends(get_db),
-    _user=Depends(require_guild_admin),
-):
-    db.delete_schedule(guild_id, name)
-    return {"status": "ok"}
-
-
 # ── Server Logging ────────────────────────────────────────────────────────────
 
 @router.get("/{guild_id}/logging")
 async def get_logging_config(
     guild_id: int,
     db=Depends(get_db),
-    _user=Depends(require_guild_admin),
+    user=Depends(require_guild_admin),
 ):
     """Configuración de server event logging."""
     cfg = db.get_server_config(guild_id)

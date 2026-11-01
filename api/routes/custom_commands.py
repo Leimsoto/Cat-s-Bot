@@ -23,7 +23,9 @@ def _normalize_permission_data(value):
     try:
         data = json.loads(value) if isinstance(value, str) else dict(value)
     except Exception:
-        return {"everyone": True, "role_ids": []}
+        return {"everyone": False, "role_ids": []}
+    if not isinstance(data, dict):
+        return {"everyone": False, "role_ids": []}
     role_ids = data.get("role_ids") or []
     if not isinstance(role_ids, list):
         role_ids = []
@@ -74,10 +76,13 @@ async def create_custom_command(
     conditions = body.get("conditions") or {}
     permission_data = _normalize_permission_data(body.get("permission_data") or {"everyone": True, "role_ids": []})
     delete_invocation = 1 if body.get("delete_invocation") else 0
+    enabled = 1 if body.get("enabled", True) else 0
     creator_id = _user.get("user_id", 0)
 
     if not name or " " in name:
         raise HTTPException(400, "name es requerido y sin espacios")
+    if db.get_custom_command(guild_id, name):
+        raise HTTPException(409, "Ya existe un comando con ese nombre")
     if not response_data and not actions:
         raise HTTPException(400, "Debes proporcionar response_data o actions")
 
@@ -85,7 +90,7 @@ async def create_custom_command(
     conditions_str = json.dumps(conditions, ensure_ascii=False) if isinstance(conditions, (list, dict)) else str(conditions)
     permission_str = json.dumps(permission_data, ensure_ascii=False)
 
-    result = db.create_custom_command(
+    db.create_custom_command(
         guild_id=guild_id,
         name=name,
         trigger_type="prefix",
@@ -101,10 +106,11 @@ async def create_custom_command(
             response_data=response_data,
             permission_data=permission_str,
             delete_invocation=delete_invocation,
+            enabled=enabled,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"status": "ok", "command": _command_payload(result)}
+    return {"status": "ok", "command": _command_payload(db.get_custom_command(guild_id, name))}
 
 
 @router.put("/{name}")

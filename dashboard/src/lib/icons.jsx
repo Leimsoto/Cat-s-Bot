@@ -4,7 +4,7 @@
  * Mapeo central de iconografía del dashboard.
  *
  * Política:
- *   • Toda iconografía usa FontAwesome 6 (ya cargado vía CDN en index.html).
+ *   • Toda iconografía usa FontAwesome local (solid y brands, importados en main.jsx).
  *   • No usar emojis Unicode genéricos en UI (títulos, botones, listas).
  *   • Solo usar iconos cuando aporten información semántica real.
  *   • Mantener una sola fuente de verdad: importar nombres de icono desde aquí.

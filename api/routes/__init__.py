@@ -11,10 +11,10 @@ from importlib import import_module
 __all__ = [
     "guild", "moderation", "tickets", "tags",
     "reports", "schedules", "giveaways",
-    "autoroles", "radio", "embeds", "channels",
+    "autoroles", "radio", "rag", "embeds", "channels",
     "voice_gen", "welcome", "suggestions_route",
     "invites_route", "ai_keys", "public_stats",
-    "autoresponses", "custom_commands", "emojis",
+    "autoresponses", "custom_commands", "emojis", "channel_settings",
 ]
 
 

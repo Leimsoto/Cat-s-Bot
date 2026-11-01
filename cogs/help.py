@@ -10,16 +10,21 @@ CATEGORIES = {
         "emoji": "🛡️",
         "name": "Moderación",
         "commands": [
-            ("/ban", "Banea un usuario"),
+            ("/ban", "Banea por selector o ID, aunque el usuario ya haya salido"),
             ("/tempban [duración]", "Banea temporalmente"),
             ("/unban", "Desbanea por ID"),
             ("/kick", "Expulsa un usuario"),
             ("/mute [duración]", "Silencia un usuario"),
             ("/unmute", "Quita el silencio"),
+            ("/timeout", "Aplica timeout nativo"),
+            ("/untimeout", "Quita el timeout"),
             ("/warn", "Advierte un usuario"),
             ("/warns [usuario]", "Ver warns"),
+            ("/unwarn [caso]", "Revoca un warn"),
             ("/clearwarns", "Limpia warns"),
-            ("/purge [N]", "Elimina mensajes en masa"),
+            ("/purgar [N]", "Elimina mensajes en masa"),
+            ("/cases", "Consulta casos moderativos"),
+            ("/moderations", "Lista sanciones activas"),
             ("/appeals list", "Lista apelaciones"),
         ],
     },
@@ -28,25 +33,24 @@ CATEGORIES = {
         "name": "Información",
         "commands": [
             ("/ping", "Latencia del bot"),
-            ("/botinfo", "Estado del bot"),
-            ("/serverinfo", "Info del servidor"),
-            ("/serverlogs", "Logs en tiempo real"),
-            ("/userinfo [usuario]", "Info detallada"),
-            ("/roleinfo [rol]", "Info de un rol"),
+            ("/bot_info", "Estado del bot"),
+            ("/servidor_info", "Info del servidor"),
+            ("/servidor_logs", "Configura logs"),
+            ("/usuario_info [usuario]", "Info detallada"),
+            ("/rol_info [rol]", "Info de un rol"),
             ("/avatar [usuario]", "Avatar en grande"),
-            ("/banner [usuario]", "Banner en grande"),
-            ("/servericon", "Icono del servidor"),
+            ("/icono_servidor", "Icono del servidor"),
         ],
     },
     "channels": {
         "emoji": "📝",
         "name": "Canales",
         "commands": [
-            ("/lock", "Bloquea el canal"),
-            ("/unlock", "Desbloquea el canal"),
-            ("/slowmode [s]", "Modo lento"),
-            ("/clear [N]", "Borra N mensajes"),
-            ("/clearall", "Borra todo (irreversible)"),
+            ("/bloquear", "Bloquea el canal"),
+            ("/desbloquear", "Desbloquea el canal"),
+            ("/modo_lento [s]", "Modo lento"),
+            ("/limpiar [N]", "Borra N mensajes"),
+            ("/limpiar_todo", "Borra todo (irreversible)"),
             ("/channelsetup", "Panel multimedia"),
         ],
     },
@@ -54,10 +58,9 @@ CATEGORIES = {
         "emoji": "👥",
         "name": "Usuarios",
         "commands": [
-            ("/addrole", "Añade un rol"),
-            ("/removerole", "Quita un rol"),
-            ("/nick [usuario]", "Cambia el apodo"),
-            ("/usermessage [N]", "Últimos mensajes"),
+            ("/asignar_rol", "Añade un rol"),
+            ("/quitar_rol", "Quita un rol"),
+            ("/apodo [usuario]", "Cambia el apodo"),
         ],
     },
     "embeds": {
@@ -73,15 +76,15 @@ CATEGORIES = {
         "emoji": "🤖",
         "name": "IA / Gemini",
         "commands": [
-            ("/ai_status", "Métricas del servicio"),
-            ("/iaclear", "Borra tu historial"),
+            ("/ia_estado", "Métricas del servicio"),
+            ("/ia_limpiar", "Borra tu historial"),
         ],
     },
     "tickets": {
         "emoji": "🎫",
         "name": "Tickets",
         "commands": [
-            ("/adduser", "Añade usuario al ticket"),
+            ("/añadir_usuario", "Añade usuario al ticket"),
         ],
     },
     "tags": {
@@ -100,8 +103,8 @@ CATEGORIES = {
         "emoji": "🎮",
         "name": "Niveles / XP",
         "commands": [
-            ("/rank [usuario]", "Tu rango o el de otro"),
-            ("/leaderboard", "Top 10 del servidor"),
+            ("/rango [usuario]", "Tu rango o el de otro"),
+            ("/clasificacion", "Top 10 del servidor"),
             ("/xp give [@] [N]", "[Admin] Dar XP"),
             ("/xp reset [@]", "[Admin] Resetear XP"),
         ],
@@ -110,17 +113,18 @@ CATEGORIES = {
         "emoji": "🎁",
         "name": "Sorteos",
         "commands": [
-            ("/giveaway", "Crear sorteo interactivo"),
-            ("/giveaway_end", "Terminar sorteo"),
-            ("/giveaway_cancel", "Cancelar sorteo"),
-            ("/giveaway_reroll", "Re-elegir ganador"),
-            ("/giveaway_list", "Sorteos activos"),
+            ("/sorteo", "Crear sorteo interactivo"),
+            ("/sorteo_terminar", "Terminar sorteo"),
+            ("/sorteo_cancelar", "Cancelar sorteo"),
+            ("/sorteo_rerollear", "Re-elegir ganador"),
+            ("/sorteo_lista", "Sorteos activos"),
         ],
     },
     "radio": {
         "emoji": "📻",
         "name": "Radio",
         "commands": [
+            ("/radio start [canal]", "[Admin] Activar la radio"),
             ("/radio status", "Estado actual"),
             ("/radio restart", "Reconectar stream"),
             ("/radio buscar [nombre]", "Buscar emisora"),
@@ -131,7 +135,7 @@ CATEGORIES = {
         "name": "Autoroles",
         "commands": [
             ("/autorolereact", "Rol por reacción"),
-            ("/rolemenu", "Menú de roles dropdown"),
+            ("/menu_roles", "Menú de roles dropdown"),
         ],
     },
     "reports": {
@@ -206,6 +210,16 @@ CATEGORIES = {
             ("/starboard channel", "Canal de starboard"),
             ("/starboard threshold", "Umbral de estrellas"),
             ("/starboard config", "Ver configuración"),
+        ],
+    },
+    "rag": {
+        "emoji": "📚",
+        "name": "RAG / Historial",
+        "commands": [
+            ("/rag status", "Estado de captura"),
+            ("/rag config", "Configura captura y backfill"),
+            ("/rag backfill", "Recupera historial pendiente"),
+            ("/rag export", "Exporta mensajes a Markdown/TXT/JSONL"),
         ],
     },
 }
@@ -307,7 +321,8 @@ class Help(commands.Cog):
     async def help_prefix(self, ctx: commands.Context):
         voice = getattr(self.bot, "catbot_voice", None)
         prefix = voice.get("help") if voice else "❓"
-        await ctx.send(
+        from cogs._managed_messages import send_managed
+        await send_managed(self.bot, ctx.guild.id if ctx.guild else None, "help", ctx.send,
             f"{prefix} Usa **`/help`** para que el gato te muestre todo.",
             delete_after=10,
         )

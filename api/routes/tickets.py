@@ -18,11 +18,12 @@ no fragmentar las URLs que el frontend ya usa.
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from api.deps import get_db, require_guild_admin
-from api.snowflakes import coerce_optional_snowflake, stringify_fields, stringify_rows
+from api.deps import get_bot, get_db, require_guild_admin
+from api.routes.guild import _validate_privileged_role_updates
+from api.snowflakes import stringify_fields, stringify_rows
 
 router = APIRouter(prefix="/api/guilds/{guild_id}/tickets", tags=["tickets"])
 
@@ -170,8 +171,10 @@ async def patch_category(
     guild_id: int,
     cat_id: int,
     body: TicketCategoryPatch,
+    request: Request,
     db=Depends(get_db),
-    _user=Depends(require_guild_admin),
+    bot=Depends(get_bot),
+    user=Depends(require_guild_admin),
 ):
     """
     Edita una categoría existente. Acepta solo los campos enviados.
@@ -198,13 +201,31 @@ async def patch_category(
     if body.welcome_embed_template_key is not None:
         payload["welcome_embed_template_key"] = body.welcome_embed_template_key
     if body.staff_role_id is not None:
-        payload["staff_role_id"] = coerce_optional_snowflake(body.staff_role_id, "staff_role_id")
+        current_category = next(
+            (
+                category
+                for category in db.get_ticket_categories(guild_id)
+                if int(category.get("id", 0)) == cat_id
+            ),
+            {},
+        )
+        role_payload = {"staff_role_id": body.staff_role_id}
+        normalized_roles = await _validate_privileged_role_updates(
+            request,
+            guild_id,
+            role_payload,
+            bot,
+            user,
+            current_category,
+        )
+        if "staff_role_id" in normalized_roles:
+            payload["staff_role_id"] = normalized_roles["staff_role_id"]
 
     if not payload:
         return {"status": "ok", "updated": []}
 
     try:
-        db.update_ticket_category(cat_id, **payload)
+        db.update_ticket_category(cat_id, guild_id, **payload)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

@@ -151,7 +151,8 @@ class ServerUtils(commands.Cog):
             return
 
         try:
-            await send(embed=embed)
+            from cogs._managed_messages import send_managed
+            await send_managed(self.bot, guild.id, "serverutils", send, embed=embed)
         except discord.Forbidden:
             logger.warning("Sin permisos para enviar serverlogs en %s", guild.name)
             self._enqueue_serverlog_outbox(guild, embed, "missing_send_messages", resolved_ch_id)
@@ -300,7 +301,7 @@ class ServerUtils(commands.Cog):
         events = self._get_log_events(interaction.guild_id)
         srv = self.db.get_server_config(interaction.guild_id)
         embed = self._build_logs_embed(interaction.guild, srv, events)
-        view = ServerLogsView(self, interaction.user.id, events)
+        view = ServerLogsView(self, interaction.user.id, interaction.guild_id, events)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     def _build_logs_embed(self, guild, srv, events):
@@ -391,140 +392,41 @@ class ServerUtils(commands.Cog):
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        events = self._get_log_events(member.guild.id)
-        if not events.get("voice_join_leave"):
-            return
-        if before.channel == after.channel:
-            return
-        if after.channel and not before.channel:
-            embed = discord.Embed(
-                title="🔊 Unión a canal de voz",
-                description=(
-                    f"**Usuario:** {member.mention} (`{member.id}`)\n"
-                    f"**Canal:** {after.channel.mention} (`{after.channel.id}`)"
-                ),
-                color=discord.Color.green(), timestamp=datetime.now(timezone.utc),
-            )
-        elif before.channel and not after.channel:
-            embed = discord.Embed(
-                title="🔇 Salida de canal de voz",
-                description=(
-                    f"**Usuario:** {member.mention} (`{member.id}`)\n"
-                    f"**Canal:** {before.channel.mention} (`{before.channel.id}`)"
-                ),
-                color=discord.Color.orange(), timestamp=datetime.now(timezone.utc),
-            )
-        else:
-            embed = discord.Embed(
-                title="🔀 Cambio de canal de voz",
-                description=(
-                    f"**Usuario:** {member.mention} (`{member.id}`)\n"
-                    f"**De:** {before.channel.mention} (`{before.channel.id}`)\n"
-                    f"**A:** {after.channel.mention} (`{after.channel.id}`)"
-                ),
-                color=discord.Color.blue(), timestamp=datetime.now(timezone.utc),
-            )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text=f"ID Usuario: {member.id}")
-        await self._send_server_log(member.guild, embed)
+        # `cogs.logging` es el dueño único de logs de voz.
+        return
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
-        events = self._get_log_events(before.guild.id)
-
-        # Cambio de roles
-        if events.get("role_changes") and before.roles != after.roles:
-            added = set(after.roles) - set(before.roles)
-            removed = set(before.roles) - set(after.roles)
-            if added or removed:
-                embed = discord.Embed(
-                    title="🏷️ Cambio de roles",
-                    description=f"**Usuario:** {after.mention} (`{after.id}`)",
-                    color=discord.Color.purple(), timestamp=datetime.now(timezone.utc),
-                )
-                if added:
-                    added_text = ", ".join(r.mention for r in added)
-                    if len(added_text) > 1024:
-                        added_text = added_text[:1021] + "..."
-                    embed.add_field(name="➕ Añadidos", value=added_text, inline=False)
-                if removed:
-                    removed_text = ", ".join(r.mention for r in removed)
-                    if len(removed_text) > 1024:
-                        removed_text = removed_text[:1021] + "..."
-                    embed.add_field(name="➖ Removidos", value=removed_text, inline=False)
-                embed.set_thumbnail(url=after.display_avatar.url)
-                embed.set_footer(text=f"ID Usuario: {after.id}")
-                await self._send_server_log(before.guild, embed)
-
-        # Cambio de nickname
-        if events.get("nickname_changes") and before.nick != after.nick:
-            embed = discord.Embed(
-                title="📛 Cambio de nickname",
-                description=f"**Usuario:** {after.mention} (`{after.id}`)",
-                color=discord.Color.teal(), timestamp=datetime.now(timezone.utc),
-            )
-            embed.add_field(name="Antes", value=before.nick or before.name, inline=True)
-            embed.add_field(name="Después", value=after.nick or after.name, inline=True)
-            embed.set_thumbnail(url=after.display_avatar.url)
-            embed.set_footer(text=f"ID Usuario: {after.id}")
-            await self._send_server_log(before.guild, embed)
+        # `cogs.logging` es el dueño único de cambios de roles/nickname.
+        return
 
     @commands.Cog.listener()
     async def on_guild_channel_update(self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel):
-        """Detecta cambios de permisos, nombre o categoría en canales."""
-        events = self._get_log_events(before.guild.id)
-        if not events.get("channel_updates", True):
-            return
-
-        # Cambio de nombre
-        if before.name != after.name:
-            embed = discord.Embed(
-                title="📝 Canal renombrado",
-                description=(
-                    f"**Canal:** {after.mention} (`{after.id}`)\n"
-                    f"**Antes:** `#{before.name}`\n**Después:** `#{after.name}`"
-                ),
-                color=discord.Color.blue(), timestamp=datetime.now(timezone.utc),
-            )
-            embed.set_footer(text=f"ID Canal: {after.id}")
-            await self._send_server_log(before.guild, embed)
-
-        # Cambio de permisos (overwrites)
-        if before.overwrites != after.overwrites:
-            embed = discord.Embed(
-                title="🔐 Permisos de canal modificados",
-                description=f"**Canal:** {after.mention} (`{after.id}`)",
-                color=discord.Color.dark_gold(), timestamp=datetime.now(timezone.utc),
-            )
-            # Detectar qué target cambió
-            all_targets = set(list(before.overwrites.keys()) + list(after.overwrites.keys()))
-            changes = []
-            for target in all_targets:
-                old_ow = before.overwrites.get(target)
-                new_ow = after.overwrites.get(target)
-                if old_ow != new_ow:
-                    target_name = target.mention if hasattr(target, 'mention') else str(target)
-                    if not old_ow:
-                        changes.append(f"➕ Permisos añadidos para {target_name}")
-                    elif not new_ow:
-                        changes.append(f"➖ Permisos removidos para {target_name}")
-                    else:
-                        changes.append(f"✏️ Permisos modificados para {target_name}")
-            if changes:
-                embed.add_field(name="Cambios", value="\n".join(changes[:10]), inline=False)
-            embed.set_footer(text=f"ID Canal: {after.id}")
-            await self._send_server_log(before.guild, embed)
+        # `cogs.logging` es el dueño único de cambios de canales.
+        return
 
 
 # ── View para /serverlogs ─────────────────────────────────────────────────────
 
 class ServerLogsView(discord.ui.View):
-    def __init__(self, cog: ServerUtils, author_id: int, events: dict):
+    def __init__(self, cog: ServerUtils, author_id: int, guild_id: int, events: dict):
         super().__init__(timeout=300)
         self.cog = cog
         self.author_id = author_id
+        self.guild_id = guild_id
         self.events = events
         self._add_toggles()
+
+    async def _authorized(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id or interaction.guild_id != self.guild_id:
+            await interaction.response.send_message("❌ Solo quien abrió el panel.", ephemeral=True)
+            return False
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Debes seguir siendo administrador para configurar los logs.", ephemeral=True
+            )
+            return False
+        return True
 
     def _add_toggles(self):
         """Crea un StringSelect con todos los eventos como opciones."""
@@ -556,6 +458,8 @@ class ServerLogsView(discord.ui.View):
         self.add_item(select)
 
     async def _toggle_callback(self, interaction: discord.Interaction):
+        if not await self._authorized(interaction):
+            return
         selected = set(interaction.data.get("values", []))
         for key in self.events:
             self.events[key] = key in selected
@@ -575,14 +479,13 @@ class ServerLogsView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def _close(self, interaction: discord.Interaction):
+        if not await self._authorized(interaction):
+            return
         await interaction.response.edit_message(content="✅ Panel cerrado.", embed=None, view=None)
         self.stop()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Solo quien abrió el panel.", ephemeral=True)
-            return False
-        return True
+        return await self._authorized(interaction)
 
 
 async def setup(bot: commands.Bot):

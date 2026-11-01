@@ -244,7 +244,7 @@ export default function Radio({ selectedGuild }) {
                 disabled={saving || !cfg?.enabled || !cfg?.channel_id}
                 style={{
                   padding:'4px 12px',borderRadius:999,fontSize:'0.72rem',fontWeight:800,
-                  background:'rgba(139,92,246,0.14)',color:'#c4b5fd',
+                  background:'rgba(139,92,246,0.14)',color:'var(--accent)',
                   border:'1px solid rgba(139,92,246,0.28)',cursor:(saving || !cfg?.enabled || !cfg?.channel_id)?'not-allowed':'pointer',
                   opacity:(saving || !cfg?.enabled || !cfg?.channel_id)?0.55:1}}>
                 Reiniciar ahora
@@ -255,7 +255,7 @@ export default function Radio({ selectedGuild }) {
       </div>
 
       {/* ── Grid 2 columnas ── */}
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20,marginBottom:20}}>
+      <div className="secondary-two-column" style={{marginBottom:20}}>
 
         {/* Columna izq: Configuración */}
         <div className="glass-panel" style={{padding:24,display:'flex',flexDirection:'column',gap:18}}>
@@ -331,7 +331,7 @@ export default function Radio({ selectedGuild }) {
           <div className="config-item" style={{marginBottom:0}}>
             <label style={{display:'flex',justifyContent:'space-between'}}>
               <span>Volumen</span>
-              <span style={{color:'#c4b5fd',fontWeight:800}}>{cfg?.volume ?? 50}%</span>
+              <span style={{color:'var(--accent)',fontWeight:800}}>{cfg?.volume ?? 50}%</span>
             </label>
             <input
               type="range" min="0" max="150" step="5"
@@ -426,7 +426,7 @@ export default function Radio({ selectedGuild }) {
                 display:'flex',alignItems:'center',gap:8,
                 padding:'10px 18px',borderRadius:12,border:'1px solid rgba(139,92,246,0.3)',
                 background:'linear-gradient(135deg,rgba(99,102,241,0.15),rgba(139,92,246,0.1))',
-                color:'#c4b5fd',cursor:'pointer',fontWeight:700,fontSize:'0.85rem',
+                color:'var(--accent)',cursor:'pointer',fontWeight:700,fontSize:'0.85rem',
                 transition:'all 0.2s'}}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">

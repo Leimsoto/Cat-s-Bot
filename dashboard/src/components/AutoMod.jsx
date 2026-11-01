@@ -1,7 +1,27 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { apiGet, apiPatch } from "../lib/api";
 import Toast from "./Toast";
 import { useSaveBar } from "../lib/SaveBarContext";
+import AutoModLLM from "./AutoModLLM";
+import IdentityBadge from "./IdentityBadge";
+import ModerationReason from "./ModerationReason";
+import { Icon } from "../lib/icons";
+import "./DashboardPanels.css";
+
+const LLM_OUTCOMES = {
+  none: "Sin sanción",
+  delete: "Mensaje eliminado",
+  delete_failed: "No se pudo eliminar el mensaje",
+  deletion_notice_failed: "Aviso en el canal no entregado",
+  error_no_action: "Error de IA: sin sanción",
+  partial_coverage: "Contenido analizado parcialmente",
+  skipped_queue_full: "Omitido: cola llena",
+  skipped_stale_queue: "Omitido: espera excesiva",
+  skipped_superseded: "Omitido: evaluación reemplazada",
+  skipped_changed: "Omitido: mensaje modificado",
+  skipped_unreadable_content: "Omitido: contenido no disponible",
+  enforcement_not_confirmed: "Sanción no confirmada",
+};
 
 const RULE_META = {
   spam: {
@@ -40,44 +60,60 @@ const RULE_META = {
     icon: "fa-face-grin-stars",
     color: "#22c55e"}};
 
-export default function AutoMod({ selectedGuild: guildId }) {
+export default function AutoMod({ selectedGuild: guildId, onNavigate }) {
+  return <AutoModSettings key={guildId} guildId={guildId} onNavigate={onNavigate} />;
+}
+
+function AutoModSettings({ guildId, onNavigate }) {
   const [cfg, setCfg] = useState(null);
   const [logs, setLogs] = useState([]);
   const [tab, setTab] = useState("rules");
+  const [selectedRule, setSelectedRule] = useState("mentions");
+  const [logError, setLogError] = useState("");
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
+  const saveInFlight = useRef(false);
+  const requestVersion = useRef(0);
 
   const showToast = (msg, type = "success") => setToast({ msg, type });
 
   const load = useCallback(async () => {
     if (!guildId) return;
+    const version = ++requestVersion.current;
     setLoading(true);
     setDirty(false);
+    setCfg(null);
     try {
-      const data = await apiGet(`/api/guilds/${guildId}/automod`);
+      const data = await apiGet(`/api/guilds/${guildId}/automod`, { cache: false });
+      if (version !== requestVersion.current) return;
       setCfg(data || { enabled: 1, rules: {} });
     } catch (e) {
+      if (version !== requestVersion.current) return;
       showToast(e?.message || "Error cargando automod", "error");
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
   }, [guildId]);
 
   const loadLogs = useCallback(async () => {
     if (!guildId) return;
+    const version = requestVersion.current;
+    setLogError("");
     try {
       const data = await apiGet(`/api/guilds/${guildId}/automod/log?limit=50`, {
         cache: false});
+      if (version !== requestVersion.current) return;
       setLogs(Array.isArray(data) ? data : data.logs || []);
-    } catch {
-      setLogs([]);
+    } catch (error) {
+      if (version === requestVersion.current) setLogError(error.message || "No pudimos cargar el registro.");
     }
   }, [guildId]);
 
   useEffect(() => {
     load();
+    return () => { requestVersion.current += 1; };
   }, [load]);
   useEffect(() => {
     if (tab === "log") loadLogs();
@@ -95,30 +131,49 @@ export default function AutoMod({ selectedGuild: guildId }) {
           ? JSON.parse(prev.rules || "{}")
           : prev.rules || {};
       const rule = rules[ruleName] || { enabled: false };
-      rules[ruleName] = { ...rule, [field]: value };
-      return { ...prev, rules };
+      const next = { ...rule, [field]: value };
+      return { ...prev, rules: { ...rules, [ruleName]: next } };
     });
     setDirty(true);
   };
 
   const save = async () => {
+    if (!cfg || saving || loading || saveInFlight.current) return;
+    const invalid = document.querySelector(".cr-automod :is(input,textarea,select):invalid");
+    if (invalid) { invalid.reportValidity(); return; }
+    const numericFields = ["max_mentions", "min_percent", "warn_threshold", "threshold", "max_emojis"];
+    const invalidRule = Object.entries(cfg.rules || {}).find(([, rule]) => numericFields.some((field) => rule?.[field] === ""));
+    if (invalidRule) { setSelectedRule(invalidRule[0]); setTab("rules"); showToast("Completa el límite de la regla antes de guardar.", "error"); return; }
+    const rules = typeof cfg.rules === "string" ? JSON.parse(cfg.rules || "{}") : cfg.rules || {};
+    const llm = { ...rules.llm };
+    if (llm.enabled && !llm.rules_text?.trim()) {
+      setTab("llm");
+      showToast("Completa las reglas antes de activar la moderación IA.", "error");
+      return;
+    }
+    // Las conexiones se guardan por separado para no pisar cambios de Endpoints.
+    const behavior = Object.fromEntries(["enabled", "rules_text", "context_messages", "context_mode"].filter((key) => llm[key] !== undefined).map((key) => [key, llm[key]]));
+    const version = requestVersion.current;
+    saveInFlight.current = true;
     setSaving(true);
     try {
       const payload = {
         ...cfg,
-        rules: typeof cfg.rules === "string" ? JSON.parse(cfg.rules || "{}") : cfg.rules};
+        rules: { ...rules, llm: behavior }};
       const data = await apiPatch(`/api/guilds/${guildId}/automod`, payload);
+      if (version !== requestVersion.current) return;
       if (data?.config) setCfg(data.config);
       setDirty(false);
       showToast("Configuración guardada");
     } catch (e) {
-      showToast(e.message, "error");
+      if (version === requestVersion.current) showToast(e.message, "error");
     } finally {
-      setSaving(false);
+      saveInFlight.current = false;
+      if (version === requestVersion.current) setSaving(false);
     }
   };
 
-  useSaveBar({ dirty, saving, onSave: save, onRevert: load });
+  useSaveBar({ dirty: dirty && !loading, saving, onSave: save, onRevert: load });
 
   if (loading)
     return (
@@ -134,349 +189,29 @@ export default function AutoMod({ selectedGuild: guildId }) {
       : cfg?.rules || {};
 
   return (
-    <div className="ov-container animate-fade-in">
+    <div className="cr-page cr-automod">
       <Toast toast={toast} onDismiss={() => setToast(null)} />
-
-      <div className="section-header">
-        <h2
-          style={{
-          }}
-        >
-          Automoderación
-        </h2>
-        <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "4px 0 0" }}>
-          Protección automática contra spam, links y contenido no deseado
-        </p>
-      </div>
-
-      <div className="tabs-container">
-        {[
-          ["rules", "Reglas"],
-          ["log", "Registro"],
-        ].map(([id, label]) => (
-          <button
-            key={id}
-            className={`tab-btn ${tab === id ? "active" : ""}`}
-            onClick={() => setTab(id)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {tab === "rules" && cfg && (
-        <>
-          <div
-            className="glass-panel"
-            style={{
-              padding: 24,
-              borderRadius: 22,
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 16}}
-          >
-            <div>
-              <h3 style={{ margin: 0 }}>Sistema de Automoderación</h3>
-              <p
-                style={{
-                  color: "var(--muted)",
-                  margin: "4px 0 0",
-                  fontSize: "0.84rem"}}
-              >
-                {cfg.enabled ? "Activo, monitoreando mensajes" : "Desactivado"}
-              </p>
-            </div>
-            <label className="toggle-switch">
-              <input
-                type="checkbox"
-                checked={!!cfg.enabled}
-                onChange={(e) => set("enabled", e.target.checked ? 1 : 0)}
-              />
-              <span className="slider" />
-            </label>
-          </div>
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))",
-              gap: 16}}
-          >
-            {Object.entries(RULE_META).map(([key, meta]) => {
-              const rule = rules[key] || {};
-              const isOn = !!rule.enabled;
-              return (
-                <div
-                  key={key}
-                  className="glass-panel"
-                  style={{
-                    padding: 20,
-                    borderRadius: 18,
-                    border: `1px solid ${isOn ? meta.color + "40" : "rgba(255,255,255,0.06)"}`,
-                    background: isOn
-                      ? meta.color + "08"
-                      : "rgba(255,255,255,0.02)",
-                    transition: "all 0.2s"}}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      marginBottom: 10}}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <i
-                        className={`fa-solid ${meta.icon}`}
-                        style={{ color: meta.color, fontSize: "1.1rem" }}
-                      />
-                      <div>
-                        <div style={{ fontWeight: 800 }}>{meta.label}</div>
-                        <div
-                          style={{
-                            fontSize: "0.78rem",
-                            color: "var(--muted)"}}
-                        >
-                          {meta.desc}
-                        </div>
-                      </div>
-                    </div>
-                    <label className="toggle-switch">
-                      <input
-                        type="checkbox"
-                        checked={isOn}
-                        onChange={(e) =>
-                          setRule(key, "enabled", e.target.checked)
-                        }
-                      />
-                      <span className="slider" />
-                    </label>
-                  </div>
-
-                  {key === "mentions" && isOn && (
-                    <div className="config-item" style={{ marginBottom: 0 }}>
-                      <label>Máx. menciones por mensaje</label>
-                      <input
-                        type="number"
-                        min="1"
-                        max="50"
-                        value={rule.max_mentions ?? 5}
-                        onChange={(e) =>
-                          setRule(key, "max_mentions", parseInt(e.target.value))
-                        }
-                      />
-                    </div>
-                  )}
-                  {key === "caps" && isOn && (
-                    <div className="config-item" style={{ marginBottom: 0 }}>
-                      <label>% mínimo de mayúsculas para actuar</label>
-                      <input
-                        type="number"
-                        min="30"
-                        max="100"
-                        value={rule.min_percent ?? 70}
-                        onChange={(e) =>
-                          setRule(
-                            key,
-                            "min_percent",
-                            parseInt(e.target.value)
-                          )
-                        }
-                      />
-                    </div>
-                  )}
-                  {key === "banned_words" && isOn && (
-                    <div className="config-item" style={{ marginBottom: 0 }}>
-                      <label>Palabras prohibidas (separar con coma)</label>
-                      <textarea
-                        rows={3}
-                        value={(rule.words || []).join(", ")}
-                        onChange={(e) =>
-                          setRule(
-                            key,
-                            "words",
-                            e.target.value
-                              .split(",")
-                              .map((w) => w.trim())
-                              .filter(Boolean)
-                          )
-                        }
-                        style={{
-                          width: "100%",
-                          background: "rgba(0,0,0,0.2)",
-                          border: "1px solid rgba(139,92,246,0.15)",
-                          borderRadius: 10,
-                          padding: "8px 12px",
-                          color: "var(--text)",
-                          fontFamily: "var(--font-main)",
-                          fontSize: "0.84rem",
-                          resize: "vertical"}}
-                      />
-                    </div>
-                  )}
-                  {key === "spam" && isOn && (
-                    <div className="config-item" style={{ marginBottom: 0 }}>
-                      <label>Mensajes en ventana antes de warn</label>
-                      <input
-                        type="number"
-                        min="2"
-                        max="20"
-                        value={rule.warn_threshold ?? 5}
-                        onChange={(e) =>
-                          setRule(
-                            key,
-                            "warn_threshold",
-                            parseInt(e.target.value)
-                          )
-                        }
-                      />
-                    </div>
-                  )}
-                  {key === "links" && isOn && (
-                    <div className="config-item" style={{ marginBottom: 0 }}>
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={rule.block_invites ?? true}
-                          onChange={(e) => setRule(key, "block_invites", e.target.checked)}
-                        /> Bloquear invitaciones de Discord
-                      </label>
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={!!rule.block_all_urls}
-                          onChange={(e) => setRule(key, "block_all_urls", e.target.checked)}
-                        /> Bloquear todos los links salvo whitelist
-                      </label>
-                    </div>
-                  )}
-                  {key === "duplicate" && isOn && (
-                    <div className="config-item" style={{ marginBottom: 0 }}>
-                      <label>Repeticiones máximas</label>
-                      <input
-                        type="number"
-                        min="2"
-                        max="20"
-                        value={rule.threshold ?? 3}
-                        onChange={(e) => setRule(key, "threshold", parseInt(e.target.value))}
-                      />
-                    </div>
-                  )}
-                  {key === "emoji_spam" && isOn && (
-                    <div className="config-item" style={{ marginBottom: 0 }}>
-                      <label>Máx. emojis por mensaje</label>
-                      <input
-                        type="number"
-                        min="3"
-                        max="100"
-                        value={rule.max_emojis ?? 10}
-                        onChange={(e) => setRule(key, "max_emojis", parseInt(e.target.value))}
-                      />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      {tab === "log" && (
-        <div className="glass-panel" style={{ overflow: "hidden" }}>
-          {logs.length === 0 ? (
-            <div
-              style={{ padding: 48, textAlign: "center", color: "var(--muted)" }}
-            >
-              <i
-                className="fa-solid fa-shield-halved"
-                style={{ fontSize: "2.5rem", marginBottom: 12, display: "block" }}
-              />
-              <p>No hay acciones de automoderación registradas.</p>
-            </div>
-          ) : (
-            <table
-              style={{
-                width: "100%",
-                borderCollapse: "collapse",
-                fontSize: "0.84rem"}}
-            >
-              <thead>
-                <tr
-                  style={{
-                    borderBottom: "1px solid rgba(255,255,255,0.07)"}}
-                >
-                  {["Regla", "Usuario", "Acción", "Fecha"].map((h) => (
-                    <th
-                      key={h}
-                      style={{
-                        padding: "12px 16px",
-                        textAlign: "left",
-                        fontWeight: 700,
-                        color: "var(--muted)",
-                        fontSize: "0.75rem",
-                        textTransform: "uppercase",
-                        letterSpacing: "0.05em"}}
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {logs.map((l, i) => {
-                  const meta = RULE_META[l.rule] || {
-                    label: l.rule,
-                    color: "#7a9bb5"};
-                  return (
-                    <tr
-                      key={l.id || i}
-                      style={{
-                        borderBottom: "1px solid rgba(255,255,255,0.04)"}}
-                    >
-                      <td style={{ padding: "10px 16px" }}>
-                        <span
-                          style={{
-                            padding: "3px 10px",
-                            borderRadius: 99,
-                            fontSize: "0.74rem",
-                            fontWeight: 700,
-                            background: meta.color + "18",
-                            color: meta.color,
-                            border: `1px solid ${meta.color}30`}}
-                        >
-                          {meta.label}
-                        </span>
-                      </td>
-                      <td
-                        style={{
-                          padding: "10px 16px",
-                          fontFamily: "monospace",
-                          fontSize: "0.78rem"}}
-                      >
-                        {l.user_id}
-                      </td>
-                      <td style={{ padding: "10px 16px", color: "var(--muted)" }}>
-                        {l.action_taken}
-                      </td>
-                      <td
-                        style={{
-                          padding: "10px 16px",
-                          color: "var(--muted)",
-                          fontSize: "0.76rem"}}
-                      >
-                        {l.created_at
-                          ? new Date(l.created_at).toLocaleDateString("es")
-                          : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
+      <header className="cr-heading"><span className="cr-heading-icon"><Icon name="automod" /></span><div><span className="cr-eyebrow">Protección</span><h1>Automoderación</h1><p>Tus reglas, con el efecto siempre a la vista.</p></div>{cfg && <span className="cr-state-label">{Object.keys(RULE_META).filter((key) => rules[key]?.enabled).length} de 7 reglas activas</span>}</header>
+      {!cfg && <p className="cr-inline-error" role="alert">No pudimos cargar la configuración. <button className="btn-secondary" onClick={load}>Reintentar</button></p>}
+      <nav className="cr-tabs" aria-label="Opciones de automoderación">{[["rules","Reglas","settings"],["exceptions","Excepciones","users"],["llm","Moderación IA","ia"],["log","Registro","logs"]].map(([id,label,icon]) => <button key={id} type="button" aria-pressed={tab === id} disabled={saving} onClick={() => setTab(id)}><Icon name={icon} />{label}</button>)}</nav>
+      {tab === "llm" && cfg && <AutoModLLM rule={rules.llm || {}} disabled={saving} onChange={(field,value) => setRule("llm",field,value)} onNavigate={onNavigate} />}
+      {tab === "exceptions" && cfg && <fieldset className="cr-fieldset cr-exceptions" disabled={saving}><section className="cr-editor-panel"><h2>Exenciones globales</h2><p className="cr-hint">Estos miembros quedan fuera de las reglas clásicas y de la moderación IA.</p><label className="cr-check-row"><input type="checkbox" checked={rules.ignored?.exempt_admins ?? true} onChange={(event) => setRule("ignored","exempt_admins",event.target.checked)} />Excluir administradores</label><label className="cr-check-row"><input type="checkbox" checked={rules.ignored?.exempt_bots ?? true} onChange={(event) => setRule("ignored","exempt_bots",event.target.checked)} />Excluir mensajes de bots</label></section><aside className="cr-context-note"><Icon name="info" /><h3>Espacio para tu equipo</h3><p>Revisa las excepciones junto con las reglas. Afectan a toda la automoderación, incluida la IA.</p></aside></fieldset>}
+      {tab === "rules" && cfg && <fieldset className="cr-fieldset" disabled={saving}>
+        <div className="cr-status-strip"><div><h2>Sistema de automoderación</h2><p>{cfg.enabled ? "Activado para revisar los mensajes del servidor." : "Pausado. Las reglas clásicas no se aplicarán."}</p></div><label className="cr-switch"><input type="checkbox" aria-label="Activar automoderación" checked={!!cfg.enabled} onChange={(event) => set("enabled",event.target.checked ? 1 : 0)} /><span aria-hidden="true" /></label></div>
+        <div className="cr-rule-layout"><div className="cr-rule-navigation"><label className="cr-field cr-rule-mobile"><span>Regla que quieres ajustar</span><select value={selectedRule} onChange={(event) => setSelectedRule(event.target.value)}>{Object.entries(RULE_META).map(([key,meta]) => <option key={key} value={key}>{meta.label}</option>)}</select></label><div className="cr-rule-list">{Object.entries(RULE_META).map(([key,meta]) => <div className="cr-rule-row" key={key}><button type="button" aria-pressed={selectedRule === key} onClick={() => setSelectedRule(key)}><Icon name={meta.icon} /><span><strong>{meta.label}</strong><small>{rules[key]?.enabled ? "Activa" : "Pausada"}</small></span></button><label className="cr-switch"><input type="checkbox" aria-label={`Activar ${meta.label}`} checked={!!rules[key]?.enabled} onChange={(event) => setRule(key,"enabled",event.target.checked)} /><span aria-hidden="true" /></label></div>)}</div></div>
+          {Object.entries(RULE_META).filter(([key]) => key === selectedRule).map(([key,meta]) => {const rule = rules[key] || {};return <section key={key} className="cr-rule-editor"><div className="cr-section-heading"><h2>{meta.label}</h2><label className="cr-switch"><input type="checkbox" aria-label={`Activar ${meta.label}`} checked={!!rule.enabled} onChange={(event) => setRule(key,"enabled",event.target.checked)} /><span aria-hidden="true" /></label></div><p className="cr-hint">{meta.desc}</p>
+            {key === "mentions" && <label className="cr-field"><span>Menciones permitidas por mensaje</span><input type="number" min="1" max="50" required value={rule.max_mentions ?? 5} onChange={(event) => setRule(key,"max_mentions",event.target.value === "" ? "" : Number(event.target.value))} /><small>Se cuentan personas y roles. Con un límite de 5, la regla actúa desde 6 menciones.</small></label>}
+            {key === "caps" && <label className="cr-field"><span>Porcentaje mínimo de mayúsculas para actuar</span><input type="number" min="30" max="100" required value={rule.min_percent ?? 70} onChange={(event) => setRule(key,"min_percent",event.target.value === "" ? "" : Number(event.target.value))} /><small>Porcentaje del contenido que activará la regla.</small></label>}
+            {key === "banned_words" && <label className="cr-field"><span>Palabras prohibidas</span><textarea rows={5} value={(rule.words || []).join(", ")} onChange={(event) => setRule(key,"words",event.target.value.split(",").map((word) => word.trim()).filter(Boolean))} /><small>Separa las palabras con comas.</small></label>}
+            {key === "spam" && <label className="cr-field"><span>Mensajes en la ventana antes de avisar</span><input type="number" min="2" max="20" required value={rule.warn_threshold ?? 5} onChange={(event) => setRule(key,"warn_threshold",event.target.value === "" ? "" : Number(event.target.value))} /><small>La regla actúa al alcanzar este número de mensajes.</small></label>}
+            {key === "links" && <><label className="cr-check-row"><input type="checkbox" checked={rule.block_invites ?? true} onChange={(event) => setRule(key,"block_invites",event.target.checked)} />Bloquear invitaciones de Discord</label><label className="cr-check-row"><input type="checkbox" checked={!!rule.block_all_urls} onChange={(event) => setRule(key,"block_all_urls",event.target.checked)} />Bloquear todos los enlaces salvo los permitidos</label></>}
+            {key === "duplicate" && <label className="cr-field"><span>Repeticiones máximas</span><input type="number" min="2" max="20" required value={rule.threshold ?? 3} onChange={(event) => setRule(key,"threshold",event.target.value === "" ? "" : Number(event.target.value))} /></label>}
+            {key === "emoji_spam" && <label className="cr-field"><span>Emojis permitidos por mensaje</span><input type="number" min="3" max="100" required value={rule.max_emojis ?? 10} onChange={(event) => setRule(key,"max_emojis",event.target.value === "" ? "" : Number(event.target.value))} /></label>}
+            <div className="cr-rule-state"><Icon name={rule.enabled ? "automod" : "info"} /><p>{rule.enabled ? "Esta regla se aplicará con la configuración guardada cuando AutoMod esté activado." : "Esta regla está pausada. Puedes ajustar sus opciones antes de activarla."}</p></div>
+          </section>;})}
         </div>
-      )}
+      </fieldset>}
+      {tab === "log" && <section className="cr-log-section"><header className="cr-section-heading"><div><h2>Registro de acciones</h2><p>Resultados registrados por AutoMod.</p></div><button className="btn-secondary" onClick={loadLogs}><Icon name="refresh" />Actualizar</button></header>{logError && <p className="cr-inline-error" role="alert">{logError}</p>}{!logs.length ? <p className="cr-empty-inline">{logError ? "El registro no está disponible." : "No hay acciones de automoderación registradas."}</p> : <div className="cr-table-scroll"><table className="cr-data-table"><thead><tr>{["Regla","Usuario","Acción y motivo","Fecha"].map((title) => <th key={title}>{title}</th>)}</tr></thead><tbody>{logs.map((entry,index) => <tr key={entry.id || index}><td data-label="Regla">{entry.rule_label || (entry.rule === "llm" ? "Moderación IA" : RULE_META[entry.rule]?.label || entry.rule)}</td><td data-label="Usuario"><IdentityBadge item={entry} /></td><td data-label="Acción y motivo">{entry.action_label || LLM_OUTCOMES[entry.action_taken] || entry.action_taken}<ModerationReason entry={entry} /></td><td data-label="Fecha">{entry.created_at ? new Date(entry.created_at).toLocaleString("es") : "—"}</td></tr>)}</tbody></table></div>}</section>}
     </div>
   );
 }

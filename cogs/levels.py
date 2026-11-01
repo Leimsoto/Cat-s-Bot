@@ -25,6 +25,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs._role_safety import (
+    safe_for_automatic_assignment,
+    safe_for_automatic_removal,
+    self_service_forbidden_role_ids,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -96,8 +102,17 @@ class Levels(commands.Cog):
         result = self.db.add_xp(message.author.id, message.guild.id, xp_gained)
 
         if result["leveled_up"]:
-            await self._announce_levelup(message, result["level"], cfg)
-            await self._assign_reward(message.author, message.guild, result["level"], cfg)
+            try:
+                await self._announce_levelup(message, result["level"], cfg)
+            except Exception:
+                logger.exception("No se pudo anunciar el nivel en guild %s", message.guild.id)
+            await self._assign_rewards(
+                message.author,
+                message.guild,
+                int(result["old_level"]),
+                int(result["level"]),
+                cfg,
+            )
 
     async def _announce_levelup(self, message: discord.Message, new_level: int, cfg: dict):
         """
@@ -112,7 +127,7 @@ class Levels(commands.Cog):
           • levelup_embed_config (JSON)    → forma MessageEditor (content + embed)
             o legacy (campos sueltos). Si está vacío → texto plano legacy.
         """
-        from cogs._message_payload import render_message_payload
+        from cogs._managed_messages import render_managed_message_payload, manage_payload
 
         voice = getattr(self.bot, "catbot_voice", None)
         star = voice.get("star") if voice else "⭐"
@@ -129,8 +144,8 @@ class Levels(commands.Cog):
         content = None
         embed_raw = cfg.get("levelup_embed_config")
         if embed_raw:
-            payload = render_message_payload(
-                embed_raw, variables, member=message.author,
+            payload = await render_managed_message_payload(
+                self.bot, message.guild.id, embed_raw, variables, member=message.author,
                 default_color=int(discord.Color.gold()),
             )
             content = payload["content"]
@@ -145,6 +160,11 @@ class Levels(commands.Cog):
                 .replace("{level}", str(new_level))
                 .replace("{username}", message.author.display_name)
             )
+
+        if not embed_raw:
+            payload = await manage_payload(self.bot, message.guild.id, {"content": content, "embed": embed},
+                                           category="levels", protected=variables.values())
+            content, embed = payload["content"], payload["embed"]
 
         # Calcular delete_after a partir de las flags.
         persist = int(cfg.get("levelup_persist", 1) or 0)
@@ -181,27 +201,86 @@ class Levels(commands.Cog):
         except discord.Forbidden:
             pass
 
-    async def _assign_reward(self, member: discord.Member, guild: discord.Guild,
-                              level: int, cfg: dict):
-        reward = self.db.get_level_reward(guild.id, level)
-        if not reward:
-            return
+    async def _assign_rewards(
+        self,
+        member: discord.Member,
+        guild: discord.Guild,
+        old_level: int,
+        new_level: int,
+        cfg: dict,
+    ):
+        """Entrega todas las recompensas cruzadas o reemplaza por la más alta.
 
-        role = guild.get_role(int(reward["role_id"]))
-        if not role:
+        Esto cubre saltos de varios niveles causados por multiplicadores o `/xp give`.
+        """
+        rewards = self.db.get_level_rewards(guild.id)
+        if not rewards or new_level <= old_level:
             return
-
         stack = bool(cfg.get("stack_rewards", 1))
+        bot_member = guild.me
+        forbidden_role_ids = self_service_forbidden_role_ids(self.db, guild.id)
         try:
-            if not stack:
-                all_rewards = self.db.get_level_rewards(guild.id)
-                reward_role_ids = {int(r["role_id"]) for r in all_rewards if int(r["level"]) < level}
-                roles_to_remove = [r for r in member.roles if r.id in reward_role_ids]
-                if roles_to_remove:
-                    await member.remove_roles(*roles_to_remove, reason=f"Nivel {level} — reemplazo de rol")
-            await member.add_roles(role, reason=f"Recompensa nivel {level}")
-        except discord.Forbidden:
-            logger.warning(f"Sin permisos para asignar rol de nivel {level} en {guild.name}")
+            if stack:
+                roles = [
+                    guild.get_role(int(reward["role_id"]))
+                    for reward in rewards
+                    if old_level < int(reward["level"]) <= new_level
+                ]
+                roles = [
+                    role
+                    for role in roles
+                    if safe_for_automatic_assignment(
+                        role,
+                        bot_member,
+                        forbidden_role_ids=forbidden_role_ids,
+                    )
+                    and role not in member.roles
+                ]
+                if roles:
+                    await member.add_roles(*roles, reason=f"Recompensas niveles {old_level + 1}-{new_level}")
+                return
+
+            eligible = [reward for reward in rewards if int(reward["level"]) <= new_level]
+            if not eligible:
+                return
+            selected = max(eligible, key=lambda reward: int(reward["level"]))
+            role = guild.get_role(int(selected["role_id"]))
+            if not safe_for_automatic_assignment(
+                role,
+                bot_member,
+                forbidden_role_ids=forbidden_role_ids,
+            ):
+                return
+            reward_role_ids = {int(reward["role_id"]) for reward in rewards}
+            roles_to_remove = [
+                existing for existing in member.roles
+                if existing.id in reward_role_ids and existing.id != role.id
+                and forbidden_role_ids is not None
+                and existing.id not in forbidden_role_ids
+                and safe_for_automatic_removal(existing, bot_member)
+                and safe_for_automatic_assignment(
+                    existing,
+                    bot_member,
+                    forbidden_role_ids=forbidden_role_ids,
+                )
+            ]
+            if roles_to_remove:
+                await member.remove_roles(
+                    *roles_to_remove,
+                    reason=f"Nivel {new_level} — reemplazo de rol",
+                )
+            if role not in member.roles:
+                role = guild.get_role(role.id)
+                if safe_for_automatic_assignment(
+                    role,
+                    guild.me,
+                    forbidden_role_ids=self_service_forbidden_role_ids(
+                        self.db, guild.id
+                    ),
+                ):
+                    await member.add_roles(role, reason=f"Recompensa nivel {new_level}")
+        except (discord.Forbidden, discord.HTTPException):
+            logger.warning("Sin permisos para asignar recompensas de nivel %s en %s", new_level, guild.name)
 
     # ── Slash Commands de uso ─────────────────────────────────────────────────
     # Nota: /xp config, /xp setannouncechannel, /xp ignorechannel y
@@ -277,7 +356,12 @@ class Levels(commands.Cog):
                 else "❌ La cantidad debe ser mayor que 0."
             )
             return await interaction.response.send_message(msg, ephemeral=True)
-        result = self.db.add_xp(usuario.id, interaction.guild_id, cantidad)
+        result = self.db.add_xp(
+            usuario.id,
+            interaction.guild_id,
+            cantidad,
+            increment_message_count=False,
+        )
         treat = voice.get("treat") if voice else "🍪"
         await interaction.response.send_message(
             f"{treat} **+{cantidad} XP** para {usuario.mention}. Ahora lleva **{result['xp']:,} XP** (Nivel {result['level']}).",
@@ -285,16 +369,73 @@ class Levels(commands.Cog):
         )
         if result["leveled_up"]:
             cfg = self.db.get_xp_config(interaction.guild_id)
-            await self._assign_reward(usuario, interaction.guild, result["level"], cfg)
+            await self._assign_rewards(
+                usuario,
+                interaction.guild,
+                int(result["old_level"]),
+                int(result["level"]),
+                cfg,
+            )
 
     @xp_group.command(name="reset", description="[Admin] Resetea el XP de un usuario")
     @app_commands.describe(usuario="Usuario a resetear")
     @app_commands.checks.has_permissions(administrator=True)
     async def xp_reset(self, interaction: discord.Interaction, usuario: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        if guild is None or not self.bot.user:
+            return await interaction.followup.send(
+                "❌ No pude verificar el servidor actual.", ephemeral=True
+            )
+        try:
+            member = await guild.fetch_member(usuario.id)
+            bot_member = await guild.fetch_member(self.bot.user.id)
+            reward_ids = {
+                int(reward["role_id"])
+                for reward in self.db.get_level_rewards(guild.id)
+            }
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return await interaction.followup.send(
+                "❌ No pude verificar el usuario o mi jerarquía actual.", ephemeral=True
+            )
+        except (KeyError, TypeError, ValueError):
+            return await interaction.followup.send(
+                "❌ La configuración de recompensas contiene un rol inválido.",
+                ephemeral=True,
+            )
+
+        assigned_rewards = [
+            role for role in member.roles if role.id in reward_ids
+        ]
+        forbidden_role_ids = self_service_forbidden_role_ids(self.db, guild.id)
+        blocked = [
+            role
+            for role in assigned_rewards
+            if forbidden_role_ids is None
+            or role.id in forbidden_role_ids
+            or not safe_for_automatic_removal(role, bot_member)
+        ]
+        if blocked:
+            return await interaction.followup.send(
+                "❌ No puedo retirar todos los roles de recompensa; revisa mi jerarquía.",
+                ephemeral=True,
+            )
+        if assigned_rewards:
+            try:
+                await member.remove_roles(
+                    *assigned_rewards,
+                    reason=f"XP reiniciado por {interaction.user}",
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                return await interaction.followup.send(
+                    "❌ No pude retirar los roles de recompensa; no se reinició el XP.",
+                    ephemeral=True,
+                )
+
         self.db.reset_user_level(usuario.id, interaction.guild_id)
         voice = getattr(self.bot, "catbot_voice", None)
         success = voice.get("success") if voice else "✅"
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"{success} El gato borró todo el XP de {usuario.mention}. Vuelta a empezar.",
             ephemeral=True,
         )

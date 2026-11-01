@@ -11,14 +11,19 @@ para que la conexión al canal sea inmediata y no espere hasta el próximo
 tick del loop de 60 s.
 """
 
+import asyncio
 import logging
-import concurrent.futures
 from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from api.deps import get_bot, get_db, require_guild_admin
+from radio_url_policy import (
+    RadioURLPolicyError,
+    redact_url_for_log,
+    validate_public_http_url,
+)
 
 logger = logging.getLogger("API.radio")
 
@@ -152,20 +157,32 @@ async def patch_radio_config(
     if "channel_id" in payload:
         payload["channel_id"] = _repair_rounded_channel_id(bot, guild_id, payload["channel_id"])
         _validate_radio_channel_id(bot, guild_id, payload["channel_id"])
+    if "stream_url" in payload:
+        raw_stream_url = str(payload["stream_url"] or "").strip()
+        if not raw_stream_url:
+            payload["stream_url"] = None
+        else:
+            try:
+                payload["stream_url"] = await asyncio.to_thread(
+                    validate_public_http_url,
+                    raw_stream_url,
+                )
+            except RadioURLPolicyError as exc:
+                raise HTTPException(400, str(exc)) from exc
     if payload:
         db.set_lofi_config(guild_id, **payload)
     saved = db.get_lofi_config(guild_id)
 
     # Forzar reconexión inmediata: reiniciar el task radio_manager del cog
     # para que no haya que esperar el próximo tick de 60 s.
-    restart_result = _trigger_radio_reconnect(bot, guild_id)
+    restart_result = await _trigger_radio_reconnect(bot, guild_id)
     logger.info(
         "[radio] PATCH config guild=%s updated=%s channel_id=%s station=%r stream=%r restart=%s",
         guild_id,
         sorted(payload.keys()),
         saved.get("channel_id"),
         saved.get("station_name"),
-        saved.get("stream_url"),
+        redact_url_for_log(saved.get("stream_url")),
         restart_result,
     )
 
@@ -186,13 +203,13 @@ async def restart_radio(
 ):
     """Reinicia explícitamente la radio con la configuración ya guardada."""
     saved = db.get_lofi_config(guild_id)
-    restart_result = _trigger_radio_reconnect(bot, guild_id)
+    restart_result = await _trigger_radio_reconnect(bot, guild_id)
     logger.info(
         "[radio] POST restart guild=%s channel_id=%s station=%r stream=%r restart=%s",
         guild_id,
         saved.get("channel_id"),
         saved.get("station_name"),
-        saved.get("stream_url"),
+        redact_url_for_log(saved.get("stream_url")),
         restart_result,
     )
     return {
@@ -202,7 +219,7 @@ async def restart_radio(
     }
 
 
-def _trigger_radio_reconnect(bot, guild_id: int) -> dict:
+async def _trigger_radio_reconnect(bot, guild_id: int) -> dict:
     """Dispara la conexión de radio para el guild usando el event loop del bot.
 
     Usa run_coroutine_threadsafe para cruzar correctamente del hilo de uvicorn
@@ -216,20 +233,18 @@ def _trigger_radio_reconnect(bot, guild_id: int) -> dict:
             logger.warning("Cog Radio no encontrado — no se puede forzar reconexión")
             return {"triggered": False, "completed": False, "reason": "radio_cog_not_found"}
 
-        import asyncio
-        restart_coro = (
-            radio_cog.restart_guild(guild_id)
-            if hasattr(radio_cog, "restart_guild")
-            else radio_cog.connect_guild(guild_id, restart_stream=True)
-        )
-        future = asyncio.run_coroutine_threadsafe(
-            restart_coro,
-            bot.loop,
-        )
-
+        from api.discord_bridge import DiscordBridgeTimeout, run_on_bot_loop
         try:
-            future.result(timeout=15)
-        except concurrent.futures.TimeoutError:
+            await run_on_bot_loop(
+                bot,
+                lambda: (
+                    radio_cog.restart_guild(guild_id)
+                    if hasattr(radio_cog, "restart_guild")
+                    else radio_cog.connect_guild(guild_id, restart_stream=True)
+                ),
+                timeout=15,
+            )
+        except DiscordBridgeTimeout:
             logger.warning("[radio] restart_guild(%s) disparado pero no confirmó antes del timeout", guild_id)
             return {"triggered": True, "completed": False, "reason": "timeout"}
         except Exception as exc:

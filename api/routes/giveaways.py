@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 from api.deps import get_db, require_guild_admin
+from api.discord_bridge import DiscordBridgeTimeout, DiscordBridgeUnavailable, run_on_bot_loop
 from api.snowflakes import coerce_snowflake, serialize_snowflake
 
 router = APIRouter(prefix="/api/guilds/{guild_id}/giveaways", tags=["giveaways"])
@@ -29,8 +30,8 @@ router = APIRouter(prefix="/api/guilds/{guild_id}/giveaways", tags=["giveaways"]
 
 class GiveawayCreate(BaseModel):
     channel_id:     int | str
-    prize:          str
-    duration_hours: float = 1.0
+    prize:          str = Field(min_length=1, max_length=240)
+    duration_hours: float = Field(1.0, ge=0.01, le=8760, allow_inf_nan=False)
     winners_count:  int   = Field(1, ge=1, le=50)
     req_roles:      List[int | str] = Field(default_factory=list)
     deny_roles:     List[int | str] = Field(default_factory=list)
@@ -96,6 +97,9 @@ async def create_giveaway(
     _user=Depends(require_guild_admin),
 ):
     """Crea y publica un nuevo sorteo en el canal indicado."""
+    body.prize = body.prize.strip()
+    if not body.prize:
+        raise HTTPException(400, "El premio no puede quedar en blanco")
     bot = getattr(request.app.state, "bot", None)
     if not bot:
         raise HTTPException(503, "Bot no disponible")
@@ -137,11 +141,18 @@ async def create_giveaway(
     )
     embed.set_footer(text=f"Termina · {body.winners_count} ganador(es)")
 
-    try:
+    async def publish_giveaway():
         from cogs.giveaways import GiveawayJoinView
         cog = bot.get_cog("Giveaways")
         view = GiveawayJoinView(cog) if cog else None
-        msg = await channel.send(embed=embed, view=view)
+        return await channel.send(embed=embed, view=view)
+
+    try:
+        msg = await run_on_bot_loop(bot, publish_giveaway, timeout=30)
+    except DiscordBridgeUnavailable as exc:
+        raise HTTPException(503, str(exc))
+    except DiscordBridgeTimeout as exc:
+        raise HTTPException(504, str(exc))
     except discord.Forbidden:
         raise HTTPException(403, "El bot no tiene permisos en ese canal")
     except discord.HTTPException as e:
@@ -197,7 +208,8 @@ async def cancel_giveaway(
     if gw.get("ended") or gw.get("cancelled"):
         raise HTTPException(400, "El sorteo ya ha terminado")
 
-    db.update_giveaway(message_id, ended=1, cancelled=1)
+    if not db.cancel_active_giveaway(message_id):
+        raise HTTPException(409, "El sorteo ya está finalizando, terminado o cancelado")
 
     bot = getattr(request.app.state, "bot", None)
     if bot:
@@ -205,7 +217,7 @@ async def cancel_giveaway(
         if guild:
             channel = guild.get_channel(int(gw.get("channel_id", 0)))
             if channel:
-                try:
+                async def update_cancelled_message() -> None:
                     msg = await channel.fetch_message(message_id)
                     embed = msg.embeds[0] if msg.embeds else discord.Embed()
                     embed.title = f"❌ {gw.get('prize', 'Sorteo')} (Cancelado)"
@@ -220,8 +232,15 @@ async def cancel_giveaway(
                     if view:
                         view.children[0].disabled = True
                     await msg.edit(embed=embed, view=view)
-                except Exception:
+
+                try:
+                    await run_on_bot_loop(bot, update_cancelled_message, timeout=30)
+                except (DiscordBridgeUnavailable, DiscordBridgeTimeout) as exc:
+                    raise HTTPException(503 if isinstance(exc, DiscordBridgeUnavailable) else 504, str(exc))
+                except discord.NotFound:
                     pass
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    raise HTTPException(502, f"El sorteo se canceló, pero no se pudo actualizar el mensaje: {exc}")
 
     return {"status": "cancelled", "message_id": serialize_snowflake(message_id)}
 
@@ -250,7 +269,20 @@ async def reroll_giveaway(
     if not cog:
         raise HTTPException(503, "Cog Giveaways no cargado")
 
-    winners_ids = await cog.reroll_giveaway(gw)
+    try:
+        winners_ids = await run_on_bot_loop(
+            bot,
+            lambda: cog.reroll_giveaway(gw),
+            timeout=30,
+        )
+    except DiscordBridgeUnavailable as exc:
+        raise HTTPException(503, str(exc))
+    except DiscordBridgeTimeout as exc:
+        raise HTTPException(504, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except discord.HTTPException as exc:
+        raise HTTPException(502, f"No se pudieron anunciar los nuevos ganadores: {exc}")
     if not winners_ids:
         raise HTTPException(400, "No hubo participantes para reroll")
 

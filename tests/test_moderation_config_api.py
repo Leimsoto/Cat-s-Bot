@@ -1,7 +1,12 @@
+import asyncio
 import logging
 import sqlite3
 import threading
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import discord
 
 from api.routes.guild import get_moderation_config, patch_moderation_config
 from database.manager import DatabaseManager
@@ -28,6 +33,20 @@ class ModerationConfigApiTest(unittest.IsolatedAsyncioTestCase):
         self.db._sqlite_conn.close()
 
     async def test_dashboard_moderation_config_is_what_cogs_read(self):
+        guild = SimpleNamespace(id=123, owner_id=42)
+        roles = [
+            discord.Role(guild=guild, state=None, data={
+                "id": str(role_id), "name": name, "position": position,
+                "permissions": "0", "managed": False,
+            })
+            for role_id, name, position in ((123, "@everyone", 0), (222, "Staff", 1),
+                                             (333, "Mod", 2), (4444, "Bot", 10))
+        ]
+        member = SimpleNamespace(id=777, guild=guild, _roles=[4444])
+        guild.fetch_member = AsyncMock(return_value=member)
+        guild.fetch_roles = AsyncMock(return_value=roles)
+        bot = SimpleNamespace(get_guild=lambda _id: guild, user=SimpleNamespace(id=777),
+                              fetch_guild=AsyncMock(return_value=guild), loop=asyncio.get_running_loop())
         result = await patch_moderation_config(
             123,
             {
@@ -37,8 +56,10 @@ class ModerationConfigApiTest(unittest.IsolatedAsyncioTestCase):
                 "modlog_channel": "444",
                 "modlog_enabled": 1,
             },
-            self.db,
-            {"user_id": 42},
+            request=None,
+            db=self.db,
+            bot=bot,
+            user={"user_id": 42, "is_master_admin": True},
         )
 
         self.assertEqual(result["config"]["mute_role_id"], "111")

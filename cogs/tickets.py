@@ -29,12 +29,22 @@ class TicketCloseReasonModal(discord.ui.Modal):
         self.add_item(self.reason)
 
     async def on_submit(self, interaction: discord.Interaction):
+        ticket = self.cog._authorized_open_ticket(interaction, self.ticket["id"])
+        if ticket is None:
+            return await interaction.response.send_message(
+                "❌ El ticket ya no está abierto o tus permisos cambiaron.",
+                ephemeral=True,
+            )
         await interaction.response.send_message("Cerrando ticket y generando transcripción...", ephemeral=True)
-        await self.cog.close_ticket(self.ticket, interaction.user, self.reason.value, self.ticket_channel)
+        if not await self.cog.close_ticket(ticket, interaction.user, self.reason.value, interaction.channel):
+            await interaction.followup.send(
+                "❌ No se pudo cerrar el ticket; vuelve a intentarlo.",
+                ephemeral=True,
+            )
 
 
 class TicketCloseConfirmView(discord.ui.View):
-    def __init__(self, cog, ticket, channel):
+    def __init__(self, cog, ticket=None, channel=None):
         super().__init__(timeout=None)
         self.cog = cog
         self.ticket = ticket
@@ -42,30 +52,23 @@ class TicketCloseConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Confirmar Cierre (Staff)", style=discord.ButtonStyle.danger, custom_id="ticket_close_confirm")
     async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Verificar permisos
-        config = self.cog.db.get_ticket_config(interaction.guild_id)
-        immune_roles = json.loads(config.get("immune_roles", "[]"))
-        allowed_roles = json.loads(config.get("allowed_roles", "[]"))
-        
-        user_roles = [r.id for r in interaction.user.roles]
-        is_staff = interaction.user.guild_permissions.administrator or \
-                   any(r in user_roles for r in immune_roles) or \
-                   any(r in user_roles for r in allowed_roles) or \
-                   (self.ticket.get("staff_id") == interaction.user.id)
-                   
-        if not is_staff:
-            return await interaction.response.send_message("❌ Solo el staff puede confirmar el cierre.", ephemeral=True)
+        record = self.ticket or self.cog.db.get_ticket_by_channel(interaction.channel_id)
+        ticket = self.cog._authorized_open_ticket(interaction, record["id"]) if record else None
+        if ticket is None:
+            return await interaction.response.send_message(
+                "❌ El ticket ya no está abierto o tus permisos cambiaron.",
+                ephemeral=True,
+            )
             
         # Obtener categoría para ver motivos predefinidos
-        categories = self.cog.db.get_ticket_categories(interaction.guild_id)
-        category = next((c for c in categories if c["name"] == self.ticket["category_name"]), None)
+        category = self.cog._category_for_ticket(interaction.guild_id, ticket)
         reasons = json.loads(category.get("close_reasons", "[]")) if category else []
         
         if reasons:
-            view = TicketCloseReasonView(self.cog, self.ticket, self.ticket_channel, reasons)
+            view = TicketCloseReasonView(self.cog, ticket, interaction.channel, reasons)
             await interaction.response.send_message("Selecciona el motivo del cierre:", view=view, ephemeral=True)
         else:
-            await interaction.response.send_modal(TicketCloseReasonModal(self.cog, self.ticket, self.ticket_channel))
+            await interaction.response.send_modal(TicketCloseReasonModal(self.cog, ticket, interaction.channel))
 
 
 class TicketTakeCloseView(discord.ui.View):
@@ -83,33 +86,17 @@ class TicketTakeCloseView(discord.ui.View):
         if ticket["staff_id"]:
             return await interaction.response.send_message("❌ Este ticket ya fue tomado por otro staff.", ephemeral=True)
             
-        config = self.cog.db.get_ticket_config(interaction.guild_id)
-        allowed_roles = json.loads(config.get("allowed_roles", "[]"))
-        
-        # Verificar que es staff
-        user_roles = [r.id for r in interaction.user.roles]
-        if not (interaction.user.guild_permissions.administrator or any(r in user_roles for r in allowed_roles) or any(r in user_roles for r in json.loads(config.get("immune_roles", "[]")))):
+        if not self.cog._is_ticket_staff(interaction.user, ticket):
             return await interaction.response.send_message("❌ No tienes permiso para tomar tickets.", ephemeral=True)
 
         self.cog.db.update_ticket(ticket_id, staff_id=interaction.user.id)
-        
-        # Quitar escritura a allowed_roles, dejar a immune_roles y dar a este staff
-        channel = interaction.channel
-        overwrites = channel.overwrites
-        
-        for r_id in allowed_roles:
-            role = interaction.guild.get_role(r_id)
-            if role:
-                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=False)
-                
-        overwrites[interaction.user] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        
-        await channel.edit(overwrites=overwrites)
-        
+
         button.disabled = True
         button.label = f"Tomado por {interaction.user.display_name}"
         await interaction.response.edit_message(view=self)
-        await interaction.followup.send(f"🛡️ {interaction.user.mention} se ha hecho cargo de este ticket.")
+        from cogs._managed_messages import send_managed
+        await send_managed(self.cog.bot, interaction.guild_id, "tickets", interaction.followup.send,
+                           f"🛡️ {interaction.user.mention} se ha hecho cargo de este ticket.")
 
     @discord.ui.button(label="Cerrar", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="ticket_close")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -117,15 +104,7 @@ class TicketTakeCloseView(discord.ui.View):
         if not ticket: return await interaction.response.send_message("Ticket no encontrado.", ephemeral=True)
         ticket_id = ticket["id"]
         
-        config = self.cog.db.get_ticket_config(interaction.guild_id)
-        immune_roles = json.loads(config.get("immune_roles", "[]"))
-        allowed_roles = json.loads(config.get("allowed_roles", "[]"))
-        user_roles = [r.id for r in interaction.user.roles]
-        
-        is_admin_or_immune = interaction.user.guild_permissions.administrator or any(r in user_roles for r in immune_roles)
-        is_staff = is_admin_or_immune or any(r in user_roles for r in allowed_roles) or (ticket.get("staff_id") == interaction.user.id)
-        
-        if is_staff:
+        if self.cog._is_ticket_staff(interaction.user, ticket):
             # Obtener categoría para ver motivos predefinidos
             categories = self.cog.db.get_ticket_categories(interaction.guild_id)
             category = next((c for c in categories if c["name"] == ticket["category_name"]), None)
@@ -158,19 +137,29 @@ class TicketCloseReasonView(discord.ui.View):
         self.add_item(self.select)
 
     async def select_callback(self, interaction: discord.Interaction):
+        ticket = self.cog._authorized_open_ticket(interaction, self.ticket["id"])
+        if ticket is None:
+            return await interaction.response.send_message(
+                "❌ El ticket ya no está abierto o tus permisos cambiaron.",
+                ephemeral=True,
+            )
         reason = self.select.values[0]
         if reason == "custom":
-            await interaction.response.send_modal(TicketCloseReasonModal(self.cog, self.ticket, self.channel))
+            await interaction.response.send_modal(TicketCloseReasonModal(self.cog, ticket, interaction.channel))
         else:
             await interaction.response.send_message(f"Cerrando ticket por: **{reason}**...", ephemeral=True)
-            await self.cog.close_ticket(self.ticket, interaction.user, reason, self.channel)
+            if not await self.cog.close_ticket(ticket, interaction.user, reason, interaction.channel):
+                await interaction.followup.send(
+                    "❌ No se pudo cerrar el ticket; vuelve a intentarlo.",
+                    ephemeral=True,
+                )
 
 
 class TicketModal(discord.ui.Modal):
     def __init__(self, cog, category):
         super().__init__(title=f"Ticket: {category['name']}")
         self.cog = cog
-        self.category = category
+        self.category_id = int(category["id"])
         self.questions = json.loads(category.get("questions", "[]"))
         self.inputs = []
         
@@ -181,14 +170,30 @@ class TicketModal(discord.ui.Modal):
             inp = discord.ui.TextInput(
                 label=q[:45], 
                 style=discord.TextStyle.paragraph if idx == 0 else discord.TextStyle.short,
-                required=True
+                required=True,
+                max_length=1024,
             )
             self.add_item(inp)
             self.inputs.append(inp)
 
     async def on_submit(self, interaction: discord.Interaction):
+        category = next(
+            (
+                current
+                for current in self.cog.db.get_ticket_categories(interaction.guild_id)
+                if int(current["id"]) == self.category_id
+            ),
+            None,
+        )
+        if category is None:
+            return await interaction.response.send_message(
+                "❌ Esta categoría ya no existe. Abre el panel de nuevo.",
+                ephemeral=True,
+            )
         await interaction.response.defer(ephemeral=True)
-        await self.cog.create_ticket_channel(interaction, self.category, [i.value for i in self.inputs])
+        await self.cog.create_ticket_channel(
+            interaction, category, [i.value for i in self.inputs], questions=self.questions[:5]
+        )
 
 
 class TicketPanelView(discord.ui.View):
@@ -238,6 +243,59 @@ class Tickets(commands.Cog):
         self.bot = bot
         self.db = bot.db # type: ignore
 
+    def _category_for_ticket(self, guild_id: int, ticket: dict) -> dict | None:
+        return next(
+            (
+                category
+                for category in self.db.get_ticket_categories(guild_id)
+                if category["name"] == ticket.get("category_name")
+            ),
+            None,
+        )
+
+    def _ticket_staff_role_ids(self, guild_id: int, category: dict | None = None) -> set[int]:
+        config = self.db.get_ticket_config(guild_id)
+        raw_ids = [
+            *json.loads(config.get("allowed_roles") or "[]"),
+            *json.loads(config.get("immune_roles") or "[]"),
+        ]
+        if category and category.get("staff_role_id"):
+            raw_ids.append(category["staff_role_id"])
+        role_ids: set[int] = set()
+        for role_id in raw_ids:
+            try:
+                role_ids.add(int(role_id))
+            except (TypeError, ValueError):
+                continue
+        return role_ids
+
+    def _is_ticket_staff(self, member: discord.Member, ticket: dict) -> bool:
+        if member.id == member.guild.owner_id or member.guild_permissions.administrator:
+            return True
+        category = self._category_for_ticket(member.guild.id, ticket)
+        allowed_ids = self._ticket_staff_role_ids(member.guild.id, category)
+        return any(role.id in allowed_ids for role in member.roles)
+
+    def _authorized_open_ticket(
+        self,
+        interaction: discord.Interaction,
+        ticket_id: int,
+    ) -> dict | None:
+        guild_id = interaction.guild_id
+        channel = interaction.channel
+        if guild_id is None or channel is None:
+            return None
+        ticket = self.db.get_ticket_by_channel(channel.id)
+        if (
+            not ticket
+            or int(ticket["id"]) != int(ticket_id)
+            or int(ticket["guild_id"]) != int(guild_id)
+            or ticket.get("status") != "OPEN"
+            or not self._is_ticket_staff(interaction.user, ticket)
+        ):
+            return None
+        return ticket
+
     def _sanitize_channel_name(self, name: str, max_len: int = 90) -> str:
         """Sanitiza un nombre para canal: lowercase, espacios→guiones, solo a-z0-9-_ y acorta."""
         s = name.lower()
@@ -248,7 +306,10 @@ class Tickets(commands.Cog):
             s = f"ticket-{int(datetime.now(timezone.utc).timestamp())}"
         return s[:max_len]
 
-    async def create_ticket_channel(self, interaction: discord.Interaction, category: dict, answers: list):
+    async def create_ticket_channel(
+        self, interaction: discord.Interaction, category: dict, answers: list,
+        *, questions: list[str] | None = None,
+    ) -> discord.TextChannel | None:
         guild = interaction.guild
         config = self.db.get_ticket_config(guild.id)
 
@@ -257,17 +318,20 @@ class Tickets(commands.Cog):
         if max_t > 0:
             open_count = self.db.count_open_tickets_by_user(guild.id, interaction.user.id)
             if open_count >= max_t:
-                return await interaction.followup.send(
+                await interaction.followup.send(
                     f"❌ Ya tienes **{open_count}** ticket(s) abierto(s). "
                     f"El máximo permitido es **{max_t}**.",
                     ephemeral=True,
                 )
+                return None
 
         cooldown_secs = int(config.get("ticket_cooldown_seconds") or 0)
         if cooldown_secs > 0:
             last_str = self.db.get_last_ticket_time(guild.id, interaction.user.id)
             if last_str:
                 last_dt = datetime.fromisoformat(last_str)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
                 now_dt = datetime.now(timezone.utc)
                 elapsed = (now_dt - last_dt).total_seconds()
                 if elapsed < cooldown_secs:
@@ -279,10 +343,11 @@ class Tickets(commands.Cog):
                         else f"{mins}m {secs}s" if mins > 0
                         else f"{secs}s"
                     )
-                    return await interaction.followup.send(
+                    await interaction.followup.send(
                         f"❌ Debes esperar **{time_str}** antes de abrir otro ticket.",
                         ephemeral=True,
                     )
+                    return None
 
         # Buscar la categoría en discord
         cat_id = config.get("category_id")
@@ -305,8 +370,7 @@ class Tickets(commands.Cog):
             channel_name = f"{base_name[:80]}-{suffix}"
             suffix += 1
         
-        allowed_roles = json.loads(config.get("allowed_roles", "[]"))
-        immune_roles = json.loads(config.get("immune_roles", "[]"))
+        staff_role_ids = self._ticket_staff_role_ids(guild.id, category)
         
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -314,11 +378,12 @@ class Tickets(commands.Cog):
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
         }
         
-        for r_id in allowed_roles + immune_roles:
+        for r_id in staff_role_ids:
             role = guild.get_role(r_id)
             if role:
                 overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-                
+
+        channel = None
         try:
             channel = await guild.create_text_channel(
                 name=channel_name,
@@ -332,11 +397,19 @@ class Tickets(commands.Cog):
             # Crear embed de bienvenida.
             # Prioridad: template_key (pool reutilizable) → welcome_embed_data inline.
             welcome_data = self._resolve_welcome_data(guild.id, category)
+            template_content = None
             if welcome_data:
                 try:
                     from cogs.embeds import EmbedBuilder
-                    builder = EmbedBuilder.from_json(welcome_data)
-                    embed = builder.build()
+                    from cogs._message_payload import render_message_payload
+                    data = json.loads(welcome_data) if isinstance(welcome_data, str) else welcome_data
+                    if isinstance(data.get("embed"), dict):
+                        rendered = render_message_payload(data, {"username": interaction.user.name, "number": str(global_num)})
+                        embed = rendered["embed"] or discord.Embed(title=f"Ticket #{global_num}")
+                        template_content = rendered["content"]
+                    else:
+                        builder = EmbedBuilder.from_json(welcome_data)
+                        embed = builder.build()
                     # Reemplazar variables básicas en título/descripción si existen
                     if embed.title: embed.title = embed.title.replace("{username}", interaction.user.name).replace("{number}", str(global_num))
                     if embed.description: embed.description = embed.description.replace("{username}", interaction.user.name).replace("{number}", str(global_num))
@@ -347,34 +420,83 @@ class Tickets(commands.Cog):
                 embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
             
             # Siempre añadir las respuestas como campos
-            questions = json.loads(category.get("questions", "[]"))
-            if not questions: questions = ["¿En qué podemos ayudarte?"]
+            if questions is None:
+                questions = json.loads(category.get("questions", "[]"))
+            if not questions:
+                questions = ["¿En qué podemos ayudarte?"]
             
             for q, a in zip(questions, answers):
                 embed.add_field(name=q[:256], value=a[:1024], inline=False)
                 
             view = TicketTakeCloseView(self, ticket["id"])
             
-            await channel.send(content=f"{interaction.user.mention} " + " ".join([f"<@&{r}>" for r in allowed_roles]), embed=embed, view=view)
-            await interaction.followup.send(f"✅ Ticket creado: {channel.mention}", ephemeral=True)
-            
-            # Enviar log
-            log_ch_id = config.get("log_channel_id")
-            if log_ch_id:
-                log_ch = guild.get_channel(log_ch_id)
-                if log_ch:
-                    await log_ch.send(f"📥 **Ticket Abierto:** #{global_num} por {interaction.user.mention} en la categoría `{category['name']}`.")
-                    
+            role_mentions = " ".join(f"<@&{role_id}>" for role_id in sorted(staff_role_ids))
+            from cogs._managed_messages import manage_payload
+            from cogs._message_payload import parse_message_data
+            managed = parse_message_data(welcome_data)
+            payload = await manage_payload(self.bot, guild.id,
+                {"content": " ".join(filter(None, (f"{interaction.user.mention} {role_mentions}".strip(), template_content))), "embed": embed, "view": view},
+                enabled=managed.get("ai_managed") is True if managed else None, category="tickets",
+                protected=(interaction.user.name, str(global_num), category["name"]))
+            await channel.send(**payload)
+            if not self.db.transition_ticket_status(ticket["id"], "CREATING", "OPEN"):
+                raise RuntimeError("No se pudo activar el ticket reservado")
         except Exception as e:
-            logger.error(f"Error creando ticket: {e}")
+            logger.exception("Error creando ticket #%s", global_num)
+            if channel is not None:
+                try:
+                    await channel.delete(reason="Rollback: creación de ticket incompleta")
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+            if not self.db.transition_ticket_status(
+                ticket["id"],
+                "CREATING",
+                "FAILED",
+                closed_at=datetime.now(timezone.utc).isoformat(),
+            ):
+                self.db.update_ticket(
+                    ticket["id"],
+                    status="FAILED",
+                    closed_at=datetime.now(timezone.utc).isoformat(),
+                )
             await interaction.followup.send("❌ Error al crear el canal del ticket.", ephemeral=True)
+            return
+
+        try:
+            await interaction.followup.send(f"✅ Ticket creado: {channel.mention}", ephemeral=True)
+        except discord.HTTPException:
+            logger.warning("Ticket #%s abierto; no se pudo enviar la confirmación", global_num)
+
+        # El logging no revierte un ticket ya provisionado.
+        log_ch_id = config.get("log_channel_id")
+        if log_ch_id:
+            log_ch = guild.get_channel(int(log_ch_id))
+            if log_ch:
+                try:
+                    await log_ch.send(
+                        f"📥 **Ticket Abierto:** #{global_num} por {interaction.user.mention} "
+                        f"en la categoría `{category['name']}`."
+                    )
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    logger.warning("No se pudo registrar apertura de ticket #%s: %s", global_num, exc)
+        return channel
 
     async def close_ticket(self, ticket: dict, closer: discord.Member, reason: str, channel: discord.TextChannel):
         guild = channel.guild
         config = self.db.get_ticket_config(guild.id)
-        now = datetime.now(timezone.utc).isoformat()
-        
-        self.db.update_ticket(ticket["id"], status="CLOSED", closed_at=now)
+        current = self.db.get_ticket_by_channel(channel.id)
+        if (
+            not current
+            or int(current["id"]) != int(ticket["id"])
+            or int(current["guild_id"]) != int(guild.id)
+            or current.get("status") != "OPEN"
+            or not self._is_ticket_staff(closer, current)
+        ):
+            return False
+        ticket = current
+        if not self.db.transition_ticket_status(ticket["id"], "OPEN", "CLOSING"):
+            logger.info("Ticket #%s ya estaba siendo cerrado o no está abierto", ticket.get("global_number"))
+            return False
         
         # 1. Export HTML
         try:
@@ -391,7 +513,7 @@ class Tickets(commands.Cog):
                         staff = guild.get_member(ticket["staff_id"]) if ticket.get("staff_id") else None
                         staffname = staff.mention if staff else "Ninguno"
                         
-                        embed = discord.Embed(title="Ticket Cerrado: #{ticket['global_number']}", color=discord.Color.red(), timestamp=datetime.now(timezone.utc))
+                        embed = discord.Embed(title=f"Ticket Cerrado: #{ticket['global_number']}", color=discord.Color.red(), timestamp=datetime.now(timezone.utc))
                         embed.add_field(name="Categoría", value=ticket["category_name"], inline=True)
                         embed.add_field(name="Usuario", value=username, inline=True)
                         embed.add_field(name="Atendido por", value=staffname, inline=True)
@@ -413,6 +535,22 @@ class Tickets(commands.Cog):
             await channel.delete(reason=f"Ticket cerrado por {closer.name}")
         except discord.NotFound:
             pass
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            logger.error("No se pudo borrar el canal del ticket #%s: %s", ticket["global_number"], exc)
+            self.db.transition_ticket_status(ticket["id"], "CLOSING", "OPEN")
+            try:
+                await channel.send("❌ No pude completar el cierre del ticket; el estado fue restaurado.")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            return False
+
+        self.db.transition_ticket_status(
+            ticket["id"],
+            "CLOSING",
+            "CLOSED",
+            closed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return True
 
     @app_commands.command(name="añadir_usuario", description="Añade a un usuario al ticket actual")
     @app_commands.describe(usuario="El usuario a añadir")
@@ -422,12 +560,9 @@ class Tickets(commands.Cog):
             return await interaction.response.send_message("❌ Este comando solo se puede usar en un ticket abierto.", ephemeral=True)
             
         config = self.db.get_ticket_config(interaction.guild_id)
-        allowed_roles = json.loads(config.get("allowed_roles", "[]"))
-        immune_roles = json.loads(config.get("immune_roles", "[]"))
-        user_roles = [r.id for r in interaction.user.roles]
-        
-        is_auth = interaction.user.id == ticket["user_id"] or interaction.user.guild_permissions.administrator or \
-                  any(r in user_roles for r in allowed_roles + immune_roles)
+        is_auth = interaction.user.id == ticket["user_id"] or self._is_ticket_staff(
+            interaction.user, ticket
+        )
                   
         if not is_auth:
             return await interaction.response.send_message("❌ No tienes permisos.", ephemeral=True)
@@ -436,13 +571,16 @@ class Tickets(commands.Cog):
         overwrites[usuario] = discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True)
         await interaction.channel.edit(overwrites=overwrites)
         
-        await interaction.response.send_message(f"✅ {usuario.mention} ha sido añadido al ticket por {interaction.user.mention}.")
+        from cogs._managed_messages import send_managed
+        await send_managed(self.bot, interaction.guild_id, "tickets", interaction.response.send_message,
+                           f"✅ {usuario.mention} ha sido añadido al ticket por {interaction.user.mention}.")
         
         log_ch_id = config.get("log_channel_id")
         if log_ch_id:
             log_ch = interaction.guild.get_channel(log_ch_id)
             if log_ch:
-                await log_ch.send(f"👥 **Usuario añadido:** {usuario.mention} fue añadido al ticket #{ticket['global_number']} por {interaction.user.mention}.")
+                await send_managed(self.bot, interaction.guild_id, "tickets", log_ch.send,
+                                   f"👥 **Usuario añadido:** {usuario.mention} fue añadido al ticket #{ticket['global_number']} por {interaction.user.mention}.")
 
     # ── Comandos de configuración eliminados ──────────────────────────────────
     # /tickets setup, /tickets panel_embed, /tickets category_add, /tickets panel
@@ -493,11 +631,18 @@ class Tickets(commands.Cog):
 
         config = self.db.get_ticket_config(guild.id)
         panel_data = self._resolve_panel_data(guild.id, config)
+        content = None
 
         if panel_data:
             try:
                 from cogs.embeds import EmbedBuilder
-                embed = EmbedBuilder.from_json(panel_data).build()
+                from cogs._message_payload import render_message_payload
+                data = json.loads(panel_data) if isinstance(panel_data, str) else panel_data
+                if isinstance(data.get("embed"), dict):
+                    rendered = render_message_payload(data)
+                    content, embed = rendered["content"], rendered["embed"]
+                else:
+                    embed = EmbedBuilder.from_json(panel_data).build()
             except Exception:
                 embed = discord.Embed(
                     title="Soporte y Contacto",
@@ -516,7 +661,12 @@ class Tickets(commands.Cog):
             return False, "Canal no encontrado"
 
         view = TicketPanelView(self, categories)
-        await channel.send(embed=embed, view=view)
+        from cogs._managed_messages import manage_payload
+        from cogs._message_payload import parse_message_data
+        managed = parse_message_data(panel_data)
+        payload = await manage_payload(self.bot, guild.id, {"content": content, "embed": embed, "view": view},
+                                       enabled=managed.get("ai_managed") is True if managed else None, category="tickets")
+        await channel.send(**payload)
         self.db.set_ticket_config(guild.id, panel_channel_id=channel_id)
         return True, "Panel enviado correctamente"
 
@@ -525,5 +675,6 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(cog)
     # Registrar vistas persistentes para que sobrevivan reinicios del bot
     bot.add_view(TicketTakeCloseView(cog, 0))   # custom_ids fijos, ticket_id se lee de DB
+    bot.add_view(TicketCloseConfirmView(cog))  # solicitudes de cierre anteriores al reinicio
     bot.add_view(TicketPanelView(cog))          # sin categorías; callback re-lee de DB
 

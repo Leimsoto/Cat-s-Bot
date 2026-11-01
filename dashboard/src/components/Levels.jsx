@@ -209,7 +209,7 @@ export default function Levels({ selectedGuild: guildId }) {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+                gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,180px),1fr))",
                 gap: 14}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
@@ -515,8 +515,26 @@ export default function Levels({ selectedGuild: guildId }) {
                     </div>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontWeight: 700 }}>Nivel {r.level}</div>
-                      <div style={{ fontSize: "0.82rem", color: "var(--muted)" }}>
-                        Rol id <code>{r.role_id}</code>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 7,
+                          marginTop: 3,
+                          fontSize: "0.86rem",
+                          color: r.role_exists === false ? "#fb7185" : "var(--text)"}}
+                      >
+                        <span
+                          className="ss-swatch"
+                          style={{ background: r.role_color || "var(--muted)" }}
+                          aria-hidden="true"
+                        />
+                        <span>
+                          {r.role_name ? `@${r.role_name}` : "Rol eliminado o no disponible"}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: "0.72rem", color: "var(--muted)", marginTop: 2 }}>
+                        ID {r.role_id}
                       </div>
                     </div>
                     <button

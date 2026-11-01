@@ -1,3 +1,4 @@
+import { useSaveBar } from "../lib/SaveBarContext";
 import { useState, useEffect, useCallback } from 'react';
 import { apiGet, apiPost } from '../lib/api';
 
@@ -17,6 +18,7 @@ export default function EmbedBuilder({ selectedGuild }) {
   const [sending, setSending]     = useState(false);
   const [toast, setToast]         = useState(null);
   const [tab, setTab]             = useState('content');
+  const [savedDraft, setSavedDraft] = useState(() => JSON.stringify({ embed: EMPTY_EMBED, webhook: EMPTY_WEBHOOK, channelId: "" }));
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
@@ -46,6 +48,7 @@ export default function EmbedBuilder({ selectedGuild }) {
         embed,
         webhook_name: webhook.name || undefined,
         webhook_avatar: webhook.icon_url || undefined});
+      setSavedDraft(JSON.stringify({ embed, webhook, channelId }));
       showToast('✅ Embed enviado correctamente!');
     } catch (e) { showToast(e.message || 'Error al enviar el embed.', 'error'); }
     finally { setSending(false); }
@@ -54,6 +57,8 @@ export default function EmbedBuilder({ selectedGuild }) {
   const colorHex = embed.color || '#6366f1';
 
   const TABS = [['content','✏️ Contenido'],['author','👤 Autor/Footer'],['webhook','Webhook'],['media','🖼️ Imágenes']];
+
+  useSaveBar({ dirty: JSON.stringify({ embed, webhook, channelId }) !== savedDraft, saving: sending, onRevert: () => { setEmbed(EMPTY_EMBED); setWebhook(EMPTY_WEBHOOK); setChannelId(""); setSavedDraft(JSON.stringify({ embed: EMPTY_EMBED, webhook: EMPTY_WEBHOOK, channelId: "" })); } });
 
   return (
     <div className="automod-container animate-fade-in">
@@ -74,7 +79,7 @@ export default function EmbedBuilder({ selectedGuild }) {
         </div>
       </div>
 
-      <div style={{display:'grid',gridTemplateColumns:'1fr 420px',gap:22,alignItems:'start'}}>
+      <div className="secondary-editor-layout">
         {/* Editor */}
         <div style={{display:'flex',flexDirection:'column',gap:14}}>
           {/* Tabs */}

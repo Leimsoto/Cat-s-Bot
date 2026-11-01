@@ -1,3 +1,4 @@
+import { useSaveBar } from "../lib/SaveBarContext";
 /**
  * components/AutoResponses.jsx
  * ────────────────────────────
@@ -37,9 +38,11 @@ const EMPTY_FORM = {
 export default function AutoResponses({ selectedGuild: guildId }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [editing, setEditing] = useState(false);
+  const [initialForm, setInitialForm] = useState(null);
   const [editorTab, setEditorTab] = useState("content");
 
   const showToast = (msg, type = "success") => setToast({ msg, type });
@@ -64,6 +67,7 @@ export default function AutoResponses({ selectedGuild: guildId }) {
 
   const startNew = () => {
     setForm(EMPTY_FORM);
+    setInitialForm(EMPTY_FORM);
     setEditing(true);
   };
 
@@ -75,7 +79,7 @@ export default function AutoResponses({ selectedGuild: guildId }) {
     } else if (ar.response) {
       msg = normalizeMessage({ content: ar.response, enabled: false, embed: EMPTY_MESSAGE.embed });
     }
-    setForm({
+    const next = {
       id: ar.id,
       trigger: ar.trigger || "",
       match_type: ar.match_type || "contains",
@@ -83,12 +87,14 @@ export default function AutoResponses({ selectedGuild: guildId }) {
       enabled: ar.enabled !== 0,
       channel_id: ar.channel_id || null,
       message: msg,
-    });
+    };
+    setForm(next); setInitialForm(next);
     setEditorTab(msg.enabled ? "embed-content" : "content");
     setEditing(true);
   };
 
   const save = async () => {
+    if (saving) return;
     if (!form.trigger.trim()) return showToast("Trigger es requerido", "error");
     const msg = form.message || EMPTY_MESSAGE;
     const hasContent = (msg.content && msg.content.trim()) ||
@@ -105,6 +111,7 @@ export default function AutoResponses({ selectedGuild: guildId }) {
       response_data: JSON.stringify(msg),
     };
 
+    setSaving(true);
     try {
       if (form.id) {
         await apiPatch(`/api/guilds/${guildId}/autoresponses/${form.id}`, payload);
@@ -117,7 +124,7 @@ export default function AutoResponses({ selectedGuild: guildId }) {
       load();
     } catch (e) {
       showToast(e.message || "Error", "error");
-    }
+    } finally { setSaving(false); }
   };
 
   const remove = async (id) => {
@@ -139,6 +146,8 @@ export default function AutoResponses({ selectedGuild: guildId }) {
       load();
     } catch (e) { showToast(e.message || "Error", "error"); }
   };
+
+  useSaveBar({ dirty: editing && JSON.stringify(form) !== JSON.stringify(initialForm), saving, onSave: save, onRevert: () => { setEditing(false); setForm(initialForm || EMPTY_FORM); } });
 
   if (loading) {
     return (
@@ -177,7 +186,7 @@ export default function AutoResponses({ selectedGuild: guildId }) {
         <div className="glass-panel" style={{ padding: 24, borderRadius: 22, marginBottom: 20, display: "flex", flexDirection: "column", gap: 16 }}>
           <h3 style={{ margin: 0 }}>{form.id ? `Editar #${form.id}` : "Crear auto-respuesta"}</h3>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <div className="form-grid">
             <div className="config-item" style={{ marginBottom: 0 }}>
               <label>Trigger</label>
               <input

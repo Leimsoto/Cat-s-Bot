@@ -3,6 +3,8 @@ import { apiGet, apiPatch, apiPost } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
+import IdentityBadge from "./IdentityBadge";
+import ModerationReason from "./ModerationReason";
 import { useSaveBar } from "../lib/SaveBarContext";
 
 export default function Moderation({ selectedGuild: guildId }) {
@@ -139,6 +141,10 @@ export default function Moderation({ selectedGuild: guildId }) {
   const setId = (k) => (v) => set(k, v ? String(v) : null);
 
   const save = async () => {
+    if (cfg.message_role_enabled && (!cfg.message_role_id || !cfg.message_role_notice?.trim())) {
+      showToast("Selecciona el rol requerido y escribe el texto del aviso.", "error");
+      return;
+    }
     setSaving(true);
     try {
       const res = await apiPatch(`/api/guilds/${guildId}/moderation`, cfg);
@@ -264,6 +270,66 @@ export default function Moderation({ selectedGuild: guildId }) {
 
       {tab === "config" && cfg && (
         <>
+          <section
+            className="glass-panel mod-section"
+            aria-labelledby="message-role-title"
+            style={{ padding: 24, borderRadius: 16, display: "flex", flexDirection: "column", gap: 16 }}
+          >
+            <div className="section-title">
+              <h3 id="message-role-title" style={{ margin: 0 }}>Rol requerido para hablar</h3>
+            </div>
+            <p style={{ margin: 0, color: "var(--text-muted)", maxWidth: "70ch" }}>
+              Al enviar un mensaje sin este rol, el bot lo borra y publica un aviso en el mismo canal mencionando al autor. Con el rol puedes hablar libremente.
+            </p>
+            <div className="config-item inline-check" style={{ marginBottom: 0 }}>
+              <label htmlFor="message-role-enabled" style={{ fontWeight: 700 }}>Exigir este rol para hablar</label>
+              <label className="toggle-switch">
+                <input
+                  id="message-role-enabled"
+                  type="checkbox"
+                  checked={!!cfg.message_role_enabled}
+                  onChange={(e) => set("message_role_enabled", e.target.checked ? 1 : 0)}
+                />
+                <span className="slider" />
+              </label>
+            </div>
+            <div className="config-item" role="group" aria-labelledby="message-role-label" style={{ marginBottom: 0 }}>
+              <label id="message-role-label">Rol requerido</label>
+              <SearchableSelect
+                value={cfg.message_role_id || ""}
+                onChange={setId("message_role_id")}
+                endpoint={`/api/guilds/${guildId}/roles?include_managed=true`}
+                itemsKey="roles"
+                placeholder="Selecciona el rol que permite hablar…"
+                renderOption={renderRoleOption}
+                renderSelected={renderRoleSelected}
+                disabled={!cfg.message_role_enabled}
+              />
+            </div>
+            <div className="config-item" style={{ marginBottom: 0 }}>
+              <label htmlFor="message-role-notice">Texto del aviso</label>
+              <textarea
+                id="message-role-notice"
+                rows={3}
+                maxLength={1975}
+                value={cfg.message_role_notice ?? "Necesitas el rol requerido para hablar en este servidor."}
+                onChange={(e) => set("message_role_notice", e.target.value)}
+                disabled={!cfg.message_role_enabled}
+                aria-describedby="message-role-notice-help"
+                aria-invalid={!!cfg.message_role_enabled && !cfg.message_role_notice?.trim()}
+              />
+              <small id="message-role-notice-help" style={{ color: "var(--text-muted)" }}>
+                {cfg.message_role_notice?.length ?? 0}/1975 caracteres. La mención del autor se añade automáticamente; el texto no activa otras menciones.
+              </small>
+            </div>
+            {!!cfg.message_role_enabled && (!cfg.message_role_id || !cfg.message_role_notice?.trim()) && (
+              <p role="alert" style={{ margin: 0, color: "var(--danger)" }}>Selecciona un rol y escribe el aviso antes de guardar.</p>
+            )}
+            <p style={{ margin: 0, color: "var(--text-muted)", maxWidth: "70ch" }}>
+              Afecta a todos los canales, incluidos administradores sin el rol. No actúa al escribir, en mensajes privados ni en mensajes de bots, webhooks o del sistema. Se envía un aviso por persona cada 10 segundos; los mensajes sin rol se siguen borrando. El bot necesita ver el canal, gestionar mensajes y enviar mensajes (también en hilos).
+            </p>
+          </section>
+
           <div
             className="glass-panel mod-section"
             style={{
@@ -279,7 +345,7 @@ export default function Moderation({ selectedGuild: guildId }) {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))",
+                gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,260px),1fr))",
                 gap: 16}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
@@ -369,7 +435,7 @@ export default function Moderation({ selectedGuild: guildId }) {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
+                gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,220px),1fr))",
                 gap: 14}}
             >
               {[
@@ -478,7 +544,8 @@ export default function Moderation({ selectedGuild: guildId }) {
                 <p>Sin casos con este filtro.</p>
               </div>
             )}
-            {filteredCases.map((c, i) => (
+            {filteredCases.map((c, i) => {
+              return (
               <div
                 key={c.id || i}
                 className="case-row"
@@ -499,14 +566,17 @@ export default function Moderation({ selectedGuild: guildId }) {
                     color: COLORS[c.action_type] || "#818cf8",
                     border: `1px solid ${COLORS[c.action_type] || "#6366f1"}44`}}
                 >
-                  {c.action_type}
+                  {c.action_label || c.action_type}
                 </span>
                 <div style={{ flex: 1, minWidth: 140 }}>
-                  <div style={{ fontWeight: 700 }}>
-                    #{c.case_number || c.id} · Usuario: {c.user_id || c.target_id}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ fontSize: "0.78rem", color: "var(--muted)", fontWeight: 800 }}>
+                      Caso #{c.case_number || c.id}
+                    </div>
+                    <IdentityBadge item={c} />
                   </div>
                   <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
-                    {c.reason || "Sin razón"}
+                    <ModerationReason entry={c} />
                   </div>
                   {c.evidence_url && (
                     <a href={c.evidence_url} target="_blank" rel="noreferrer" style={{ fontSize: "0.78rem" }}>
@@ -524,10 +594,11 @@ export default function Moderation({ selectedGuild: guildId }) {
                     borderRadius: 10,
                     padding: "7px 10px"}}
                 >
-                  <option value="active">active</option>
-                  <option value="expired">expired</option>
-                  <option value="revoked">revoked</option>
-                  <option value="failed">failed</option>
+                  <option value="active">Activa</option>
+                  <option value="expired">Caducada</option>
+                  <option value="revoked">Revocada</option>
+                  <option value="failed">Fallida</option>
+                  <option value="applying" disabled>Aplicando · sin confirmar</option>
                 </select>
                 <button
                   type="button"
@@ -543,7 +614,7 @@ export default function Moderation({ selectedGuild: guildId }) {
                     : "—"}
                 </div>
               </div>
-            ))}
+            );})}
           </div>
         </div>
       )}
@@ -574,21 +645,22 @@ export default function Moderation({ selectedGuild: guildId }) {
                         background: `${color}22`,
                         color}}
                     >
-                      {c.action_type}
+                      {c.action_label || c.action_type}
                     </span>
                     <strong>#{c.case_number || c.id}</strong>
-                    <span>Usuario: {c.user_id || c.target_id}</span>
+                    <IdentityBadge item={c} compact />
                     <span style={{ color: "var(--muted)" }}>
                       Expira: {c.expires_at ? new Date(c.expires_at).toLocaleString() : "permanente"}
                     </span>
                   </div>
                   <div style={{ marginTop: 8, color: "var(--muted)", fontSize: "0.86rem" }}>
-                    {c.reason || "Sin razón"}
+                    <ModerationReason entry={c} />
                   </div>
                 </div>
               );
             })}
-            {activeModerations.pending.map((p, i) => (
+            {activeModerations.pending.map((p, i) => {
+              return (
               <div
                 key={`pending-${p.id || i}`}
                 className="case-row"
@@ -606,14 +678,14 @@ export default function Moderation({ selectedGuild: guildId }) {
                   >
                     JOB
                   </span>
-                  <strong>{p.action_type}</strong>
-                  <span>Usuario: {p.user_id}</span>
+                  <strong>{p.action_label || p.action_type}</strong>
+                  <IdentityBadge item={p} compact />
                   <span style={{ color: "var(--muted)" }}>
                     Ejecuta: {p.execute_at ? new Date(p.execute_at).toLocaleString() : "—"}
                   </span>
                 </div>
               </div>
-            ))}
+            );})}
           </div>
         </div>
       )}
@@ -689,15 +761,15 @@ export default function Moderation({ selectedGuild: guildId }) {
                         color: COLORS[a.action_type] || "#818cf8",
                       }}
                     >
-                      {a.action_type}
+                      {a.action_label || a.action_type}
                     </span>
-                    <div style={{ fontWeight: 700 }}>Usuario: {a.user_id}</div>
+                    <IdentityBadge item={a} prefix="user" compact />
                     <div style={{ marginLeft: "auto", fontSize: "0.78rem", color: "var(--muted)" }}>
                       {a.created_at ? new Date(a.created_at).toLocaleString() : "—"}
                     </div>
                   </div>
                   <div style={{ fontSize: "0.86rem" }}>
-                    <strong>Razón original:</strong> {a.reason || "—"}
+                    <strong>Razón original:</strong> <ModerationReason entry={a} />
                   </div>
                   <div style={{ fontSize: "0.86rem" }}>
                     <strong>Defensa:</strong>{" "}

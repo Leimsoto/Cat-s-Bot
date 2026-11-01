@@ -28,7 +28,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from cogs._message_payload import render_message_payload
+from cogs._managed_messages import render_managed_message_payload, send_managed
 
 logger = logging.getLogger("CustomCommands")
 
@@ -58,14 +58,14 @@ def _user_can_use(member: discord.Member, permission_data: Optional[str]) -> boo
     try:
         data = json.loads(permission_data) if isinstance(permission_data, str) else permission_data
     except (json.JSONDecodeError, TypeError):
-        return True
+        return False
     if not isinstance(data, dict):
-        return True
+        return False
     if data.get("everyone", True):
         return True
     allowed = {str(rid) for rid in (data.get("role_ids") or [])}
     if not allowed:
-        return True
+        return False
     return any(str(r.id) in allowed for r in member.roles)
 
 
@@ -101,9 +101,10 @@ class CustomCommands(commands.Cog):
         if not after_prefix:
             return
 
-        parts = after_prefix.split()
+        parts = after_prefix.split(maxsplit=1)
         cmd_name = parts[0].lower()
-        args = parts[1:]
+        args_text = parts[1] if len(parts) > 1 else ""
+        args = args_text.split()
 
         command = self.db.get_custom_command(message.guild.id, cmd_name)
         if not command or not command.get("enabled", 1):
@@ -112,15 +113,6 @@ class CustomCommands(commands.Cog):
         if not _user_can_use(message.author, command.get("permission_data")):
             return
 
-        self.db.increment_cc_uses(message.guild.id, cmd_name)
-
-        # Auto-delete del mensaje de invocación si está activado.
-        if command.get("delete_invocation"):
-            try:
-                await message.delete()
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-
         variables = {
             "user": message.author.mention,
             "username": str(message.author),
@@ -128,37 +120,44 @@ class CustomCommands(commands.Cog):
             "id": str(message.author.id),
             "server": message.guild.name,
             "channel": message.channel.mention,
-            "args": " ".join(args),
+            "args": args_text,
         }
         for i, arg in enumerate(args, 1):
             variables[str(i)] = arg
 
         response_data = command.get("response_data")
-        if response_data:
-            try:
-                payload = render_message_payload(
-                    response_data, variables, member=message.author,
+        try:
+            if response_data:
+                payload = await render_managed_message_payload(
+                    self.bot, message.guild.id, response_data, variables, member=message.author,
                 )
+                if not payload["content"] and payload["embed"] is None:
+                    raise ValueError("Respuesta vacía o inválida")
                 await message.channel.send(
                     content=payload["content"],
                     embed=payload["embed"],
                 )
-                return
-            except Exception as exc:
-                logger.warning("Error renderizando response_data: %s", exc)
-
-        # Fallback legacy: actions JSON.
-        actions = self._parse_actions(command.get("actions"))
-        for action in actions:
-            if action.get("type") == "send_message":
+            else:
+                actions = self._parse_actions(command.get("actions"))
+                action = next((item for item in actions if item.get("type") == "send_message"), None)
+                if action is None:
+                    return
                 content = action.get("content", "")
                 for k, v in variables.items():
                     content = content.replace("{" + k + "}", str(v))
-                try:
-                    await message.channel.send(content)
-                except discord.HTTPException as exc:
-                    logger.warning("Error enviando custom command: %s", exc)
-                break
+                if not content.strip():
+                    return
+                await send_managed(self.bot, message.guild.id, "custom_commands", message.channel.send, content)
+        except Exception as exc:
+            logger.warning("No se pudo enviar el comando personalizado %s: %s", cmd_name, exc)
+            return
+
+        self.db.increment_cc_uses(message.guild.id, cmd_name)
+        if command.get("delete_invocation"):
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                logger.warning("Respuesta enviada, pero no se pudo borrar la invocación de %s", cmd_name)
 
     def _parse_actions(self, raw) -> List[Dict[str, Any]]:
         try:

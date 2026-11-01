@@ -30,7 +30,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from cogs._message_payload import render_message_payload
+from cogs._managed_messages import render_managed_message_payload, send_managed
 
 logger = logging.getLogger("Scheduler")
 
@@ -53,7 +53,7 @@ def _parse_interval(text: str) -> int:
     try:
         n = float(text[:-1])
         return int(n * units[unit])
-    except ValueError:
+    except (ValueError, OverflowError):
         return -1
 
 
@@ -103,9 +103,25 @@ class ScheduleCreateModal(discord.ui.Modal, title="Crear Mensaje Programado"):
         self.channel = channel
 
     async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if (
+            guild is None
+            or not interaction.user.guild_permissions.administrator
+            or getattr(getattr(self.channel, "guild", None), "id", None) != guild.id
+        ):
+            return await interaction.response.send_message(
+                "❌ Debes seguir siendo administrador y usar un canal de este servidor.",
+                ephemeral=True,
+            )
+
         name = self.name_input.value.strip()
         content = self.content_input.value.strip()
         interval_str = self.interval_input.value.strip()
+
+        if not name or not content:
+            return await interaction.response.send_message(
+                "❌ El nombre y el mensaje no pueden quedar en blanco.", ephemeral=True
+            )
 
         interval_secs = _parse_interval(interval_str)
         if interval_secs < MIN_INTERVAL:
@@ -246,18 +262,17 @@ class Scheduler(commands.Cog):
             "channel": channel.mention,
         }
         if message_data:
-            try:
-                payload = render_message_payload(message_data, variables)
-                if payload["content"] or payload["embed"] is not None:
-                    await channel.send(content=payload["content"], embed=payload["embed"])
-                    return
-            except Exception as exc:
-                logger.warning("message_data inválido para schedule %s: %s", sched.get("name"), exc)
+            payload = await render_managed_message_payload(self.bot, guild.id, message_data, variables)
+            if not payload["content"] and payload["embed"] is None:
+                raise ValueError("El mensaje programado está vacío o tiene un formato inválido.")
+            await channel.send(content=payload["content"], embed=payload["embed"])
+            return
         content = sched.get("content") or ""
         for k, v in variables.items():
             content = content.replace("{" + k + "}", str(v))
-        if content:
-            await channel.send(content)
+        if not content.strip():
+            raise ValueError("El mensaje programado está vacío.")
+        await send_managed(self.bot, guild.id, "scheduler", channel.send, content)
 
     @cron_runner.before_loop
     async def before_cron(self):
@@ -339,15 +354,18 @@ class Scheduler(commands.Cog):
         channel = interaction.guild.get_channel(int(sched["channel_id"]))
         if not channel or not isinstance(channel, discord.TextChannel):
             return await interaction.response.send_message("❌ Canal no encontrado.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         try:
             await self._send_scheduled_message(channel, sched, interaction.guild)
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"✅ Mensaje de prueba enviado a {channel.mention}.", ephemeral=True
             )
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Sin permisos para enviar en ese canal.", ephemeral=True
             )
+        except (ValueError, discord.HTTPException) as exc:
+            await interaction.followup.send(f"❌ No se pudo enviar el mensaje: {exc}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

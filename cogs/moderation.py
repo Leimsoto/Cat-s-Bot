@@ -18,15 +18,40 @@ Comandos slash:
   La configuración se gestiona desde el Dashboard Web.
 """
 
+import asyncio
 import json
 import logging
 import re
+from copy import copy
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from cogs._moderation_history import interaction_metadata
+from cogs._mute_roles import confirm_mute_receipts, fresh_members, plan_role_mute, role_permissions, restore_roles
+
+from cogs._role_safety import (
+    delegated_bot_role_ids,
+    delegated_moderation_role_ids,
+    member_is_effectively_muted,
+    mute_role_has_effective_denies,
+    safe_for_automatic_assignment,
+    safe_for_automatic_removal,
+)
+from cogs.channels import check_channel_perms
+from cogs._sanction_locks import (
+    ban_reason_matches,
+    new_ban_effect_token,
+    new_mute_effect_token,
+    mute_reason_matches,
+    reason_with_ban_effect,
+    reason_with_mute_effect,
+    run_sanction_locked,
+    run_sanctions_locked,
+    sanction_lock,
+)
 
 def _voice(cog):
     """Return bot.catbot_voice if available, else a no-op fallback."""
@@ -63,8 +88,10 @@ def parse_duration(raw: str) -> Optional[int]:
     units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
     try:
         if raw[-1] in units:
-            return int(raw[:-1]) * units[raw[-1]]
-        return int(raw) * 60
+            total = int(raw[:-1]) * units[raw[-1]]
+        else:
+            total = int(raw) * 60
+        return total if total > 0 else None
     except (ValueError, IndexError):
         return None
 
@@ -79,6 +106,15 @@ def fmt_duration(seconds: Optional[int]) -> str:
             parts.append(f"{seconds // unit}{label}")
             seconds %= unit
     return " ".join(parts) if parts else "0s"
+
+
+def _parse_discord_user_id(raw: str) -> Optional[int]:
+    """Acepta un snowflake numérico o una mención de usuario de Discord."""
+    match = re.fullmatch(r"(?:<@!?(\d+)>|(\d+))", raw.strip())
+    if match is None:
+        return None
+    user_id = int(match.group(1) or match.group(2))
+    return user_id if 0 < user_id < 2**64 else None
 
 
 # ── Embed de warn configurable ────────────────────────────────────────────────
@@ -231,12 +267,22 @@ class Moderation(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = bot.db  # type: ignore  # inyectado desde main.py
+        try:
+            self.db.recover_processing_moderation_actions()
+            self.db.recover_processing_log_outbox()
+        except Exception as exc:
+            logger.warning("No se pudieron recuperar jobs en processing: %s", exc)
+        self._ban_reconciliation_ready = asyncio.Event()
+        self._ban_reconciliation_task = asyncio.create_task(
+            self._reconcile_applying_bans()
+        )
         self._check_mutes.start()
         self._check_tempbans.start()
         self._check_pending_moderation.start()
         self._flush_log_outbox.start()
 
     def cog_unload(self):
+        self._ban_reconciliation_task.cancel()
         self._check_mutes.cancel()
         self._check_tempbans.cancel()
         self._check_pending_moderation.cancel()
@@ -280,7 +326,8 @@ class Moderation(commands.Cog):
             self._enqueue_modlog_outbox(guild, embed, None, "modlog_channel_unavailable")
             return False
         try:
-            await channel.send(embed=embed)
+            from cogs._managed_messages import send_managed
+            await send_managed(self.bot, guild.id, "moderation", channel.send, embed=embed)
             return True
         except discord.Forbidden:
             logger.warning("Sin permisos para enviar logs en %s", guild.name)
@@ -354,9 +401,13 @@ class Moderation(commands.Cog):
         """Responde una interacción sin dejar que tokens expirados rompan el comando."""
         try:
             if not interaction.response.is_done():
-                await interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+                from cogs._managed_messages import send_managed
+                await send_managed(self.bot, interaction.guild_id, "moderation", interaction.response.send_message,
+                                   content=content, embed=embed, ephemeral=ephemeral)
             else:
-                await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+                from cogs._managed_messages import send_managed
+                await send_managed(self.bot, interaction.guild_id, "moderation", interaction.followup.send,
+                                   content=content, embed=embed, ephemeral=ephemeral)
             return True
         except discord.NotFound:
             logger.warning("No se pudo responder: interacción/webhook expirado o desconocido")
@@ -393,24 +444,46 @@ class Moderation(commands.Cog):
             role_id = int(cfg.get("mute_role_id") or 0)
         except (TypeError, ValueError):
             role_id = 0
+        bot_member = guild.get_member(self.bot.user.id) if self.bot.user else None
         role = guild.get_role(role_id) if role_id else None
+        forbidden_role_ids = delegated_bot_role_ids(self.db, guild.id)
+        if safe_for_automatic_assignment(
+            role,
+            bot_member,
+            forbidden_role_ids=forbidden_role_ids,
+        ):
+            if mute_role_has_effective_denies(guild, role):
+                return role
+            await self._apply_mute_overwrites(guild, role)
+            role = guild.get_role(role.id)
+            if mute_role_has_effective_denies(guild, role):
+                return role
         if role:
-            return role
+            logger.warning("Rol mute inseguro ignorado en %s: %s", guild.id, role.id)
 
         for name in ("Muted", "Silenciado", "Muteado"):
             existing = discord.utils.find(
                 lambda r: r.name.lower() == name.lower(), guild.roles
             )
-            if existing:
+            if safe_for_automatic_assignment(
+                existing,
+                bot_member,
+                forbidden_role_ids=forbidden_role_ids,
+            ):
+                await self._apply_mute_overwrites(guild, existing)
+                existing = guild.get_role(existing.id)
+                if not mute_role_has_effective_denies(guild, existing):
+                    continue
                 try:
                     self.db.set_config(guild.id, mute_role_id=existing.id)
                 except Exception as exc:
                     logger.warning("No se pudo persistir mute_role_id: %s", exc)
-                await self._apply_mute_overwrites(guild, existing)
                 return existing
 
-        bot_member = guild.get_member(self.bot.user.id) if self.bot.user else None
-        if not bot_member or not bot_member.guild_permissions.manage_roles:
+        if not bot_member or not (
+            bot_member.guild_permissions.manage_roles
+            and bot_member.guild_permissions.manage_channels
+        ):
             return None
         try:
             new_role = await guild.create_role(
@@ -422,8 +495,17 @@ class Moderation(commands.Cog):
             logger.warning("No se pudo crear rol Muted en %s: %s", guild.name, exc)
             return None
 
-        # Aplicar overrides en canales (best-effort).
-        await self._apply_mute_overwrites(guild, new_role)
+        # No se adopta un rol parcial: todos los canales relevantes deben
+        # confirmar los denies antes de persistirlo o usarlo.
+        changed = await self._apply_mute_overwrites(guild, new_role)
+        new_role = guild.get_role(new_role.id)
+        if changed == 0 or not mute_role_has_effective_denies(guild, new_role):
+            if new_role is not None:
+                try:
+                    await new_role.delete(reason="Configuración de mute incompleta")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+            return None
 
         try:
             self.db.set_config(guild.id, mute_role_id=new_role.id)
@@ -431,7 +513,12 @@ class Moderation(commands.Cog):
             logger.warning("No se pudo persistir mute_role_id nuevo: %s", exc)
         return new_role
 
-    async def _dm(self, user: discord.Member, embed: discord.Embed, view: Optional[discord.ui.View] = None) -> None:
+    async def _dm(
+        self,
+        user: Union[discord.Member, discord.User],
+        embed: discord.Embed,
+        view: Optional[discord.ui.View] = None,
+    ) -> None:
         try:
             if view:
                 await user.send(embed=embed, view=view)
@@ -442,9 +529,14 @@ class Moderation(commands.Cog):
         except discord.HTTPException as exc:
             logger.warning("Error enviando DM a %s (%s): %s", user, user.id, exc)
 
-    def _has_mod_perms(self, interaction: discord.Interaction, perm_name: str) -> bool:
-        user = interaction.user
-        if not interaction.guild_id or not isinstance(user, discord.Member):
+    def _member_has_mod_perms(
+        self,
+        guild: discord.Guild,
+        user: discord.Member,
+        perm_name: str,
+    ) -> bool:
+        user_guild = getattr(user, "guild", None)
+        if user_guild is not None and getattr(user_guild, "id", None) != guild.id:
             return False
 
         if getattr(user.guild_permissions, "administrator", False):
@@ -452,11 +544,345 @@ class Moderation(commands.Cog):
         if getattr(user.guild_permissions, perm_name, False):
             return True
 
-        srv = self.db.get_server_config(interaction.guild_id)
-        r_ids = [r.id for r in user.roles]
-        if srv.get("mod_role_id") in r_ids or srv.get("staff_role_id") in r_ids:
-            return True
+        delegated_ids = delegated_moderation_role_ids(
+            getattr(self, "db", None), guild.id
+        )
+        if delegated_ids is None:
+            return False
+        return any(role.id in delegated_ids for role in user.roles)
+
+    def _has_mod_perms(self, interaction: discord.Interaction, perm_name: str) -> bool:
+        user = interaction.user
+        guild = interaction.guild
+        if guild is None or not isinstance(user, discord.Member):
+            return False
+        return self._member_has_mod_perms(guild, user, perm_name)
+
+    @staticmethod
+    def _enabled_config_flag(value: object, *, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value == 1
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
         return False
+
+    def _current_warn_consequence(
+        self, guild_id: int, user_id: int
+    ) -> tuple[Optional[str], int, Optional[int]]:
+        """Devuelve la consecuencia vigente usando contador y configuración actuales."""
+        try:
+            cfg = self.db.get_config(guild_id) or {}
+            warns = int((self.db.get_user(user_id, guild_id) or {}).get("warns") or 0)
+            ban_threshold = max(1, int(cfg.get("warn_ban_threshold", 7) or 7))
+            kick_threshold = max(1, int(cfg.get("warn_kick_threshold", 5) or 5))
+            mute_threshold = max(1, int(cfg.get("warn_mute_threshold", 3) or 3))
+            mute_duration = max(
+                60, int(cfg.get("warn_mute_duration", 3600) or 3600)
+            )
+        except (AttributeError, TypeError, ValueError):
+            return None, 0, None
+        if self._enabled_config_flag(
+            cfg.get("warn_ban_enabled"), default=False
+        ) and warns >= ban_threshold:
+            return "BAN", warns, None
+        if self._enabled_config_flag(
+            cfg.get("warn_kick_enabled"), default=False
+        ) and warns >= kick_threshold:
+            return "KICK", warns, None
+        if self._enabled_config_flag(
+            cfg.get("warn_mute_enabled"), default=True
+        ) and warns >= mute_threshold:
+            return "MUTE", warns, mute_duration
+        return None, warns, None
+
+    async def _fresh_moderation_context(
+        self,
+        interaction: discord.Interaction,
+        perm_name: str,
+        *,
+        target_id: Optional[int] = None,
+        allow_absent_target: bool = False,
+        action_type: str = "",
+    ) -> tuple[Optional[discord.Member], Optional[discord.Member], Optional[str]]:
+        """Re-fetch actor/target and authorize immediately before a sensitive sink."""
+        guild = interaction.guild
+        if (
+            guild is None
+            or interaction.guild_id != guild.id
+            or self.bot.user is None
+        ):
+            return None, None, "No pude verificar el servidor actual."
+
+        target_missing = object()
+
+        async def fetch_target():
+            if target_id is None:
+                return None
+            try:
+                return await guild.fetch_member(target_id)
+            except discord.NotFound:
+                return target_missing
+
+        try:
+            target_result, actor, bot_member, live_roles, live_guild = await asyncio.gather(
+                fetch_target(),
+                guild.fetch_member(interaction.user.id),
+                guild.fetch_member(self.bot.user.id),
+                guild.fetch_roles(),
+                self.bot.fetch_guild(guild.id),
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None, None, "No pude verificar permisos y jerarquías actuales."
+        if target_result is target_missing:
+            if not allow_absent_target:
+                return None, None, "El usuario ya no pertenece a este servidor."
+            target: Optional[discord.Member] = None
+        else:
+            target = target_result
+        if getattr(live_guild, "id", None) != guild.id:
+            return None, None, "La identidad actual del servidor no coincide."
+
+        roles_by_id = {int(role.id): role for role in live_roles}
+
+        def current_role_state(member: discord.Member):
+            role_ids = {guild.id}
+            role_ids.update(int(role_id) for role_id in getattr(member, "_roles", ()))
+            if any(role_id not in roles_by_id for role_id in role_ids):
+                return None
+            roles = [roles_by_id[role_id] for role_id in role_ids]
+            permissions_value = 0
+            for role in roles:
+                permissions_value |= int(role.permissions.value)
+            return discord.Permissions(permissions_value), max(roles), role_ids
+
+        actor_state = current_role_state(actor)
+        bot_state = current_role_state(bot_member)
+        target_state = current_role_state(target) if target is not None else None
+        if actor_state is None or bot_state is None or (
+            target is not None and target_state is None
+        ):
+            return None, None, "No pude verificar la jerarquía completa de roles."
+
+        actor_permissions, actor_top_role, actor_role_ids = actor_state
+        bot_permissions, bot_top_role, _bot_role_ids = bot_state
+        owner_id = int(live_guild.owner_id)
+        delegated_ids = delegated_moderation_role_ids(self.db, guild.id)
+        if delegated_ids is None:
+            return None, None, "No pude verificar los roles delegados actuales."
+        valid_delegated_ids = {
+            role_id
+            for role_id in delegated_ids
+            if (
+                (role := roles_by_id.get(int(role_id))) is not None
+                and not role.is_default()
+                and not role.managed
+                and role < bot_top_role
+            )
+        }
+        actor_allowed = bool(
+            actor.id == owner_id
+            or actor_permissions.administrator
+            or getattr(actor_permissions, perm_name, False)
+            or actor_role_ids.intersection(valid_delegated_ids)
+        )
+        if not actor_allowed:
+            return None, None, "Tus permisos de moderación cambiaron; la operación fue cancelada."
+        if target is not None:
+            target_permissions, target_top_role, _target_role_ids = target_state
+            if target.bot:
+                return None, None, "No puedes moderar a un bot."
+            if actor.id == target.id:
+                return None, None, "No puedes moderarte a ti mismo."
+            if target.id == owner_id:
+                return None, None, "No puedes moderar al dueño del servidor."
+            if target_permissions.administrator and action_type == "TIMEOUT":
+                return None, None, "Discord no permite aplicar timeout a administradores. Usa /mute."
+            if target_permissions.administrator and action_type.startswith("AUTO_"):
+                return None, None, "La moderación automática mantiene la protección de administradores."
+            if actor.id != owner_id and actor_top_role <= target_top_role:
+                return None, None, "Tu rol no es suficientemente alto para moderar a este usuario."
+            if bot_top_role <= target_top_role:
+                return None, None, "Mi rol no es suficiente para moderar a este usuario."
+        return actor, target, None
+
+    async def _fresh_owner_or_admin(
+        self, interaction: discord.Interaction
+    ) -> tuple[Optional[discord.Member], Optional[str]]:
+        guild = interaction.guild
+        if guild is None or interaction.guild_id != guild.id:
+            return None, "No pude verificar el servidor actual."
+        try:
+            actor, live_roles, live_guild = await asyncio.gather(
+                guild.fetch_member(interaction.user.id),
+                guild.fetch_roles(),
+                self.bot.fetch_guild(guild.id),
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None, "No pude verificar tus permisos actuales."
+        roles_by_id = {int(role.id): role for role in live_roles}
+        role_ids = {guild.id}
+        role_ids.update(int(role_id) for role_id in getattr(actor, "_roles", ()))
+        if any(role_id not in roles_by_id for role_id in role_ids):
+            return None, "No pude verificar todos tus roles actuales."
+        permissions_value = 0
+        for role_id in role_ids:
+            permissions_value |= int(roles_by_id[role_id].permissions.value)
+        permissions = discord.Permissions(permissions_value)
+        if actor.id != int(live_guild.owner_id) and not permissions.administrator:
+            return None, "Este comando requiere Administrador."
+        return actor, None
+
+    async def _fresh_mute_role_context(
+        self,
+        interaction: discord.Interaction,
+        target_id: int,
+        role_id: int,
+        *,
+        allow_absent_target: bool = False,
+        allow_absent_effect: bool = False,
+        for_assignment: bool = False,
+    ) -> tuple[
+        Optional[discord.Member],
+        Optional[discord.Member],
+        Optional[discord.Role],
+        Optional[str],
+    ]:
+        """Obtiene autorización, jerarquías y rol de mute en una instantánea REST."""
+        guild = interaction.guild
+        if guild is None or interaction.guild_id != guild.id or not self.bot.user:
+            return None, None, None, "No pude verificar el servidor actual."
+        target_missing = object()
+
+        async def fetch_target():
+            try:
+                return await guild.fetch_member(int(target_id))
+            except discord.NotFound:
+                return target_missing
+
+        try:
+            target_result, actor, bot_member, live_roles, live_guild = await asyncio.gather(
+                fetch_target(),
+                guild.fetch_member(interaction.user.id),
+                guild.fetch_member(self.bot.user.id),
+                guild.fetch_roles(),
+                self.bot.fetch_guild(guild.id),
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None, None, None, "No pude verificar permisos y roles actuales."
+        if target_result is target_missing:
+            if not allow_absent_target:
+                return None, None, None, "El usuario ya no pertenece al servidor."
+            target: Optional[discord.Member] = None
+        else:
+            target = target_result
+        roles_by_id = {int(role.id): role for role in live_roles}
+
+        target_role_ids = set()
+        if target is not None:
+            target_role_ids = {guild.id}
+            target_role_ids.update(
+                int(value) for value in getattr(target, "_roles", ())
+            )
+        mute_role = roles_by_id.get(int(role_id))
+        effect_absent_snapshot = bool(
+            target is None
+            or mute_role is None
+            or int(role_id) not in target_role_ids
+        )
+
+        def role_state(member: discord.Member):
+            role_ids = {guild.id}
+            role_ids.update(int(value) for value in getattr(member, "_roles", ()))
+            if any(value not in roles_by_id for value in role_ids):
+                return None
+            roles = [roles_by_id[value] for value in role_ids]
+            permissions_value = 0
+            for role in roles:
+                permissions_value |= int(role.permissions.value)
+            return discord.Permissions(permissions_value), max(roles), role_ids
+
+        actor_state = role_state(actor)
+        bot_state = role_state(bot_member)
+        target_state = (
+            role_state(target)
+            if target is not None
+            and not (allow_absent_effect and effect_absent_snapshot)
+            else None
+        )
+        if actor_state is None or bot_state is None or (
+            target is not None
+            and target_state is None
+            and not (allow_absent_effect and effect_absent_snapshot)
+        ):
+            return None, None, None, "No pude verificar la jerarquía completa."
+        actor_permissions, actor_top_role, actor_role_ids = actor_state
+        bot_permissions, bot_top_role, _bot_role_ids = bot_state
+        owner_id = int(live_guild.owner_id)
+        delegated_ids = delegated_moderation_role_ids(self.db, guild.id)
+        if delegated_ids is None:
+            return None, None, None, "No pude verificar los roles delegados actuales."
+        valid_delegated_ids = {
+            role_id
+            for role_id in delegated_ids
+            if (
+                (role := roles_by_id.get(int(role_id))) is not None
+                and not role.is_default()
+                and not role.managed
+                and role < bot_top_role
+            )
+        }
+        if not (
+            actor.id == owner_id
+            or actor_permissions.administrator
+            or actor_permissions.manage_roles
+            or actor_role_ids.intersection(valid_delegated_ids)
+        ):
+            return None, None, None, "Tus permisos cambiaron; la operación fue cancelada."
+        if not for_assignment and target is not None:
+            case = self._active_mute_case(guild.id, target.id)
+            for snapshot in self._json_object((case or {}).get("extra_data")).get("suppressed_roles", ()):
+                original_role = roles_by_id.get(int(snapshot["id"]))
+                if original_role is None or (actor.id != owner_id and original_role >= actor_top_role):
+                    return None, None, None, "Tu jerarquía no permite devolver los roles retirados por este mute."
+        if allow_absent_effect and effect_absent_snapshot:
+            return actor, target, None, None
+        if target is not None:
+            target_permissions, target_top_role, _target_role_ids = target_state
+            if target.bot or actor.id == target.id or target.id == owner_id:
+                return None, None, None, "El objetivo ya no puede ser moderado."
+            if actor.id != owner_id and actor_top_role <= target_top_role:
+                return None, None, None, "Tu jerarquía ya no permite esta operación."
+            if bot_top_role <= target_top_role:
+                return None, None, None, "Mi jerarquía ya no permite esta operación."
+        if not (
+            bot_permissions.administrator or bot_permissions.view_audit_log
+        ):
+            return None, None, None, "Necesito Ver el registro de auditoría para identificar el mute."
+        if for_assignment:
+            forbidden_ids = delegated_bot_role_ids(self.db, guild.id)
+            if not (
+                mute_role is not None
+                and mute_role < bot_top_role
+                and safe_for_automatic_assignment(
+                    mute_role,
+                    bot_member,
+                    forbidden_role_ids=forbidden_ids,
+                )
+                and mute_role_has_effective_denies(guild, mute_role)
+            ):
+                return None, None, None, "El rol de mute ya no es seguro."
+        elif not self._safe_mute_role_removal(
+            guild,
+            mute_role,
+            bot_member,
+            bot_top_role=bot_top_role,
+        ):
+            return None, None, None, "El rol histórico de mute ya no es gestionable."
+        return actor, target, mute_role, None
 
     def _has_config_perms(self, interaction: discord.Interaction) -> bool:
         """Permisos para tocar configuración del bot en el servidor."""
@@ -469,12 +895,74 @@ class Moderation(commands.Cog):
         perms = user.guild_permissions
         return bool(perms.administrator or perms.manage_guild)
 
-    async def _apply_mute_overwrites(self, guild: discord.Guild, role: discord.Role) -> int:
-        """Aplica permisos del rol Muted en canales visibles para el bot, best-effort."""
-        bot_member = guild.get_member(self.bot.user.id) if self.bot.user else None
-        if not bot_member or not bot_member.guild_permissions.manage_channels:
-            return 0
-        overwrite = discord.PermissionOverwrite(
+    async def _fresh_config_role(
+        self,
+        interaction: discord.Interaction,
+        role_id: int,
+        *,
+        owner_or_admin_only: bool,
+    ) -> tuple[Optional[discord.Role], Optional[str]]:
+        """Fetch actor, role list and bot immediately before a role-config write."""
+        guild = interaction.guild
+        if guild is None or interaction.guild_id != guild.id or not self.bot.user:
+            return None, "No pude verificar el servidor actual."
+        try:
+            actor, bot_member, live_roles, live_guild = await asyncio.gather(
+                guild.fetch_member(interaction.user.id),
+                guild.fetch_member(self.bot.user.id),
+                guild.fetch_roles(),
+                self.bot.fetch_guild(guild.id),
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None, "No pude verificar permisos y jerarquía actuales."
+        if getattr(live_guild, "id", None) != guild.id:
+            return None, "La identidad actual del servidor no coincide."
+
+        roles_by_id = {int(item.id): item for item in live_roles}
+
+        def role_state(member: discord.Member):
+            role_ids = {guild.id}
+            role_ids.update(int(item) for item in getattr(member, "_roles", ()))
+            if any(item not in roles_by_id for item in role_ids):
+                return None
+            roles = [roles_by_id[item] for item in role_ids]
+            permissions_value = 0
+            for item in roles:
+                permissions_value |= int(item.permissions.value)
+            return discord.Permissions(permissions_value), max(roles)
+
+        actor_state = role_state(actor)
+        bot_state = role_state(bot_member)
+        if actor_state is None or bot_state is None:
+            return None, "No pude verificar la jerarquía completa de roles."
+        actor_permissions, actor_top = actor_state
+        _bot_permissions, bot_top = bot_state
+        owner_id = int(live_guild.owner_id)
+
+        if owner_or_admin_only:
+            if actor.id != owner_id and not actor_permissions.administrator:
+                return None, "Solo el dueño o un administrador puede cambiar ese rol."
+        elif actor.id != owner_id and not (
+            actor_permissions.administrator
+            or (
+                actor_permissions.manage_roles
+                and actor_permissions.manage_channels
+            )
+        ):
+            return None, "Necesitas Administrador o Gestionar roles y canales."
+
+        role = roles_by_id.get(int(role_id))
+        if role is None or role.is_default() or role.managed:
+            return None, "Ese rol no existe o no puede gestionarse."
+        if actor.id != owner_id and role >= actor_top:
+            return None, "El rol debe estar por debajo de tu rol más alto."
+        if role >= bot_top:
+            return None, "El rol debe estar por debajo de mi rol más alto."
+        return role, None
+
+    @staticmethod
+    def _mute_overwrite() -> discord.PermissionOverwrite:
+        return discord.PermissionOverwrite(
             send_messages=False,
             add_reactions=False,
             speak=False,
@@ -482,6 +970,13 @@ class Moderation(commands.Cog):
             create_public_threads=False,
             create_private_threads=False,
         )
+
+    async def _apply_mute_overwrites(self, guild: discord.Guild, role: discord.Role) -> int:
+        """Aplica permisos del rol Muted en canales visibles para el bot, best-effort."""
+        bot_member = guild.get_member(self.bot.user.id) if self.bot.user else None
+        if not bot_member or not bot_member.guild_permissions.manage_channels:
+            return 0
+        overwrite = self._mute_overwrite()
         changed = 0
         for ch in guild.channels:
             try:
@@ -491,8 +986,154 @@ class Moderation(commands.Cog):
                 continue
         return changed
 
+    async def _confirm_effective_mute(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        role: discord.Role,
+    ) -> Optional[discord.Member]:
+        """Keep a mute only when the member's combined permissions deny it."""
+        member, live_role, removal_state = await self._fresh_mute_removal_context(
+            guild, user_id, role.id
+        )
+        if removal_state != "safe" or member is None or live_role is None:
+            logger.warning("Mute verification guild=%s user=%s role=%s category=%s", guild.id, user_id, role.id, removal_state)
+            return None
+        if member_is_effectively_muted(member):
+            return member
+        logger.warning("Mute verification guild=%s user=%s role=%s category=ineffective_permissions", guild.id, user_id, role.id)
+        try:
+            await member.remove_roles(
+                live_role, reason="Mute inefectivo; reversión segura"
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return None
+
+    def _safe_mute_role_removal(
+        self,
+        guild: discord.Guild,
+        role: Optional[discord.Role],
+        bot_member: Optional[discord.Member],
+        *,
+        bot_top_role: Optional[discord.Role] = None,
+    ) -> bool:
+        """No retira un antiguo rol de mute si ahora delega privilegios."""
+        forbidden_ids = delegated_bot_role_ids(self.db, guild.id)
+        return bool(
+            (bot_top_role is None or (role is not None and role < bot_top_role))
+            and safe_for_automatic_removal(role, bot_member)
+            and safe_for_automatic_assignment(
+                role,
+                bot_member,
+                forbidden_role_ids=forbidden_ids,
+            )
+        )
+
+    async def _fresh_mute_removal_context(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        role_id: int,
+    ) -> tuple[Optional[discord.Member], Optional[discord.Role], str]:
+        """Resuelve miembro, rol y jerarquía actuales justo antes de retirarlo."""
+        if not self.bot.user:
+            return None, None, "unverified"
+        target_missing = object()
+
+        async def fetch_target():
+            try:
+                return await guild.fetch_member(int(user_id))
+            except discord.NotFound:
+                return target_missing
+
+        try:
+            target_result, live_roles, bot_member, live_channels, live_guild = await asyncio.gather(
+                fetch_target(),
+                guild.fetch_roles(),
+                guild.fetch_member(self.bot.user.id),
+                guild.fetch_channels(),
+                self.bot.fetch_guild(guild.id),
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, discord.InvalidData):
+            return None, None, "unverified"
+        if live_guild.id != guild.id:
+            return None, None, "unverified"
+        if target_result is target_missing:
+            return None, None, "absent"
+        # Permission evaluation must use these REST results, never the Gateway cache.
+        view = copy(guild)
+        view.owner_id = live_guild.owner_id
+        view._roles = {role.id: copy(role) for role in live_roles}
+        view._channels = {channel.id: copy(channel) for channel in live_channels}
+        for role in view._roles.values():
+            role.guild = view
+        for channel in view._channels.values():
+            channel.guild = view
+        member = copy(target_result)
+        member.guild = view
+        bot_member = copy(bot_member)
+        bot_member.guild = view
+        live_role = view.get_role(int(role_id))
+        member_role_ids = {
+            int(value) for value in getattr(member, "_roles", ())
+        }
+        if live_role is None or int(role_id) not in member_role_ids:
+            return member, None, "absent"
+
+        bot_role_ids = {guild.id}
+        bot_role_ids.update(
+            int(value) for value in getattr(bot_member, "_roles", ())
+        )
+        roles_by_id = {int(current_role.id): current_role for current_role in live_roles}
+        if any(role_id_value not in roles_by_id for role_id_value in bot_role_ids | member_role_ids):
+            return member, live_role, "unverified"
+        bot_top_role = max(roles_by_id[value] for value in bot_role_ids)
+        if not self._safe_mute_role_removal(
+            guild,
+            live_role,
+            bot_member,
+            bot_top_role=bot_top_role,
+        ):
+            return member, live_role, "unsafe"
+        return member, live_role, "safe"
+
+    @commands.Cog.listener()
+    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel) -> None:
+        """Keep the configured mute role effective on newly created channels."""
+        guild = channel.guild
+        try:
+            role_id = int((self.db.get_config(guild.id) or {}).get("mute_role_id") or 0)
+        except (TypeError, ValueError):
+            return
+        role = guild.get_role(role_id) if role_id else None
+        bot_member = guild.me
+        if not safe_for_automatic_assignment(
+            role,
+            bot_member,
+            forbidden_role_ids=delegated_bot_role_ids(self.db, guild.id),
+        ):
+            return
+        try:
+            await channel.set_permissions(
+                role,
+                overwrite=self._mute_overwrite(),
+                reason="Mute role setup for new channel",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            logger.warning(
+                "No se pudo aplicar el rol mute %s al nuevo canal %s",
+                role.id,
+                channel.id,
+            )
+
     def _can_moderate(
-        self, actor: discord.Member, target: discord.Member
+        self,
+        actor: discord.Member,
+        target: discord.Member,
+        *,
+        bot_member: Optional[discord.Member] = None,
+        action_type: str = "",
     ) -> Optional[str]:
         """
         Verifica jerarquía de roles.
@@ -504,14 +1145,723 @@ class Moderation(commands.Cog):
             return "No puedes moderarte a ti mismo."
         if target.id == actor.guild.owner_id:
             return "No puedes moderar al dueño del servidor."
-        if target.guild_permissions.administrator and actor.id != actor.guild.owner_id:
-            return "No puedes moderar a un administrador protegido."
+        if target.guild_permissions.administrator and action_type == "TIMEOUT":
+            return "Discord no permite aplicar timeout a administradores. Usa /mute."
         if actor.id != actor.guild.owner_id and actor.top_role <= target.top_role:
             return "Tu rol no es suficientemente alto para moderar a este usuario."
-        bot_member = actor.guild.get_member(self.bot.user.id)
-        if bot_member and bot_member.top_role <= target.top_role:
+        if bot_member is None and self.bot.user:
+            bot_member = actor.guild.get_member(self.bot.user.id)
+        if bot_member is None:
+            return "No puedo verificar mi jerarquía de roles."
+        if bot_member.top_role <= target.top_role:
             return "Mi rol no es suficiente para moderar a este usuario."
         return None
+
+    @staticmethod
+    def _json_object(raw: object) -> dict:
+        if isinstance(raw, dict):
+            return raw
+        if not raw:
+            return {}
+        try:
+            value = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _ban_effect_token(self, case: Optional[Dict]) -> str:
+        if not case:
+            return ""
+        return str(
+            self._json_object(case.get("extra_data")).get("ban_effect_token") or ""
+        ).strip()
+
+    def _mute_effect_token(self, case: Optional[Dict]) -> str:
+        if not case:
+            return ""
+        return str(
+            self._json_object(case.get("extra_data")).get("mute_effect_token") or ""
+        ).strip()
+
+    async def _mute_effect_state(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        role_id: int,
+        case: Optional[Dict],
+        *,
+        member: Optional[discord.Member] = None,
+    ) -> str:
+        """Retorna match, absent, replaced, legacy o unverified."""
+        if member is None:
+            try:
+                member = await guild.fetch_member(int(user_id))
+            except discord.NotFound:
+                return "absent"
+        member_role_ids = {
+            int(value) for value in getattr(member, "_roles", ())
+        }
+        if int(role_id) not in member_role_ids:
+            return "absent"
+        token = self._mute_effect_token(case)
+        if not token:
+            return "legacy"
+        extra = self._json_object((case or {}).get("extra_data"))
+        try:
+            created_at = datetime.fromisoformat(
+                str((case or {})["created_at"]).replace("Z", "+00:00")
+            )
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            audit_after = created_at - timedelta(minutes=5)
+        except (KeyError, TypeError, ValueError):
+            return "unverified"
+        try:
+            async for entry in guild.audit_logs(
+                limit=None,
+                action=discord.AuditLogAction.member_role_update,
+                after=audit_after,
+                oldest_first=False,
+            ):
+                if int(getattr(entry.target, "id", 0) or 0) != int(user_id):
+                    continue
+                before_ids = {
+                    int(role.id)
+                    for role in (getattr(entry.before, "roles", None) or ())
+                }
+                after_ids = {
+                    int(role.id)
+                    for role in (getattr(entry.after, "roles", None) or ())
+                }
+                if int(role_id) not in before_ids.union(after_ids):
+                    continue
+                if (int(role_id) in after_ids and mute_reason_matches(entry.reason, token)
+                    and (not extra.get("mute_add_audit_id") or
+                         getattr(getattr(entry, "user", None), "id", None) == self.bot.user.id)):
+                    return "match"
+                return "replaced"
+        except (discord.Forbidden, discord.HTTPException):
+            return "unverified"
+        if (extra.get("mute_add_audit_id")
+            and str(member.joined_at) == extra.get("mute_member_joined_at")):
+            return "match"
+        return "unverified"
+
+    async def _confirm_mute_effect_state(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        role_id: int,
+        case: Optional[Dict],
+        *,
+        member: Optional[discord.Member] = None,
+    ) -> str:
+        """Tolera la breve demora de propagación del audit log tras add_roles."""
+        state = "unverified"
+        for attempt in range(4):
+            state = await self._mute_effect_state(
+                guild,
+                user_id,
+                role_id,
+                case,
+                member=member,
+            )
+            if state != "unverified" or attempt == 3:
+                return state
+            await asyncio.sleep(0.75)
+        return state
+
+    async def _ban_effect_state(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        case: Optional[Dict],
+    ) -> str:
+        """Retorna match, absent, replaced o legacy para el ban actual."""
+        token = self._ban_effect_token(case)
+        if not token:
+            return "legacy"
+        try:
+            entry = await guild.fetch_ban(discord.Object(id=int(user_id)))
+        except discord.NotFound:
+            return "absent"
+        return "match" if ban_reason_matches(entry.reason, token) else "replaced"
+
+    async def _confirm_ban_effect(
+        self, guild: discord.Guild, user_id: int, token: str
+    ) -> None:
+        entry = await guild.fetch_ban(discord.Object(id=int(user_id)))
+        if not ban_reason_matches(entry.reason, token):
+            raise RuntimeError("ban_effect_identity_not_confirmed")
+
+    def _current_ban_matches_active_case(
+        self, guild_id: int, user_id: int, reason: object
+    ) -> bool:
+        try:
+            cases = self.db.list_cases(guild_id, user_id=user_id, limit=100)
+        except Exception:
+            return False
+        for case in cases:
+            if (
+                str(case.get("status") or "active").lower() == "active"
+                and str(case.get("action_type") or "").upper()
+                in {"BAN", "TEMPBAN", "FORCEBAN", "AUTO_BAN"}
+                and ban_reason_matches(reason, self._ban_effect_token(case))
+            ):
+                return True
+        return False
+
+    async def _reconcile_applying_bans(self) -> None:
+        """Reconcilia intents de sanción; los bloqueos posteriores son por usuario."""
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            unresolved = False
+            try:
+                cases = self.db.get_applying_ban_cases()
+            except Exception as exc:
+                logger.error("No se pudieron leer bans en applying: %s", exc)
+                cases = []
+                unresolved = True
+            for snapshot in cases:
+                try:
+                    guild_id = int(snapshot["guild_id"])
+                    user_id = int(snapshot["target_id"])
+                    case_id = int(snapshot["id"])
+                except (KeyError, TypeError, ValueError):
+                    unresolved = True
+                    continue
+                guild = self.bot.get_guild(guild_id)
+                if guild is None:
+                    unresolved = True
+                    continue
+
+                async def reconcile_case():
+                    case = self.db.get_case_by_id(guild_id, case_id)
+                    case_status = str(
+                        (case or {}).get("status") or ""
+                    ).lower()
+                    if (
+                        case is None
+                        or case_status not in {"applying", "effect_confirmed"}
+                    ):
+                        return
+                    action_type = str(case.get("action_type") or "").upper()
+                    if case_status == "effect_confirmed" and action_type != "SOFTBAN":
+                        return
+                    token = self._ban_effect_token(case)
+                    if not token:
+                        self.db.abandon_prepared_ban_case(
+                            guild_id,
+                            user_id,
+                            case_id,
+                            "missing_ban_effect_identity",
+                        )
+                        return
+                    try:
+                        entry = await guild.fetch_ban(discord.Object(id=user_id))
+                    except discord.NotFound:
+                        if action_type == "SOFTBAN":
+                            if case_status == "effect_confirmed":
+                                if not self.db.complete_prepared_softban_case(
+                                    guild_id, user_id, case_id
+                                ):
+                                    raise RuntimeError("prepared_softban_case_changed")
+                            else:
+                                self.db.abandon_prepared_ban_case(
+                                    guild_id,
+                                    user_id,
+                                    case_id,
+                                    "prepared_softban_effect_absent",
+                                )
+                            return
+                        self.db.abandon_prepared_ban_case(
+                            guild_id,
+                            user_id,
+                            case_id,
+                            "prepared_ban_effect_absent",
+                            retire_previous=True,
+                        )
+                        return
+                    if not ban_reason_matches(entry.reason, token):
+                        previous_is_current = self._current_ban_matches_active_case(
+                            guild_id, user_id, entry.reason
+                        )
+                        self.db.abandon_prepared_ban_case(
+                            guild_id,
+                            user_id,
+                            case_id,
+                            "prepared_ban_effect_replaced",
+                            retire_previous=not previous_is_current,
+                        )
+                        return
+                    if action_type == "SOFTBAN":
+                        if case_status == "applying" and not (
+                            self.db.confirm_prepared_softban_effect(
+                                guild_id, user_id, case_id
+                            )
+                        ):
+                            raise RuntimeError("prepared_softban_confirmation_changed")
+                        try:
+                            await guild.unban(
+                                discord.Object(id=user_id),
+                                reason="Recuperación de softban interrumpido",
+                            )
+                        except discord.NotFound:
+                            pass
+                        if not self.db.complete_prepared_softban_case(
+                            guild_id, user_id, case_id
+                        ):
+                            raise RuntimeError("prepared_softban_case_changed")
+                        return
+                    duration_raw = case.get("duration_seconds")
+                    duration = int(duration_raw) if duration_raw is not None else None
+                    expires_at = None
+                    if duration is not None:
+                        created_at = datetime.fromisoformat(str(case["created_at"]))
+                        if created_at.tzinfo is None:
+                            created_at = created_at.replace(tzinfo=timezone.utc)
+                        expires_at = (
+                            created_at + timedelta(seconds=duration)
+                        ).isoformat()
+                    if not self.db.activate_prepared_ban_case(
+                        guild_id,
+                        user_id,
+                        case_id,
+                        int(case["moderator_id"]),
+                        str(case.get("reason") or "Sin razón especificada"),
+                        duration,
+                        expires_at,
+                    ):
+                        raise RuntimeError("prepared_ban_case_changed")
+
+                try:
+                    await run_sanction_locked(
+                        self.bot,
+                        guild_id,
+                        user_id,
+                        "BAN",
+                        reconcile_case,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    logger.warning(
+                        "No se pudo reconciliar ban applying %s: %s", case_id, exc
+                    )
+                    unresolved = True
+                except Exception as exc:
+                    logger.error(
+                        "Error reconciliando ban applying %s: %s",
+                        case_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    unresolved = True
+            try:
+                mute_cases = self.db.get_applying_mute_cases()
+            except Exception as exc:
+                logger.error("No se pudieron leer mutes en applying: %s", exc)
+                mute_cases = []
+                unresolved = True
+            for snapshot in mute_cases:
+                try:
+                    guild_id = int(snapshot["guild_id"])
+                    user_id = int(snapshot["target_id"])
+                    case_id = int(snapshot["id"])
+                except (KeyError, TypeError, ValueError):
+                    unresolved = True
+                    continue
+                guild = self.bot.get_guild(guild_id)
+                if guild is None:
+                    continue
+
+                async def reconcile_mute_case():
+                    case = self.db.get_case_by_id(guild_id, case_id)
+                    if (
+                        case is None
+                        or str(case.get("status") or "").lower() != "applying"
+                    ):
+                        return
+                    extra = self._json_object(case.get("extra_data"))
+                    try:
+                        role_id = int(extra["role_id"])
+                    except (KeyError, TypeError, ValueError):
+                        self.db.abandon_prepared_mute_case(
+                            guild_id, user_id, case_id
+                        )
+                        return
+                    if not self._mute_effect_token(case):
+                        self.db.abandon_prepared_mute_case(
+                            guild_id, user_id, case_id
+                        )
+                        return
+                    live_roles, bot_member = await asyncio.gather(
+                        guild.fetch_roles(),
+                        guild.fetch_member(self.bot.user.id),
+                    )
+                    role = discord.utils.get(live_roles, id=role_id)
+                    if role is None:
+                        await self._restore_mute_roles(guild, user_id, case)
+                        self.db.abandon_prepared_mute_case(
+                            guild_id, user_id, case_id
+                        )
+                        return
+                    effect_state = await self._mute_effect_state(
+                        guild,
+                        user_id,
+                        role_id,
+                        case,
+                    )
+                    if effect_state in {"absent", "replaced", "legacy"}:
+                        if effect_state != "absent" and extra.get("suppressed_roles"):
+                            raise RuntimeError("prepared_mute_roles_need_manual_review")
+                        await self._restore_mute_roles(guild, user_id, case)
+                        self.db.abandon_prepared_mute_case(
+                            guild_id, user_id, case_id
+                        )
+                        return
+                    if effect_state != "match":
+                        raise RuntimeError("prepared_mute_effect_unverified")
+                    if extra.get("mute_restore_started"):
+                        member, removal_role, state = await self._fresh_mute_removal_context(
+                            guild, user_id, role_id
+                        )
+                        if state != "safe":
+                            raise RuntimeError("prepared_mute_rollback_not_safe")
+                        await member.remove_roles(removal_role, reason="Revertir mute incompleto")
+                        await self._restore_mute_roles(guild, user_id, case)
+                        self.db.abandon_prepared_mute_case(guild_id, user_id, case_id)
+                        return
+                    confirmed_member = await self._confirm_effective_mute(
+                        guild, user_id, role
+                    )
+                    if confirmed_member is None:
+                        try:
+                            remaining_member = await guild.fetch_member(user_id)
+                        except discord.NotFound:
+                            remaining_member = None
+                        if remaining_member is not None and role_id in {
+                            int(value)
+                            for value in getattr(remaining_member, "_roles", ())
+                        }:
+                            raise RuntimeError(
+                                "prepared_mute_rollback_unconfirmed"
+                            )
+                        await self._restore_mute_roles(guild, user_id, case)
+                        self.db.abandon_prepared_mute_case(
+                            guild_id, user_id, case_id
+                        )
+                        return
+                    await confirm_mute_receipts(self.bot, guild, user_id, case, self.db)
+                    if not self.db.activate_prepared_mute_case(
+                        guild_id, user_id, case_id
+                    ):
+                        raise RuntimeError("prepared_mute_case_changed")
+
+                try:
+                    await run_sanction_locked(
+                        self.bot,
+                        guild_id,
+                        user_id,
+                        "MUTE",
+                        reconcile_mute_case,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    logger.warning(
+                        "No se pudo reconciliar mute applying %s: %s", case_id, exc
+                    )
+                    unresolved = True
+                except Exception as exc:
+                    logger.error(
+                        "Error reconciliando mute applying %s: %s",
+                        case_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    unresolved = True
+            if unresolved:
+                logger.warning(
+                    "Quedan sanciones applying pendientes de reconciliación"
+                )
+            self._ban_reconciliation_ready.set()
+            await asyncio.sleep(15)
+
+    async def _expire_tempban_case_locked(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        case_id: int,
+    ) -> str:
+        """Expira el tempban exacto; debe ejecutarse bajo el lock BAN."""
+        if self.db.has_applying_ban_case(guild.id, int(user_id)):
+            return "applying"
+        case = self.db.get_appealable_active_case(
+            guild.id, int(user_id), int(case_id), "TEMPBAN"
+        )
+        if case is None:
+            return "stale"
+        effect_state = await self._ban_effect_state(guild, user_id, case)
+        if effect_state == "legacy":
+            return "legacy"
+        if effect_state == "replaced":
+            self.db.clear_tempban_case(guild.id, user_id, case_id)
+            self.db.update_case_by_id(guild.id, case_id, status="revoked")
+            return "replaced"
+        if effect_state == "match":
+            try:
+                await guild.unban(
+                    discord.Object(id=int(user_id)),
+                    reason="Tempban expirado automáticamente",
+                )
+            except discord.NotFound:
+                pass
+        self.db.clear_tempban_case(guild.id, user_id, case_id)
+        self.db.update_case_by_id(guild.id, case_id, status="expired")
+        self.db.log_action(
+            guild.id,
+            user_id,
+            self.bot.user.id,
+            "TEMPBAN_EXPIRED",
+            "Tempban expirado automáticamente",
+            parent_case_id=case_id,
+            status="expired",
+        )
+        return "expired"
+
+    async def _restore_mute_roles(self, guild, user_id, case, *, actor_id=None):
+        if not case:
+            return
+        extra = self._json_object(case.get("extra_data"))
+        if not extra.get("suppressed_roles"):
+            return
+        # Persist recovery direction before the first restoration side effect.
+        if not extra.get("mute_restore_started"):
+            extra["mute_restore_started"] = True
+            case = self.db.update_case_by_id(
+                guild.id, int(case["id"]), extra_data=json.dumps(extra)
+            )
+            if not case:
+                raise RuntimeError("mute_restore_intent_not_persisted")
+        await restore_roles(self.bot, guild, user_id, case, actor_id=actor_id, db=self.db)
+
+    async def _apply_role_mute(
+        self, interaction, target_id, role_id, action_type, reason, duration,
+        *, moderator_id=None, parent_case_id=None, job_action="MUTE_EXPIRE",
+    ):
+        guild = interaction.guild
+        member, bot_member, actor = await fresh_members(
+            self.bot, guild, target_id, interaction.user.id
+        )
+        if not self._member_has_mod_perms(member.guild, actor, "manage_roles"):
+            raise PermissionError("Tus permisos cambiaron; la operación fue cancelada.")
+        if action_type.startswith("AUTO_") and member.guild_permissions.administrator:
+            raise PermissionError("La moderación automática mantiene la protección de administradores.")
+        role = member.guild.get_role(role_id)
+        if not (safe_for_automatic_assignment(
+            role, bot_member, forbidden_role_ids=delegated_bot_role_ids(self.db, guild.id)
+        ) and mute_role_has_effective_denies(member.guild, role)):
+            raise PermissionError("El rol de mute ya no es seguro.")
+        suppressed = plan_role_mute(member, bot_member, actor, role)
+        token = new_mute_effect_token()
+        expiry, case_id = self._prepare_mute_record(
+            guild.id, target_id, moderator_id or actor.id, action_type, reason,
+            duration, role_id, job_action=job_action, parent_case_id=parent_case_id,
+            extra={**interaction_metadata(interaction, target_id, actor),
+                "mute_effect_token": token,
+                "suppressed_roles": [role_permissions(value) for value in suppressed],
+                "mute_member_joined_at": str(member.joined_at)},
+        )
+        audit_reason = reason_with_mute_effect(f"{action_type}: {reason} | Mod: {actor}", token)
+        try:
+            await member.add_roles(role, reason=audit_reason)
+            for suppressed_role in suppressed:
+                await member.remove_roles(suppressed_role, reason=audit_reason)
+            confirmed = await self._confirm_effective_mute(guild, target_id, role)
+            if confirmed is None:
+                raise RuntimeError("ineffective_mute")
+            case = self.db.get_case_by_id(guild.id, case_id)
+            await confirm_mute_receipts(self.bot, guild, target_id, case, self.db)
+            if await self._confirm_mute_effect_state(
+                guild, target_id, role_id, case, member=confirmed
+            ) != "match":
+                raise RuntimeError("mute_effect_identity_not_confirmed")
+            if not self.db.activate_prepared_mute_case(guild.id, target_id, case_id):
+                raise RuntimeError("mute_intent_changed")
+            return actor, confirmed, expiry, case_id
+        except Exception:
+            case = self.db.get_case_by_id(guild.id, case_id)
+            try:
+                effect = await self._mute_effect_state(guild, target_id, role_id, case)
+                if effect == "match":
+                    rollback_member, rollback_role, state = await self._fresh_mute_removal_context(
+                        guild, target_id, role_id
+                    )
+                    if state != "safe":
+                        raise RuntimeError("mute_rollback_not_safe")
+                    await rollback_member.remove_roles(rollback_role, reason="Revertir mute incompleto")
+                elif effect != "absent":
+                    raise RuntimeError("mute_rollback_identity_unverified")
+                await self._restore_mute_roles(guild, target_id, case)
+                self.db.abandon_prepared_mute_case(guild.id, target_id, case_id)
+            except Exception:
+                logger.warning("Mute rollback pendiente guild=%s user=%s case=%s", guild.id, target_id, case_id)
+                raise RuntimeError("mute_rollback_pending") from None
+            raise RuntimeError("mute_rolled_back") from None
+
+    def _prepare_mute_record(
+        self,
+        guild_id: int,
+        user_id: int,
+        moderator_id: int,
+        action_type: str,
+        reason: str,
+        duration_secs: Optional[int],
+        role_id: int,
+        *,
+        job_action: str = "MUTE_EXPIRE",
+        parent_case_id: Optional[int] = None,
+        extra: Optional[Dict] = None,
+    ) -> tuple[Optional[datetime], int]:
+        """Persiste una intención recuperable antes de tocar el rol Discord."""
+        configured_role_id = int(
+            (self.db.get_config(guild_id) or {}).get("mute_role_id") or 0
+        )
+        if configured_role_id != int(role_id):
+            raise ValueError("mute_role_configuration_changed")
+        if self.db.has_active_mute_case(guild_id, user_id) or self.db.has_applying_mute_case(
+            guild_id, user_id
+        ):
+            raise LookupError("existing_mute_case")
+        mute_start = datetime.now(timezone.utc)
+        expiry: Optional[datetime] = None
+        if duration_secs is not None:
+            expiry = mute_start + timedelta(seconds=int(duration_secs))
+
+        case_extra = dict(extra or {})
+        case_extra.update(
+            {
+                "duration_secs": duration_secs,
+                "role_id": int(role_id),
+                "mute_job_action": str(job_action).upper(),
+                "mute_start": mute_start.isoformat(),
+            }
+        )
+        if expiry is not None:
+            case_extra["expires_at"] = expiry.isoformat()
+        case_id = self.db.log_action(
+            guild_id,
+            user_id,
+            moderator_id,
+            action_type,
+            reason,
+            case_extra,
+            status="applying",
+            duration_seconds=duration_secs,
+            expires_at=expiry.isoformat() if expiry else None,
+            parent_case_id=parent_case_id,
+        )
+        if not case_id:
+            raise RuntimeError("mute_intent_not_persisted")
+        return expiry, case_id
+
+    def _replace_mute_record(
+        self,
+        guild_id: int,
+        user_id: int,
+        moderator_id: int,
+        action_type: str,
+        reason: str,
+        duration_secs: Optional[int],
+        role_id: int,
+        *,
+        job_action: str = "MUTE_EXPIRE",
+        parent_case_id: Optional[int] = None,
+        extra: Optional[Dict] = None,
+    ) -> tuple[Optional[datetime], int]:
+        """Compatibilidad: prepara y activa el tracking de mute atómicamente."""
+        expiry, case_id = self._prepare_mute_record(
+            guild_id,
+            user_id,
+            moderator_id,
+            action_type,
+            reason,
+            duration_secs,
+            role_id,
+            job_action=job_action,
+            parent_case_id=parent_case_id,
+            extra=extra,
+        )
+        if not self.db.activate_prepared_mute_case(guild_id, user_id, case_id):
+            raise RuntimeError("mute_intent_changed")
+        return expiry, case_id
+
+    def _active_mute_case(self, guild_id: int, user_id: int) -> Optional[Dict]:
+        return self.db.get_active_mute_case(guild_id, user_id)
+
+    def _active_mute_role_id(self, guild_id: int, user_id: int) -> int:
+        """Resolve the exact role recorded by the current mute sanction."""
+        case = self._active_mute_case(guild_id, user_id)
+        if case:
+            try:
+                return int(self._json_object(case.get("extra_data"))["role_id"])
+            except (KeyError, TypeError, ValueError):
+                pass
+        try:
+            return int((self.db.get_config(guild_id) or {}).get("mute_role_id") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _mute_job_role_id(self, job: Dict) -> Optional[int]:
+        """Return the exact role only while this job is the current mute."""
+        try:
+            guild_id = int(job["guild_id"])
+            user_id = int(job["user_id"])
+            case_id = int(job["case_id"])
+            execute_at = datetime.fromisoformat(str(job["execute_at"]))
+            job_extra = self._json_object(job.get("extra_data"))
+            role_id = int(job_extra["role_id"])
+            extra_expiry = datetime.fromisoformat(str(job_extra["expires_at"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+        if role_id <= 0 or execute_at != extra_expiry:
+            return None
+
+        case = self.db.get_case_by_id(guild_id, case_id)
+        if not case or str(case.get("status") or "").lower() != "active":
+            return None
+        if int(case.get("target_id") or 0) != user_id:
+            return None
+        job_action = str(job.get("action_type") or "").upper()
+        expected_cases = {
+            "MUTE_EXPIRE": {"MUTE", "AUTO_MUTE"},
+            "HARDMUTE_EXPIRE": {"HARDMUTE"},
+            "UNMUTE": {"MUTE", "AUTO_MUTE", "HARDMUTE"},
+        }
+        if str(case.get("action_type") or "").upper() not in expected_cases.get(
+            job_action, set()
+        ):
+            return None
+
+        case_extra = self._json_object(case.get("extra_data"))
+        try:
+            case_role_id = int(case_extra["role_id"])
+            case_expiry = datetime.fromisoformat(str(case.get("expires_at")))
+            embedded_expiry = datetime.fromisoformat(str(case_extra["expires_at"]))
+            record = self.db.get_user(user_id, guild_id)
+            record_start = datetime.fromisoformat(str(record["mute_start"]))
+            record_expiry = record_start + timedelta(seconds=int(record["mute_duration"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not (
+            case_role_id == role_id
+            and case_expiry == execute_at
+            and embedded_expiry == execute_at
+            and record_expiry == execute_at
+        ):
+            return None
+        return role_id
 
     # ── Tarea: expiración de mutes ────────────────────────────────────────────
 
@@ -524,65 +1874,182 @@ class Moderation(commands.Cog):
                     guild = self.bot.get_guild(record["guild_id"])
                     if not guild:
                         continue
+                    user_id = int(record["user_id"])
 
-                    if self.db.has_pending_moderation_action(
-                        guild.id,
-                        record["user_id"],
-                        ["MUTE_EXPIRE", "HARDMUTE_EXPIRE", "UNMUTE"],
-                    ):
-                        continue
-
-                    member = guild.get_member(record["user_id"])
-                    if not member:
-                        self.db.clear_mute(record["user_id"], record["guild_id"])
-                        continue
-
-                    cfg = self.db.get_config(guild.id)
-                    mute_role = guild.get_role(cfg.get("mute_role_id") or 0)
-                    if not mute_role or mute_role not in member.roles:
-                        self.db.clear_mute(record["user_id"], guild.id)
-                        continue
+                    async def expire_legacy_mute():
+                        if self.db.has_applying_mute_case(guild.id, user_id):
+                            return "applying", None
+                        if self.db.has_pending_moderation_action(
+                            guild.id,
+                            user_id,
+                            ["MUTE_EXPIRE", "HARDMUTE_EXPIRE", "UNMUTE"],
+                        ):
+                            return "scheduled", None
+                        current = self.db.get_user(user_id, guild.id)
+                        if (
+                            str(current.get("mute_start"))
+                            != str(record.get("mute_start"))
+                            or int(current.get("mute_duration") or 0)
+                            != int(record.get("mute_duration") or 0)
+                        ):
+                            return "replaced", None
+                        try:
+                            start = datetime.fromisoformat(str(record["mute_start"]))
+                            expiry = start + timedelta(
+                                seconds=int(record["mute_duration"])
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            return "invalid", None
+                        if datetime.now(timezone.utc) < expiry:
+                            return "not_due", None
+                        if not self.bot.user:
+                            return "missing_bot", None
+                        mute_role_id = self._active_mute_role_id(guild.id, user_id)
+                        try:
+                            current_member = await guild.fetch_member(user_id)
+                        except discord.NotFound:
+                            current_member = None
+                        active_case = self._active_mute_case(guild.id, user_id)
+                        effect_state = (
+                            await self._mute_effect_state(
+                                guild,
+                                user_id,
+                                mute_role_id,
+                                active_case,
+                                member=current_member,
+                            )
+                            if current_member is not None
+                            else "absent"
+                        )
+                        if effect_state in {"legacy", "unverified"}:
+                            return effect_state, current_member
+                        if effect_state == "replaced":
+                            if self._json_object((active_case or {}).get("extra_data")).get("suppressed_roles"):
+                                raise PermissionError("El mute fue reemplazado; los roles retirados requieren revisión manual.")
+                            self.db.clear_mute(user_id, guild.id)
+                            if active_case:
+                                self.db.update_case_by_id(
+                                    guild.id,
+                                    int(active_case["id"]),
+                                    status="revoked",
+                                )
+                            return "replaced_effect", current_member
+                        if effect_state == "match":
+                            removal_member, removal_role, removal_state = (
+                                await self._fresh_mute_removal_context(
+                                    guild, user_id, mute_role_id
+                                )
+                            )
+                            if removal_state in {"unsafe", "unverified"}:
+                                return removal_state, removal_member
+                            if (
+                                removal_state == "safe"
+                                and removal_member is not None
+                                and removal_role is not None
+                            ):
+                                final_effect_state = await self._mute_effect_state(
+                                    guild,
+                                    user_id,
+                                    mute_role_id,
+                                    active_case,
+                                )
+                                if final_effect_state in {"legacy", "unverified"}:
+                                    return final_effect_state, removal_member
+                                if final_effect_state == "replaced":
+                                    if self._json_object((active_case or {}).get("extra_data")).get("suppressed_roles"):
+                                        raise PermissionError("El mute fue reemplazado; los roles retirados requieren revisión manual.")
+                                    self.db.clear_mute(user_id, guild.id)
+                                    if active_case:
+                                        self.db.update_case_by_id(
+                                            guild.id,
+                                            int(active_case["id"]),
+                                            status="revoked",
+                                        )
+                                    return "replaced_effect", removal_member
+                                if final_effect_state == "match":
+                                    await removal_member.remove_roles(
+                                        removal_role,
+                                        reason="Mute expirado automáticamente",
+                                    )
+                            current_member = removal_member
+                        await self._restore_mute_roles(guild, user_id, active_case)
+                        self.db.clear_mute(user_id, guild.id)
+                        self.db.revoke_active_moderations(
+                            guild.id,
+                            user_id,
+                            ["MUTE", "AUTO_MUTE", "HARDMUTE"],
+                            status="expired",
+                        )
+                        self.db.log_action(
+                            guild.id,
+                            user_id,
+                            self.bot.user.id,
+                            "AUTO_UNMUTE",
+                            "Mute temporal expirado",
+                            status="expired",
+                        )
+                        return "expired", current_member
 
                     try:
-                        start = datetime.fromisoformat(record["mute_start"])
-                    except (TypeError, ValueError):
+                        result, member = await run_sanction_locked(
+                            self.bot,
+                            guild.id,
+                            user_id,
+                            "MUTE_EXPIRE",
+                            expire_legacy_mute,
+                        )
+                    except discord.Forbidden:
+                        logger.warning(
+                            "Sin permisos para quitar mute a %s en %s",
+                            user_id,
+                            guild.name,
+                        )
+                        continue
+                    except discord.HTTPException as exc:
+                        logger.warning(
+                            "Error quitando mute expirado a %s en %s: %s",
+                            user_id,
+                            guild.name,
+                            exc,
+                        )
+                        continue
+                    if result == "invalid":
                         logger.warning(
                             "Registro de mute inválido para user_id=%s guild_id=%s",
-                            record.get("user_id"),
-                            record.get("guild_id"),
+                            user_id,
+                            guild.id,
                         )
-                        self.db.clear_mute(record["user_id"], guild.id)
+                        continue
+                    if result == "unsafe":
+                        logger.warning(
+                            "Mute expirado no retirado en %s: rol inseguro",
+                            guild.id,
+                        )
+                        continue
+                    if result in {"legacy", "unverified"}:
+                        logger.warning(
+                            "Mute expirado no retirado en %s: identidad del efecto no verificable",
+                            guild.id,
+                        )
+                        continue
+                    if result == "replaced_effect":
+                        logger.warning(
+                            "Mute expirado %s cancelado sin retirar el rol: el efecto fue reemplazado",
+                            user_id,
+                        )
+                        continue
+                    if result != "expired":
                         continue
 
-                    expiry = start + timedelta(seconds=record["mute_duration"])
-
-                    if datetime.now(timezone.utc) >= expiry:
-                        try:
-                            await member.remove_roles(
-                                mute_role, reason="Mute expirado automáticamente"
-                            )
-                        except discord.Forbidden:
-                            logger.warning("Sin permisos para quitar mute a %s en %s", member, guild.name)
-                            continue
-                        except discord.HTTPException as exc:
-                            logger.warning("Error quitando mute expirado a %s en %s: %s", member, guild.name, exc)
-                            continue
-
-                        self.db.clear_mute(record["user_id"], guild.id)
-                        self.db.log_action(
-                            guild.id, member.id, self.bot.user.id,
-                            "AUTO_UNMUTE", "Mute temporal expirado",
-                        )
-
-                        log_embed = discord.Embed(
-                            title="Mute expirado",
-                            description=f"{member.mention} fue desmuteado automáticamente.",
-                            color=discord.Color.green(),
-                            timestamp=datetime.now(timezone.utc),
-                        )
-                        log_embed.set_footer(text=f"ID: {member.id}")
-                        await self._send_log(guild, log_embed)
-                        logger.info("Mute expirado: %s en %s", member, guild.name)
+                    log_embed = discord.Embed(
+                        title="Mute expirado",
+                        description=f"<@{user_id}> fue desmuteado automáticamente.",
+                        color=discord.Color.green(),
+                        timestamp=datetime.now(timezone.utc),
+                    )
+                    log_embed.set_footer(text=f"ID: {user_id}")
+                    await self._send_log(guild, log_embed)
+                    logger.info("Mute expirado: %s en %s", user_id, guild.name)
 
                 except Exception as exc:
                     logger.error("Error al expirar mute individual: %s", exc, exc_info=True)
@@ -592,6 +2059,7 @@ class Moderation(commands.Cog):
     @_check_mutes.before_loop
     async def _before_check_mutes(self):
         await self.bot.wait_until_ready()
+        await self._ban_reconciliation_ready.wait()
 
     # ── Tarea: expiración de tempbans ──────────────────────────────────────────
 
@@ -603,7 +2071,11 @@ class Moderation(commands.Cog):
                 try:
                     guild = self.bot.get_guild(record["guild_id"])
                     if not guild:
-                        self.db.clear_tempban(record["id"])
+                        logger.warning(
+                            "Tempban %s conservado: guild %s no está disponible",
+                            record.get("id"),
+                            record.get("guild_id"),
+                        )
                         continue
 
                     if record.get("case_id") and self.db.has_pending_moderation_action(
@@ -617,39 +2089,64 @@ class Moderation(commands.Cog):
                     expiry = start + timedelta(seconds=record["ban_duration"])
 
                     if datetime.now(timezone.utc) >= expiry:
-                        try:
-                            await guild.unban(
-                                discord.Object(id=record["user_id"]),
-                                reason="Tempban expirado automáticamente",
+                        case_id = record.get("case_id")
+                        if not case_id:
+                            logger.warning(
+                                "Tempban legacy %s no expirado: falta identidad de caso",
+                                record.get("id"),
                             )
-                        except discord.NotFound:
-                            pass
+                            continue
+                        user_id = int(record["user_id"])
+
+                        async def expire_record():
+                            result = await self._expire_tempban_case_locked(
+                                guild, user_id, int(case_id)
+                            )
+                            if result == "stale":
+                                self.db.clear_tempban(record["id"])
+                            return result
+
+                        try:
+                            result = await run_sanction_locked(
+                                self.bot,
+                                guild.id,
+                                user_id,
+                                "TEMPBAN_EXPIRE",
+                                expire_record,
+                            )
                         except discord.Forbidden:
-                            logger.warning("Sin permisos para desbanear tempban expirado de %s en %s", record["user_id"], guild.name)
+                            logger.warning("Sin permisos para desbanear tempban expirado de %s en %s", user_id, guild.name)
                             continue
                         except discord.HTTPException as exc:
-                            logger.warning("Error desbaneando tempban expirado %s en %s: %s", record["user_id"], guild.name, exc)
+                            logger.warning("Error desbaneando tempban expirado %s en %s: %s", user_id, guild.name, exc)
                             continue
 
-                        self.db.clear_tempban(record["id"])
-                        if record.get("case_id"):
-                            self.db.update_case_by_id(guild.id, int(record["case_id"]), status="expired")
-                        self.db.log_action(
-                            guild.id, record["user_id"], self.bot.user.id,
-                            "TEMPBAN_EXPIRED", "Tempban expirado automáticamente",
-                            parent_case_id=record.get("case_id"),
-                            status="expired",
-                        )
+                        if result == "legacy":
+                            logger.warning(
+                                "Tempban %s no expirado: el caso no conserva identidad del ban",
+                                case_id,
+                            )
+                            continue
+                        if result == "applying":
+                            continue
+                        if result == "replaced":
+                            logger.warning(
+                                "Tempban %s cancelado sin unban: el efecto fue reemplazado",
+                                case_id,
+                            )
+                            continue
+                        if result != "expired":
+                            continue
 
                         log_embed = discord.Embed(
                             title="Tempban expirado",
-                            description=f"<@{record['user_id']}> fue desbaneado automáticamente.",
+                            description=f"<@{user_id}> fue desbaneado automáticamente.",
                             color=discord.Color.green(),
                             timestamp=datetime.now(timezone.utc),
                         )
-                        log_embed.set_footer(text=f"ID: {record['user_id']}")
+                        log_embed.set_footer(text=f"ID: {user_id}")
                         await self._send_log(guild, log_embed)
-                        logger.info("Tempban expirado: %s en %s", record["user_id"], guild.name)
+                        logger.info("Tempban expirado: %s en %s", user_id, guild.name)
 
                 except Exception as exc:
                     logger.error("Error al expirar tempban individual: %s", exc, exc_info=True)
@@ -659,6 +2156,7 @@ class Moderation(commands.Cog):
     @_check_tempbans.before_loop
     async def _before_check_tempbans(self):
         await self.bot.wait_until_ready()
+        await self._ban_reconciliation_ready.wait()
 
     # ── Tarea: scheduler idempotente de moderación ────────────────────────────
 
@@ -674,10 +2172,13 @@ class Moderation(commands.Cog):
 
         for job in pending:
             action_id = job.get("id")
+            if not self.db.claim_pending_moderation_action(int(action_id)):
+                continue
+            job["status"] = "processing"
             try:
                 guild = self.bot.get_guild(job["guild_id"])
                 if not guild:
-                    self.db.update_pending_moderation_action(action_id, "failed", "guild_not_found")
+                    self._retry_pending_moderation(job, "guild_not_found")
                     continue
 
                 action_type = (job.get("action_type") or "").upper()
@@ -686,41 +2187,187 @@ class Moderation(commands.Cog):
                 member = guild.get_member(user_id)
 
                 if action_type in {"TEMPBAN_EXPIRE", "UNBAN"}:
+                    if not case_id:
+                        self.db.update_pending_moderation_action(
+                            action_id, "failed", "legacy_tempban_without_case_identity"
+                        )
+                        continue
+
+                    async def expire_tempban_job():
+                        return await self._expire_tempban_case_locked(
+                            guild, user_id, int(case_id)
+                        )
+
                     try:
-                        await guild.unban(discord.Object(id=user_id), reason="Tempban expirado automáticamente")
-                    except discord.NotFound:
-                        pass
+                        result = await run_sanction_locked(
+                            self.bot,
+                            guild.id,
+                            user_id,
+                            "TEMPBAN_EXPIRE",
+                            expire_tempban_job,
+                        )
                     except discord.Forbidden:
                         self.db.update_pending_moderation_action(action_id, "failed", "missing_ban_members")
                         continue
-                    self.db.clear_tempbans_for_user(user_id, guild.id)
-                    if case_id:
-                        self.db.update_case_by_id(guild.id, int(case_id), status="expired")
-                    self.db.log_action(
-                        guild.id, user_id, self.bot.user.id,
-                        "TEMPBAN_EXPIRED", "Tempban expirado automáticamente",
-                        parent_case_id=int(case_id) if case_id else None,
-                        status="expired",
-                    )
+                    if result == "stale":
+                        self.db.update_pending_moderation_action(
+                            action_id, "cancelled", "stale_tempban_identity"
+                        )
+                        continue
+                    if result == "applying":
+                        self._retry_pending_moderation(
+                            job, "ban_activation_pending"
+                        )
+                        continue
+                    if result == "legacy":
+                        self.db.update_pending_moderation_action(
+                            action_id, "failed", "missing_ban_effect_identity"
+                        )
+                        continue
+                    if result == "replaced":
+                        self.db.update_pending_moderation_action(
+                            action_id, "cancelled", "ban_effect_replaced"
+                        )
+                        continue
 
                 elif action_type in {"MUTE_EXPIRE", "HARDMUTE_EXPIRE", "UNMUTE"}:
-                    cfg = self.db.get_config(guild.id)
-                    mute_role = guild.get_role(cfg.get("mute_role_id") or 0)
-                    if member and mute_role and mute_role in member.roles:
+                    async def expire_mute_job():
+                        if self.db.has_applying_mute_case(guild.id, user_id):
+                            return "applying"
+                        mute_role_id = self._mute_job_role_id(job)
+                        if mute_role_id is None:
+                            return "stale"
+                        if not self.bot.user:
+                            return "missing_bot"
                         try:
-                            await member.remove_roles(mute_role, reason="Mute expirado automáticamente")
-                        except discord.Forbidden:
-                            self.db.update_pending_moderation_action(action_id, "failed", "missing_manage_roles")
-                            continue
-                    self.db.clear_mute(user_id, guild.id)
-                    if case_id:
-                        self.db.update_case_by_id(guild.id, int(case_id), status="expired")
-                    self.db.log_action(
-                        guild.id, user_id, self.bot.user.id,
-                        "MUTE_EXPIRED", "Mute expirado automáticamente",
-                        parent_case_id=int(case_id) if case_id else None,
-                        status="expired",
-                    )
+                            current_member = await guild.fetch_member(user_id)
+                        except discord.NotFound:
+                            current_member = None
+                        current_case = (
+                            self.db.get_case_by_id(guild.id, int(case_id))
+                            if case_id
+                            else None
+                        )
+                        effect_state = (
+                            await self._mute_effect_state(
+                                guild,
+                                user_id,
+                                mute_role_id,
+                                current_case,
+                                member=current_member,
+                            )
+                            if current_member is not None
+                            else "absent"
+                        )
+                        if effect_state in {"legacy", "unverified"}:
+                            return effect_state
+                        if effect_state == "replaced":
+                            if self._json_object((current_case or {}).get("extra_data")).get("suppressed_roles"):
+                                raise PermissionError("El mute fue reemplazado; los roles retirados requieren revisión manual.")
+                            self.db.clear_mute(user_id, guild.id)
+                            if case_id:
+                                self.db.update_case_by_id(
+                                    guild.id, int(case_id), status="revoked"
+                                )
+                            return "replaced_effect"
+                        if effect_state == "match":
+                            removal_member, removal_role, removal_state = (
+                                await self._fresh_mute_removal_context(
+                                    guild, user_id, mute_role_id
+                                )
+                            )
+                            if removal_state == "unverified":
+                                return "unverified"
+                            if removal_state == "unsafe":
+                                return "unmanageable"
+                            if self._mute_job_role_id(job) != mute_role_id:
+                                return "stale"
+                            if (
+                                removal_state == "safe"
+                                and removal_member is not None
+                                and removal_role is not None
+                            ):
+                                final_effect_state = await self._mute_effect_state(
+                                    guild,
+                                    user_id,
+                                    mute_role_id,
+                                    current_case,
+                                )
+                                if final_effect_state in {"legacy", "unverified"}:
+                                    return final_effect_state
+                                if final_effect_state == "replaced":
+                                    if self._json_object((current_case or {}).get("extra_data")).get("suppressed_roles"):
+                                        raise PermissionError("El mute fue reemplazado; los roles retirados requieren revisión manual.")
+                                    self.db.clear_mute(user_id, guild.id)
+                                    if case_id:
+                                        self.db.update_case_by_id(
+                                            guild.id,
+                                            int(case_id),
+                                            status="revoked",
+                                        )
+                                    return "replaced_effect"
+                                if final_effect_state == "match":
+                                    await removal_member.remove_roles(
+                                        removal_role,
+                                        reason="Mute expirado automáticamente",
+                                    )
+                        if self._mute_job_role_id(job) != mute_role_id:
+                            return "stale"
+                        await self._restore_mute_roles(guild, user_id, current_case)
+                        self.db.clear_mute(user_id, guild.id)
+                        if case_id:
+                            self.db.update_case_by_id(
+                                guild.id, int(case_id), status="expired"
+                            )
+                        self.db.log_action(
+                            guild.id,
+                            user_id,
+                            self.bot.user.id,
+                            "MUTE_EXPIRED",
+                            "Mute expirado automáticamente",
+                            parent_case_id=int(case_id) if case_id else None,
+                            status="expired",
+                        )
+                        return "expired"
+
+                    try:
+                        result = await run_sanction_locked(
+                            self.bot,
+                            guild.id,
+                            user_id,
+                            action_type,
+                            expire_mute_job,
+                        )
+                    except discord.Forbidden:
+                        self.db.update_pending_moderation_action(
+                            action_id, "failed", "missing_manage_roles"
+                        )
+                        continue
+                    if result == "stale":
+                        self.db.update_pending_moderation_action(
+                            action_id, "cancelled", "stale_mute_identity"
+                        )
+                        continue
+                    if result == "applying":
+                        self._retry_pending_moderation(
+                            job, "mute_activation_pending"
+                        )
+                        continue
+                    if result in {"missing_bot", "unmanageable"}:
+                        self.db.update_pending_moderation_action(
+                            action_id, "failed", f"{result}_mute_role"
+                        )
+                        continue
+                    if result in {"legacy", "unverified"}:
+                        self.db.update_pending_moderation_action(
+                            action_id, "failed", "mute_effect_identity_unverified"
+                        )
+                        continue
+                    if result == "replaced_effect":
+                        self.db.update_pending_moderation_action(
+                            action_id, "cancelled", "mute_effect_replaced"
+                        )
+                        continue
 
                 elif action_type in {"TIMEOUT_EXPIRE", "UNTIMEOUT"}:
                     if case_id:
@@ -739,13 +2386,19 @@ class Moderation(commands.Cog):
             except Exception as exc:
                 logger.error("Error procesando pending moderation %s: %s", action_id, exc, exc_info=True)
                 try:
-                    self.db.update_pending_moderation_action(action_id, "failed", str(exc)[:500])
+                    self._retry_pending_moderation(job, str(exc)[:500])
                 except Exception:
                     pass
+
+    def _retry_pending_moderation(self, job: Dict, error: str, max_attempts: int = 5) -> None:
+        attempts = int(job.get("attempts") or 0)
+        status = "failed" if attempts + 1 >= max_attempts else "pending"
+        self.db.update_pending_moderation_action(int(job["id"]), status, error[:500])
 
     @_check_pending_moderation.before_loop
     async def _before_check_pending_moderation(self):
         await self.bot.wait_until_ready()
+        await self._ban_reconciliation_ready.wait()
 
     # ── Tarea: reintento de logs críticos ─────────────────────────────────────
 
@@ -759,6 +2412,9 @@ class Moderation(commands.Cog):
             return
 
         for row in rows:
+            if not self.db.claim_log_outbox(int(row["id"])):
+                continue
+            row["status"] = "processing"
             try:
                 log_id = int(row["id"])
                 attempts = int(row.get("attempts") or 0)
@@ -824,9 +2480,13 @@ class Moderation(commands.Cog):
     # /ban
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="ban", description="Banea a un usuario del servidor")
+    @app_commands.command(
+        name="ban",
+        description="Banea a un usuario, incluso si ya no está en el servidor",
+    )
     @app_commands.describe(
-        usuario="Usuario a banear",
+        usuario="Usuario a banear (puede estar fuera del servidor)",
+        usuario_id="ID del usuario si no aparece en el selector",
         razon="Razón del ban",
         duracion="Opcional: si se indica, el ban será temporal. Ej: 30m, 2h, 1d",
         eliminar_mensajes="Días de mensajes a eliminar (0-7, por defecto 0)",
@@ -835,8 +2495,9 @@ class Moderation(commands.Cog):
     async def ban(
         self,
         interaction: discord.Interaction,
-        usuario: discord.Member,
-        razon: str = "Sin razón especificada",
+        razon: str,
+        usuario: Optional[Union[discord.Member, discord.User]] = None,
+        usuario_id: Optional[str] = None,
         duracion: Optional[str] = None,
         eliminar_mensajes: app_commands.Range[int, 0, 7] = 0,
         evidencia_url: Optional[str] = None,
@@ -844,85 +2505,208 @@ class Moderation(commands.Cog):
         if not self._has_mod_perms(interaction, "ban_members"):
             return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
 
-        err = self._can_moderate(interaction.user, usuario)  # type: ignore
-        if err:
-            return await interaction.response.send_message(_voice(self).line("error", err), ephemeral=True)
+        razon = razon.strip()
+        if not razon:
+            return await interaction.response.send_message(
+                "❌ Escribe el motivo en la opción `razon`. No se ha aplicado ninguna sanción.",
+                ephemeral=True,
+            )
 
-        await interaction.response.defer()
+        raw_user_id = usuario_id.strip() if usuario_id else ""
+        if usuario is None and not raw_user_id:
+            return await interaction.response.send_message(
+                "❌ Indica un usuario en el selector o escribe su ID en `usuario_id`.",
+                ephemeral=True,
+            )
+        if usuario is not None and raw_user_id:
+            return await interaction.response.send_message(
+                "❌ Usa solo una opción: `usuario` o `usuario_id`.",
+                ephemeral=True,
+            )
+
+        if raw_user_id:
+            target_id = _parse_discord_user_id(raw_user_id)
+            if target_id is None:
+                return await interaction.response.send_message(
+                    "❌ Esa ID no se parece a un ID válido de Discord.",
+                    ephemeral=True,
+                )
+        else:
+            assert usuario is not None
+            target_id = usuario.id
 
         duration_secs: Optional[int] = None
         expiry: Optional[datetime] = None
         if duracion:
             duration_secs = parse_duration(duracion)
             if duration_secs is None:
-                return await interaction.followup.send(
+                return await interaction.response.send_message(
                     _voice(self).line("error", "Formato inválido. Ejemplos: `30m` · `2h` · `1d` · `1w`"),
                     ephemeral=True,
                 )
-            expiry = datetime.now(timezone.utc) + timedelta(seconds=duration_secs)
 
-        action_type = "TEMPBAN" if duration_secs else "BAN"
+        await interaction.response.defer()
 
-        # Enviar DM con opción de apelación
-        view = AppealUserView(self.bot, interaction.guild_id, action_type, razon)
-        await self._dm(
-            usuario,
-            discord.Embed(
-                title="Has sido baneado temporalmente" if duration_secs else "Has sido baneado",
-                description=f"Has sido baneado de **{interaction.guild.name}**.",
-                color=discord.Color.dark_red(),
-            ).add_field(name="Duración", value=fmt_duration(duration_secs))
-             .add_field(name="Razón", value=razon)
-             .add_field(name="Moderador", value=interaction.user.display_name),
-            view=view
-        )
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.followup.send(
+                "❌ Este comando solo funciona dentro de un servidor.", ephemeral=True
+            )
 
-        try:
-            await usuario.ban(
-                reason=f"{action_type} {fmt_duration(duration_secs) if duration_secs else ''} | {razon} | Mod: {interaction.user}",
+        member: Optional[discord.Member]
+        if isinstance(usuario, discord.Member):
+            member = usuario
+        else:
+            member = guild.get_member(target_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(target_id)
+                except discord.NotFound:
+                    member = None
+                except (discord.Forbidden, discord.HTTPException):
+                    return await interaction.followup.send(
+                        "❌ No puedo verificar si ese usuario sigue en el servidor. Inténtalo de nuevo.",
+                        ephemeral=True,
+                    )
+
+        if member is not None:
+            err = self._can_moderate(interaction.user, member)  # type: ignore[arg-type]
+            if err:
+                return await interaction.followup.send(
+                    _voice(self).line("error", err), ephemeral=True
+                )
+
+        resolved_user: Optional[Union[discord.Member, discord.User]] = member or usuario
+        if resolved_user is None:
+            get_user = getattr(self.bot, "get_user", None)
+            cached_user = get_user(target_id) if callable(get_user) else None
+            if isinstance(cached_user, discord.User):
+                resolved_user = cached_user
+
+        action_type = "TEMPBAN" if duration_secs is not None else "BAN"
+
+        async def apply_ban():
+            current_actor, current_member, auth_error = await self._fresh_moderation_context(
+                interaction,
+                "ban_members",
+                target_id=target_id,
+                allow_absent_target=True,
+            )
+            if auth_error or current_actor is None:
+                raise PermissionError(auth_error or "autorización no verificable")
+            ban_target = current_member or discord.Object(id=target_id)
+            effect_token = new_ban_effect_token()
+            current_case_id = self.db.log_action(
+                interaction.guild_id,
+                target_id,
+                current_actor.id,
+                action_type,
+                razon,
+                {**interaction_metadata(interaction, current_member or resolved_user or target_id, current_actor), **{
+                    "delete_days": eliminar_mensajes,
+                    "duration_secs": duration_secs,
+                    "target_input": "id" if raw_user_id else "selector",
+                    "ban_effect_token": effect_token,
+                }},
+                status="applying",
+                evidence_url=evidencia_url,
+                duration_seconds=duration_secs,
+            )
+            if not current_case_id:
+                raise RuntimeError("ban_intent_not_persisted")
+            await guild.ban(
+                ban_target,
+                reason=reason_with_ban_effect(
+                    f"{action_type} {fmt_duration(duration_secs) if duration_secs is not None else ''} | {razon} | Mod: {current_actor}",
+                    effect_token,
+                ),
                 delete_message_seconds=eliminar_mensajes * 86400,
             )
+            await self._confirm_ban_effect(guild, target_id, effect_token)
+            current_expiry = (
+                datetime.now(timezone.utc) + timedelta(seconds=duration_secs)
+                if duration_secs is not None
+                else None
+            )
+            if not self.db.activate_prepared_ban_case(
+                interaction.guild_id,
+                target_id,
+                current_case_id,
+                current_actor.id,
+                razon,
+                duration_secs,
+                current_expiry.isoformat() if current_expiry else None,
+            ):
+                raise RuntimeError("ban_intent_changed")
+            return current_actor, current_member, current_case_id, current_expiry
+
+        try:
+            current_actor, current_member, case_id, expiry = await run_sanction_locked(
+                self.bot,
+                guild.id,
+                target_id,
+                action_type,
+                apply_ban,
+            )
+        except PermissionError as exc:
+            return await interaction.followup.send(
+                _voice(self).line("error", str(exc)), ephemeral=True
+            )
+        except RuntimeError:
+            logger.error(
+                "Ban de %s aplicado sin identidad confirmada; requiere revisión manual",
+                target_id,
+            )
+            return await interaction.followup.send(
+                "⚠️ Discord pudo aplicar el ban, pero no se pudo vincular de forma segura al caso. Revísalo manualmente.",
+                ephemeral=True,
+            )
         except discord.Forbidden:
-            logger.warning("Sin permisos para banear a %s en %s", usuario, interaction.guild)
+            logger.warning("Sin permisos para banear a %s en %s", target_id, guild)
             return await interaction.followup.send(
                 _voice(self).line("error", "Al gato le faltan permisos para banear a este usuario."),
                 ephemeral=True,
             )
         except discord.HTTPException as exc:
-            logger.warning("Error baneando a %s en %s: %s", usuario, interaction.guild, exc)
+            logger.warning("Error baneando a %s en %s: %s", target_id, guild, exc)
             return await interaction.followup.send(
                 _voice(self).line("error", "El gato perdió la cuerda. No se pudo completar el ban."),
                 ephemeral=True,
             )
+        if current_member is not None:
+            resolved_user = current_member
 
-        case_id = self.db.log_action(
-            interaction.guild_id, usuario.id, interaction.user.id,
-            action_type, razon, {"delete_days": eliminar_mensajes, "duration_secs": duration_secs},
-            evidence_url=evidencia_url,
-            duration_seconds=duration_secs,
-            expires_at=expiry.isoformat() if expiry else None,
-        )
-        if duration_secs and expiry:
-            self.db.set_tempban(
-                interaction.guild_id, usuario.id, interaction.user.id,
-                razon, duration_secs, case_id=case_id,
+        if resolved_user is not None and case_id:
+            # La apelación solo se ofrece después de persistir la sanción exacta.
+            view = AppealUserView(
+                self.bot, interaction.guild_id, action_type, razon, case_id
             )
-            self.db.add_pending_moderation_action(
-                interaction.guild_id, usuario.id, "TEMPBAN_EXPIRE", expiry.isoformat(), case_id=case_id,
+            await self._dm(
+                resolved_user,
+                discord.Embed(
+                    title="Has sido baneado temporalmente" if duration_secs else "Has sido baneado",
+                    description=f"Has sido baneado de **{guild.name}**.",
+                    color=discord.Color.dark_red(),
+                ).add_field(name="Duración", value=fmt_duration(duration_secs))
+                 .add_field(name="Razón", value=razon)
+                 .add_field(name="Moderador", value=interaction.user.display_name),
+                view=view,
             )
 
+        target_label = str(resolved_user) if resolved_user is not None else f"ID {target_id}"
         embed = discord.Embed(
             title="Usuario baneado temporalmente" if duration_secs else "Usuario baneado",
             description=(
-                f"**{usuario}** ha sido baneado por **{fmt_duration(duration_secs)}**."
-                if duration_secs else f"**{usuario}** ha sido baneado permanentemente."
+                f"**{target_label}** ha sido baneado por **{fmt_duration(duration_secs)}**."
+                if duration_secs else f"**{target_label}** ha sido baneado permanentemente."
             ),
             color=discord.Color.dark_red(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_thumbnail(url=usuario.display_avatar.url)
-        embed.add_field(name="Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
-        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        if resolved_user is not None:
+            embed.set_thumbnail(url=resolved_user.display_avatar.url)
+        embed.add_field(name="Usuario", value=f"<@{target_id}>\n`{target_id}`", inline=True)
+        embed.add_field(name="Moderador", value=current_actor.mention, inline=True)
         embed.add_field(name="Msgs eliminados", value=f"{eliminar_mensajes} día(s)", inline=True)
         if duration_secs and expiry:
             embed.add_field(name="⏱️ Duración", value=fmt_duration(duration_secs), inline=True)
@@ -960,33 +2744,110 @@ class Moderation(commands.Cog):
         except ValueError:
             return await interaction.response.send_message("❌ Esa ID no se parece a un ID de Discord.", ephemeral=True)
 
+        target = interaction.guild.get_member(uid)
+        if target is None:
+            try:
+                target = await interaction.guild.fetch_member(uid)
+            except discord.NotFound:
+                target = None
+            except (discord.Forbidden, discord.HTTPException):
+                return await interaction.response.send_message(
+                    "❌ No puedo verificar la jerarquía actual de ese usuario.",
+                    ephemeral=True,
+                )
+        if target is not None:
+            err = self._can_moderate(interaction.user, target)  # type: ignore[arg-type]
+            if err:
+                return await interaction.response.send_message(
+                    _voice(self).line("error", err), ephemeral=True
+                )
+
         secs = parse_duration(duracion) if duracion else None
         if duracion and secs is None:
             return await interaction.response.send_message("❌ Duración inválida. Ejemplos: `30m`, `2h`, `1d`.", ephemeral=True)
-        expiry = datetime.now(timezone.utc) + timedelta(seconds=secs) if secs else None
-
         await interaction.response.defer()
-        try:
+        action = "TEMPBAN" if secs is not None else "FORCEBAN"
+
+        async def apply_forceban():
+            current_actor, current_target, auth_error = await self._fresh_moderation_context(
+                interaction,
+                "ban_members",
+                target_id=uid,
+                allow_absent_target=True,
+            )
+            if auth_error or current_actor is None:
+                raise PermissionError(auth_error or "autorización no verificable")
+            effect_token = new_ban_effect_token()
+            current_case_id = self.db.log_action(
+                interaction.guild_id,
+                uid,
+                current_actor.id,
+                action,
+                razon,
+                {**interaction_metadata(interaction, uid, current_actor), **{
+                    "forceban": True,
+                    "delete_days": eliminar_mensajes,
+                    "duration_secs": secs,
+                    "ban_effect_token": effect_token,
+                }},
+                status="applying",
+                duration_seconds=secs,
+            )
+            if not current_case_id:
+                raise RuntimeError("ban_intent_not_persisted")
             await interaction.guild.ban(
-                discord.Object(id=uid),
-                reason=f"Forceban {fmt_duration(secs) if secs else ''} | {razon} | Mod: {interaction.user}",
+                current_target or discord.Object(id=uid),
+                reason=reason_with_ban_effect(
+                    f"Forceban {fmt_duration(secs) if secs is not None else ''} | {razon} | Mod: {current_actor}",
+                    effect_token,
+                ),
                 delete_message_seconds=eliminar_mensajes * 86400,
+            )
+            await self._confirm_ban_effect(
+                interaction.guild, uid, effect_token
+            )
+            current_expiry = (
+                datetime.now(timezone.utc) + timedelta(seconds=secs)
+                if secs is not None
+                else None
+            )
+            if not self.db.activate_prepared_ban_case(
+                interaction.guild_id,
+                uid,
+                current_case_id,
+                current_actor.id,
+                razon,
+                secs,
+                current_expiry.isoformat() if current_expiry else None,
+            ):
+                raise RuntimeError("ban_intent_changed")
+            return current_actor, current_case_id, current_expiry
+
+        try:
+            current_actor, case_id, expiry = await run_sanction_locked(
+                self.bot,
+                interaction.guild_id,
+                uid,
+                action,
+                apply_forceban,
+            )
+        except PermissionError as exc:
+            return await interaction.followup.send(
+                _voice(self).line("error", str(exc)), ephemeral=True
+            )
+        except RuntimeError:
+            logger.error(
+                "Forceban de %s aplicado sin identidad confirmada; requiere revisión manual",
+                uid,
+            )
+            return await interaction.followup.send(
+                "⚠️ Discord pudo aplicar el ban, pero no se pudo vincular de forma segura al caso. Revísalo manualmente.",
+                ephemeral=True,
             )
         except discord.Forbidden:
             return await interaction.followup.send("❌ No tengo permisos para banear por ID.", ephemeral=True)
         except discord.HTTPException as exc:
             return await interaction.followup.send(f"❌ No se pudo completar el forceban: {exc}", ephemeral=True)
-
-        action = "TEMPBAN" if secs else "FORCEBAN"
-        case_id = self.db.log_action(
-            interaction.guild_id, uid, interaction.user.id,
-            action, razon, {"forceban": True, "delete_days": eliminar_mensajes, "duration_secs": secs},
-            duration_seconds=secs,
-            expires_at=expiry.isoformat() if expiry else None,
-        )
-        if secs and expiry:
-            self.db.set_tempban(interaction.guild_id, uid, interaction.user.id, razon, secs, case_id=case_id)
-            self.db.add_pending_moderation_action(interaction.guild_id, uid, "TEMPBAN_EXPIRE", expiry.isoformat(), case_id=case_id)
 
         embed = discord.Embed(
             title="Forceban aplicado",
@@ -1017,18 +2878,78 @@ class Moderation(commands.Cog):
         if err:
             return await interaction.response.send_message(_voice(self).line("error", err), ephemeral=True)
         await interaction.response.defer()
+        target_id = usuario.id
+
+        async def apply_softban():
+            current_actor, current_target, auth_error = await self._fresh_moderation_context(
+                interaction, "ban_members", target_id=target_id
+            )
+            if auth_error or current_actor is None or current_target is None:
+                raise PermissionError(auth_error or "autorización no verificable")
+            effect_token = new_ban_effect_token()
+            current_case_id = self.db.log_action(
+                interaction.guild_id,
+                target_id,
+                current_actor.id,
+                "SOFTBAN",
+                razon,
+                {**interaction_metadata(interaction, target_id, current_actor), **{
+                    "delete_days": eliminar_mensajes,
+                    "ban_effect_token": effect_token,
+                }},
+                status="applying",
+            )
+            if not current_case_id:
+                raise RuntimeError("softban_intent_not_persisted")
+            await current_target.ban(
+                reason=reason_with_ban_effect(
+                    f"Softban: {razon} | Mod: {current_actor}",
+                    effect_token,
+                ),
+                delete_message_seconds=eliminar_mensajes * 86400,
+            )
+            entry = await interaction.guild.fetch_ban(discord.Object(id=target_id))
+            if not ban_reason_matches(entry.reason, effect_token):
+                raise RuntimeError("softban_replaced_before_cleanup")
+            if not self.db.confirm_prepared_softban_effect(
+                interaction.guild_id, target_id, current_case_id
+            ):
+                raise RuntimeError("softban_confirmation_changed")
+            await interaction.guild.unban(
+                entry.user,
+                reason=f"Softban cleanup completado | Mod: {current_actor}",
+            )
+            if not self.db.complete_prepared_softban_case(
+                interaction.guild_id, target_id, current_case_id
+            ):
+                raise RuntimeError("softban_intent_changed")
+            return current_actor, current_target
+
         try:
-            await usuario.ban(reason=f"Softban: {razon} | Mod: {interaction.user}", delete_message_seconds=eliminar_mensajes * 86400)
-            await interaction.guild.unban(usuario, reason=f"Softban cleanup completado | Mod: {interaction.user}")
+            current_actor, usuario = await run_sanction_locked(
+                self.bot,
+                interaction.guild_id,
+                target_id,
+                "SOFTBAN",
+                apply_softban,
+            )
+        except PermissionError as exc:
+            return await interaction.followup.send(
+                _voice(self).line("error", str(exc)), ephemeral=True
+            )
+        except RuntimeError:
+            return await interaction.followup.send(
+                "❌ El ban cambió durante el softban; no se retiró el efecto nuevo.",
+                ephemeral=True,
+            )
+        except discord.NotFound:
+            return await interaction.followup.send(
+                "❌ Discord no confirmó el ban del softban.", ephemeral=True
+            )
         except discord.Forbidden:
             return await interaction.followup.send("❌ No tengo permisos/jerarquía para softban.", ephemeral=True)
         except discord.HTTPException as exc:
             return await interaction.followup.send(f"❌ No se pudo completar el softban: {exc}", ephemeral=True)
-        self.db.log_action(
-            interaction.guild_id, usuario.id, interaction.user.id,
-            "SOFTBAN", razon, {"delete_days": eliminar_mensajes},
-            status="expired",
-        )
         embed = discord.Embed(
             title="Softban aplicado",
             description=f"{usuario.mention} fue baneado y desbaneado para limpiar mensajes.",
@@ -1076,23 +2997,74 @@ class Moderation(commands.Cog):
 
         await interaction.response.defer()
 
-        view = AppealUserView(self.bot, interaction.guild_id, "TEMPBAN", razon)
-        await self._dm(
-            usuario,
-            discord.Embed(
-                title="Has sido baneado temporalmente",
-                description=f"Has sido baneado temporalmente de **{interaction.guild.name}**.",
-                color=discord.Color.dark_red(),
-            ).add_field(name="Duración", value=fmt_duration(secs))
-             .add_field(name="Razón", value=razon)
-             .add_field(name="Moderador", value=interaction.user.display_name),
-            view=view
-        )
+        target_id = usuario.id
+
+        async def apply_tempban():
+            current_actor, current_target, auth_error = await self._fresh_moderation_context(
+                interaction, "ban_members", target_id=target_id
+            )
+            if auth_error or current_actor is None or current_target is None:
+                raise PermissionError(auth_error or "autorización no verificable")
+            effect_token = new_ban_effect_token()
+            current_case_id = self.db.log_action(
+                interaction.guild_id,
+                target_id,
+                current_actor.id,
+                "TEMPBAN",
+                razon,
+                {**interaction_metadata(interaction, target_id, current_actor), **{
+                    "duration_secs": secs,
+                    "delete_days": eliminar_mensajes,
+                    "ban_effect_token": effect_token,
+                }},
+                status="applying",
+                duration_seconds=secs,
+            )
+            if not current_case_id:
+                raise RuntimeError("ban_intent_not_persisted")
+            await current_target.ban(
+                reason=reason_with_ban_effect(
+                    f"Tempban {fmt_duration(secs)} | {razon} | Mod: {current_actor}",
+                    effect_token,
+                ),
+                delete_message_seconds=eliminar_mensajes * 86400,
+            )
+            await self._confirm_ban_effect(
+                interaction.guild, target_id, effect_token
+            )
+            current_expiry = datetime.now(timezone.utc) + timedelta(seconds=secs)
+            if not self.db.activate_prepared_ban_case(
+                interaction.guild_id,
+                target_id,
+                current_case_id,
+                current_actor.id,
+                razon,
+                secs,
+                current_expiry.isoformat(),
+            ):
+                raise RuntimeError("ban_intent_changed")
+            return current_actor, current_target, current_case_id, current_expiry
 
         try:
-            await usuario.ban(
-                reason=f"Tempban {fmt_duration(secs)} | {razon} | Mod: {interaction.user}",
-                delete_message_seconds=eliminar_mensajes * 86400,
+            current_actor, usuario, case_id, expiry = await run_sanction_locked(
+                self.bot,
+                interaction.guild_id,
+                target_id,
+                "TEMPBAN",
+                apply_tempban,
+            )
+        except PermissionError as exc:
+            return await interaction.followup.send(
+                _voice(self).line("error", str(exc)), ephemeral=True
+            )
+        except RuntimeError:
+            logger.error(
+                "Tempban de %s aplicado sin identidad confirmada; requiere revisión manual",
+                target_id,
+            )
+            return await interaction.followup.send(
+                "⚠️ Discord pudo aplicar el ban, pero no se pudo vincular de forma segura al caso. Revísalo manualmente.",
+                ephemeral=True,
             )
         except discord.Forbidden:
             logger.warning("Sin permisos para tempbanear a %s en %s", usuario, interaction.guild)
@@ -1107,20 +3079,21 @@ class Moderation(commands.Cog):
                 ephemeral=True,
             )
 
-        expiry = datetime.now(timezone.utc) + timedelta(seconds=secs)
-        case_id = self.db.log_action(
-            interaction.guild_id, usuario.id, interaction.user.id,
-            "TEMPBAN", razon, {"duration_secs": secs, "delete_days": eliminar_mensajes},
-            duration_seconds=secs,
-            expires_at=expiry.isoformat(),
-        )
-        self.db.set_tempban(
-            interaction.guild_id, usuario.id, interaction.user.id,
-            razon, secs, case_id=case_id,
-        )
-        self.db.add_pending_moderation_action(
-            interaction.guild_id, usuario.id, "TEMPBAN_EXPIRE", expiry.isoformat(), case_id=case_id,
-        )
+        if case_id:
+            view = AppealUserView(
+                self.bot, interaction.guild_id, "TEMPBAN", razon, case_id
+            )
+            await self._dm(
+                usuario,
+                discord.Embed(
+                    title="Has sido baneado temporalmente",
+                    description=f"Has sido baneado temporalmente de **{interaction.guild.name}**.",
+                    color=discord.Color.dark_red(),
+                ).add_field(name="Duración", value=fmt_duration(secs))
+                 .add_field(name="Razón", value=razon)
+                 .add_field(name="Moderador", value=interaction.user.display_name),
+                view=view,
+            )
 
         embed = discord.Embed(
             title="Usuario baneado temporalmente",
@@ -1168,17 +3141,57 @@ class Moderation(commands.Cog):
         except ValueError:
             return await interaction.followup.send(_voice(self).line("error", "Esa ID no se parece a un ID de Discord."), ephemeral=True)
 
+        async def apply_unban():
+            auth_context, entry = await asyncio.gather(
+                self._fresh_moderation_context(interaction, "ban_members"),
+                interaction.guild.fetch_ban(discord.Object(id=uid)),
+            )
+            current_actor, _, auth_error = auth_context
+            if auth_error or current_actor is None:
+                raise PermissionError(auth_error or "autorización no verificable")
+            await interaction.guild.unban(
+                entry.user, reason=f"{razon} | Mod: {current_actor}"
+            )
+            self.db.clear_tempbans_for_user(uid, interaction.guild_id)
+            self.db.cancel_pending_moderation_actions(
+                interaction.guild_id,
+                uid,
+                ["TEMPBAN_EXPIRE", "UNBAN"],
+                reason="manual_unban",
+            )
+            self.db.revoke_active_moderations(
+                interaction.guild_id,
+                uid,
+                ["BAN", "TEMPBAN", "FORCEBAN", "AUTO_BAN"],
+            )
+            self.db.log_action(
+                interaction.guild_id,
+                uid,
+                current_actor.id,
+                "UNBAN",
+                razon, extra=interaction_metadata(interaction, entry.user, current_actor),
+                status="revoked",
+            )
+            return current_actor, entry
+
         try:
-            entry = await interaction.guild.fetch_ban(discord.Object(id=uid))
+            current_actor, entry = await run_sanction_locked(
+                self.bot,
+                interaction.guild_id,
+                uid,
+                "UNBAN",
+                apply_unban,
+            )
+        except PermissionError as exc:
+            return await interaction.followup.send(
+                _voice(self).line("error", str(exc)), ephemeral=True
+            )
         except discord.NotFound:
             return await interaction.followup.send(
                 f"❌ No existe un ban activo con ID `{uid}`.", ephemeral=True
             )
-
-        try:
-            await interaction.guild.unban(entry.user, reason=f"{razon} | Mod: {interaction.user}")
         except discord.Forbidden:
-            logger.warning("Sin permisos para desbanear a %s en %s", entry.user, interaction.guild)
+            logger.warning("Sin permisos para desbanear ID %s en %s", uid, interaction.guild)
             return await interaction.followup.send(
                 "❌ No tengo permisos suficientes para desbanear a ese usuario.",
                 ephemeral=True,
@@ -1189,20 +3202,6 @@ class Moderation(commands.Cog):
                 "❌ No se pudo completar el desbaneo. Inténtalo de nuevo.",
                 ephemeral=True,
             )
-
-        self.db.clear_tempbans_for_user(uid, interaction.guild_id)
-        self.db.cancel_pending_moderation_actions(
-            interaction.guild_id,
-            uid,
-            ["TEMPBAN_EXPIRE", "UNBAN"],
-            reason="manual_unban",
-        )
-        self.db.revoke_active_moderations(
-            interaction.guild_id,
-            uid,
-            ["BAN", "TEMPBAN", "FORCEBAN"],
-        )
-        self.db.log_action(interaction.guild_id, uid, interaction.user.id, "UNBAN", razon)
 
         embed = discord.Embed(
             title="✅ Usuario desbaneado",
@@ -1232,10 +3231,17 @@ class Moderation(commands.Cog):
         self,
         interaction: discord.Interaction,
         usuario: discord.Member,
-        razon: str = "Sin razón especificada",
+        razon: str,
     ):
         if not self._has_mod_perms(interaction, "kick_members"):
             return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
+
+        razon = razon.strip()
+        if not razon:
+            return await interaction.response.send_message(
+                "❌ Escribe el motivo en la opción `razon`. No se ha aplicado ninguna sanción.",
+                ephemeral=True,
+            )
 
         err = self._can_moderate(interaction.user, usuario)  # type: ignore
         if err:
@@ -1243,20 +3249,16 @@ class Moderation(commands.Cog):
 
         await interaction.response.defer()
 
-        view = AppealUserView(self.bot, interaction.guild_id, "KICK", razon)
-        await self._dm(
-            usuario,
-            discord.Embed(
-                title="Has sido expulsado",
-                description=f"Has sido expulsado de **{interaction.guild.name}**.",
-                color=discord.Color.orange(),
-            ).add_field(name="Razón", value=razon)
-             .add_field(name="Moderador", value=interaction.user.display_name),
-            view=view
+        current_actor, current_target, auth_error = await self._fresh_moderation_context(
+            interaction, "kick_members", target_id=usuario.id
         )
-
+        if auth_error:
+            return await interaction.followup.send(
+                _voice(self).line("error", auth_error), ephemeral=True
+            )
+        usuario = current_target
         try:
-            await usuario.kick(reason=f"{razon} | Mod: {interaction.user}")
+            await usuario.kick(reason=f"{razon} | Mod: {current_actor}")
         except discord.Forbidden:
             logger.warning("Sin permisos para expulsar a %s en %s", usuario, interaction.guild)
             return await interaction.followup.send(
@@ -1270,7 +3272,24 @@ class Moderation(commands.Cog):
                 ephemeral=True,
             )
 
-        self.db.log_action(interaction.guild_id, usuario.id, interaction.user.id, "KICK", razon)
+        case_id = self.db.log_action(
+            interaction.guild_id, usuario.id, interaction.user.id, "KICK", razon, extra=interaction_metadata(interaction, usuario, interaction.user)
+        )
+
+        if case_id:
+            view = AppealUserView(
+                self.bot, interaction.guild_id, "KICK", razon, case_id
+            )
+            await self._dm(
+                usuario,
+                discord.Embed(
+                    title="Has sido expulsado",
+                    description=f"Has sido expulsado de **{interaction.guild.name}**.",
+                    color=discord.Color.orange(),
+                ).add_field(name="Razón", value=razon)
+                 .add_field(name="Moderador", value=interaction.user.display_name),
+                view=view,
+            )
 
         embed = discord.Embed(
             title="Usuario expulsado",
@@ -1314,6 +3333,25 @@ class Moderation(commands.Cog):
 
         if not self._has_mod_perms(interaction, "manage_roles"):
             return await interaction.followup.send(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
+        _, preflight_target, preflight_error = await self._fresh_moderation_context(
+            interaction, "manage_roles", target_id=usuario.id
+        )
+        if preflight_error or preflight_target is None:
+            return await interaction.followup.send(
+                _voice(self).line(
+                    "error", preflight_error or "No pude verificar la operación."
+                ),
+                ephemeral=True,
+            )
+        usuario = preflight_target
+        secs: Optional[int] = None
+        if duracion:
+            secs = parse_duration(duracion)
+            if secs is None:
+                return await interaction.followup.send(
+                    _voice(self).line("error", "Formato inválido. Ejemplos: `30m` · `2h` · `1d` · `1w`"),
+                    ephemeral=True,
+                )
         mute_role = await self._ensure_mute_role(guild)
 
         if not mute_role:
@@ -1323,26 +3361,66 @@ class Moderation(commands.Cog):
                 ephemeral=True,
             )
 
-        err = self._can_moderate(interaction.user, usuario)  # type: ignore
-        if err:
-            return await interaction.followup.send(_voice(self).line("error", err), ephemeral=True)
-
         if mute_role in usuario.roles:
             return await interaction.followup.send(
                 f"⚠️ {usuario.mention} ya está silenciado.", ephemeral=True
             )
 
-        secs: Optional[int] = None
-        if duracion:
-            secs = parse_duration(duracion)
-            if secs is None:
-                return await interaction.followup.send(
-                    _voice(self).line("error", "Formato inválido. Ejemplos: `30m` · `2h` · `1d` · `1w`"),
-                    ephemeral=True,
+        target_id = usuario.id
+        mute_role_id = mute_role.id
+
+        async def apply_mute():
+            current_actor, current_target, current_role, auth_error = (
+                await self._fresh_mute_role_context(
+                    interaction,
+                    target_id,
+                    mute_role_id,
+                    for_assignment=True,
                 )
+            )
+            if (
+                auth_error
+                or current_actor is None
+                or current_target is None
+                or current_role is None
+            ):
+                raise PermissionError(auth_error or "No pude verificar la operación.")
+            if mute_role_id in {
+                int(value) for value in getattr(current_target, "_roles", ())
+            }:
+                raise LookupError("already_muted")
+            current_actor, confirmed_member, current_expiry, current_case_id = await self._apply_role_mute(
+                interaction, target_id, mute_role_id, "MUTE", razon, secs
+            )
+            return current_actor, confirmed_member, current_role, current_expiry, current_case_id
 
         try:
-            await usuario.add_roles(mute_role, reason=f"Mute: {razon} | Mod: {interaction.user}")
+            current_actor, usuario, mute_role, expiry, case_id = await run_sanction_locked(
+                self.bot,
+                guild.id,
+                target_id,
+                "MUTE",
+                apply_mute,
+            )
+        except PermissionError as exc:
+            return await interaction.followup.send(
+                _voice(self).line("error", str(exc)), ephemeral=True
+            )
+        except ValueError:
+            return await interaction.followup.send(
+                "❌ El rol de mute dejó de ser seguro y la operación fue cancelada.",
+                ephemeral=True,
+            )
+        except LookupError:
+            return await interaction.followup.send(
+                f"⚠️ <@{target_id}> ya está silenciado.", ephemeral=True
+            )
+        except RuntimeError as exc:
+            return await interaction.followup.send(
+                "⚠️ El mute no se pudo completar y sus cambios se revirtieron." if str(exc) == "mute_rolled_back" else
+                "⚠️ No se pudo confirmar y activar el mute de forma segura; quedó pendiente de reconciliación.",
+                ephemeral=True,
+            )
         except discord.Forbidden:
             logger.warning("Sin permisos para mutear a %s en %s", usuario, interaction.guild)
             return await interaction.followup.send(
@@ -1356,19 +3434,6 @@ class Moderation(commands.Cog):
                 ephemeral=True,
             )
 
-        self.db.set_mute(usuario.id, interaction.guild_id, secs)
-        expiry = datetime.now(timezone.utc) + timedelta(seconds=secs) if secs else None
-        case_id = self.db.log_action(
-            interaction.guild_id, usuario.id, interaction.user.id,
-            "MUTE", razon, {"duration_secs": secs},
-            duration_seconds=secs,
-            expires_at=expiry.isoformat() if expiry else None,
-        )
-        if expiry:
-            self.db.add_pending_moderation_action(
-                interaction.guild_id, usuario.id, "MUTE_EXPIRE", expiry.isoformat(), case_id=case_id,
-            )
-
         embed = discord.Embed(
             title="Usuario silenciado",
             description=f"{usuario.mention} ha sido silenciado.",
@@ -1376,7 +3441,7 @@ class Moderation(commands.Cog):
             timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
-        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Moderador", value=current_actor.mention, inline=True)
         embed.add_field(name="⏱️ Duración", value=fmt_duration(secs), inline=True)
         if expiry:
             embed.add_field(name="Expira", value=f"<t:{int(expiry.timestamp())}:R>", inline=True)
@@ -1385,17 +3450,20 @@ class Moderation(commands.Cog):
         await interaction.followup.send(embed=embed)
         await self._send_log(interaction.guild, embed)
 
-        view = AppealUserView(self.bot, interaction.guild_id, "MUTE", razon)
-        await self._dm(
-            usuario,
-            discord.Embed(
-                title="Has sido silenciado",
-                description=f"Has sido silenciado en **{interaction.guild.name}**.",
-                color=discord.Color.red(),
-            ).add_field(name="Duración", value=fmt_duration(secs))
-             .add_field(name="Razón", value=razon),
-            view=view
-        )
+        if case_id:
+            view = AppealUserView(
+                self.bot, interaction.guild_id, "MUTE", razon, case_id
+            )
+            await self._dm(
+                usuario,
+                discord.Embed(
+                    title="Has sido silenciado",
+                    description=f"Has sido silenciado en **{interaction.guild.name}**.",
+                    color=discord.Color.red(),
+                ).add_field(name="Duración", value=fmt_duration(secs))
+                 .add_field(name="Razón", value=razon),
+                view=view,
+            )
 
     @mute.error
     async def mute_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1424,30 +3492,81 @@ class Moderation(commands.Cog):
             return await interaction.response.send_message("❌ Duración inválida. Ejemplos: `30m`, `2h`, `1d`.", ephemeral=True)
 
         await interaction.response.defer()
+        _, preflight_target, preflight_error = await self._fresh_moderation_context(
+            interaction, "manage_roles", target_id=usuario.id
+        )
+        if preflight_error or preflight_target is None:
+            return await interaction.followup.send(
+                _voice(self).line(
+                    "error", preflight_error or "No pude verificar la operación."
+                ),
+                ephemeral=True,
+            )
+        usuario = preflight_target
         mute_role = await self._ensure_mute_role(interaction.guild)
         if not mute_role:
             return await interaction.followup.send("❌ No pude crear/adoptar el rol Muted. Revisa `Gestionar roles` y jerarquía.", ephemeral=True)
         if mute_role in usuario.roles:
             return await interaction.followup.send(f"⚠️ {usuario.mention} ya está silenciado.", ephemeral=True)
+        target_id = usuario.id
+        mute_role_id = mute_role.id
+
+        async def apply_hardmute():
+            current_actor, current_target, current_role, auth_error = (
+                await self._fresh_mute_role_context(
+                    interaction,
+                    target_id,
+                    mute_role_id,
+                    for_assignment=True,
+                )
+            )
+            if (
+                auth_error
+                or current_actor is None
+                or current_target is None
+                or current_role is None
+            ):
+                raise PermissionError(auth_error or "No pude verificar la operación.")
+            if mute_role_id in {
+                int(value) for value in getattr(current_target, "_roles", ())
+            }:
+                raise LookupError("already_muted")
+            return await self._apply_role_mute(
+                interaction, target_id, mute_role_id, "HARDMUTE", razon, secs,
+                job_action="HARDMUTE_EXPIRE",
+            )
+
         try:
-            await usuario.add_roles(mute_role, reason=f"Hardmute: {razon} | Mod: {interaction.user}")
+            current_actor, usuario, expiry, case_id = await run_sanction_locked(
+                self.bot,
+                interaction.guild_id,
+                target_id,
+                "HARDMUTE",
+                apply_hardmute,
+            )
+        except PermissionError as exc:
+            return await interaction.followup.send(
+                _voice(self).line("error", str(exc)), ephemeral=True
+            )
+        except ValueError:
+            return await interaction.followup.send(
+                "❌ El rol de mute dejó de ser seguro y la operación fue cancelada.",
+                ephemeral=True,
+            )
+        except LookupError:
+            return await interaction.followup.send(
+                f"⚠️ <@{target_id}> ya está silenciado.", ephemeral=True
+            )
+        except RuntimeError as exc:
+            return await interaction.followup.send(
+                "⚠️ El hardmute no se pudo completar y sus cambios se revirtieron." if str(exc) == "mute_rolled_back" else
+                "⚠️ No se pudo confirmar y activar el hardmute de forma segura; quedó pendiente de reconciliación.",
+                ephemeral=True,
+            )
         except discord.Forbidden:
             return await interaction.followup.send("❌ No tengo permisos/jerarquía para aplicar hardmute.", ephemeral=True)
         except discord.HTTPException as exc:
             return await interaction.followup.send(f"❌ No se pudo aplicar hardmute: {exc}", ephemeral=True)
-
-        expiry = datetime.now(timezone.utc) + timedelta(seconds=secs) if secs else None
-        self.db.set_mute(usuario.id, interaction.guild_id, secs)
-        case_id = self.db.log_action(
-            interaction.guild_id, usuario.id, interaction.user.id,
-            "HARDMUTE", razon, {"duration_secs": secs},
-            duration_seconds=secs,
-            expires_at=expiry.isoformat() if expiry else None,
-        )
-        if expiry:
-            self.db.add_pending_moderation_action(
-                interaction.guild_id, usuario.id, "HARDMUTE_EXPIRE", expiry.isoformat(), case_id=case_id,
-            )
 
         embed = discord.Embed(
             title="Hardmute aplicado",
@@ -1456,7 +3575,7 @@ class Moderation(commands.Cog):
             timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
-        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Moderador", value=current_actor.mention, inline=True)
         embed.add_field(name="Duración", value=fmt_duration(secs), inline=True)
         if expiry:
             embed.add_field(name="Expira", value=f"<t:{int(expiry.timestamp())}:R>", inline=True)
@@ -1478,20 +3597,98 @@ class Moderation(commands.Cog):
     ):
         if not self._has_mod_perms(interaction, "manage_roles"):
             return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
-        mute_role = await self._ensure_mute_role(interaction.guild)
-
-        if not mute_role:
+        err = self._can_moderate(interaction.user, usuario)  # type: ignore[arg-type]
+        if err:
             return await interaction.response.send_message(
-                "❌ No hay rol de mute configurado. Usa `/modconfig mute_role` o el dashboard.", ephemeral=True
+                _voice(self).line("error", err), ephemeral=True
             )
+        guild = interaction.guild
+        target_id = usuario.id
 
-        if mute_role not in usuario.roles:
-            return await interaction.response.send_message(
-                f"⚠️ {usuario.mention} no está silenciado.", ephemeral=True
+        async def apply_unmute():
+            mute_role_id = self._active_mute_role_id(
+                interaction.guild_id, target_id
             )
+            if not mute_role_id:
+                raise LookupError("missing_mute_role")
+            current_actor, current_target, mute_role, auth_error = (
+                await self._fresh_mute_role_context(
+                    interaction,
+                    target_id,
+                    mute_role_id,
+                    allow_absent_effect=True,
+                )
+            )
+            if (
+                auth_error
+                or current_actor is None
+                or current_target is None
+            ):
+                raise PermissionError(auth_error or "No pude verificar la operación.")
+            active_case = self._active_mute_case(interaction.guild_id, target_id)
+            if mute_role is not None:
+                await current_target.remove_roles(
+                    mute_role, reason=f"Unmute: {razon} | Mod: {current_actor}"
+                )
+            elif active_case is None:
+                raise LookupError("not_muted")
+            await self._restore_mute_roles(
+                guild, target_id, active_case, actor_id=current_actor.id
+            )
+            self.db.clear_mute(target_id, interaction.guild_id)
+            self.db.cancel_pending_moderation_actions(
+                interaction.guild_id,
+                target_id,
+                ["MUTE_EXPIRE", "HARDMUTE_EXPIRE", "UNMUTE"],
+                reason="manual_unmute",
+            )
+            self.db.revoke_active_moderations(
+                interaction.guild_id,
+                target_id,
+                ["MUTE", "AUTO_MUTE", "HARDMUTE"],
+            )
+            self.db.log_action(
+                interaction.guild_id,
+                target_id,
+                current_actor.id,
+                "UNMUTE",
+                razon, extra=interaction_metadata(interaction, target_id, current_actor),
+                status="revoked",
+            )
+            return current_actor, current_target, mute_role
 
         try:
-            await usuario.remove_roles(mute_role, reason=f"Unmute: {razon} | Mod: {interaction.user}")
+            current_actor, usuario, mute_role = await run_sanction_locked(
+                self.bot,
+                interaction.guild_id,
+                target_id,
+                "UNMUTE",
+                apply_unmute,
+            )
+        except PermissionError as exc:
+            return await interaction.response.send_message(
+                _voice(self).line("error", str(exc)),
+                ephemeral=True,
+            )
+        except LookupError:
+            return await interaction.response.send_message(
+                f"⚠️ <@{target_id}> no está silenciado.",
+                ephemeral=True,
+            )
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ El rol histórico de mute ya no está debajo de mi rol.",
+                ephemeral=True,
+            )
+        except RuntimeError:
+            return await interaction.response.send_message(
+                "⚠️ La restauración de roles sigue pendiente; el caso permanece abierto para reintentarlo.",
+                ephemeral=True,
+            )
+        except discord.NotFound:
+            return await interaction.response.send_message(
+                "❌ No pude verificar el usuario o el rol actual.", ephemeral=True
+            )
         except discord.Forbidden:
             logger.warning("Sin permisos para quitar mute a %s en %s", usuario, interaction.guild)
             return await interaction.response.send_message(
@@ -1504,20 +3701,6 @@ class Moderation(commands.Cog):
                 "❌ No se pudo completar el unmute. Inténtalo de nuevo.",
                 ephemeral=True,
             )
-
-        self.db.clear_mute(usuario.id, interaction.guild_id)
-        self.db.cancel_pending_moderation_actions(
-            interaction.guild_id,
-            usuario.id,
-            ["MUTE_EXPIRE", "HARDMUTE_EXPIRE", "UNMUTE"],
-            reason="manual_unmute",
-        )
-        self.db.revoke_active_moderations(
-            interaction.guild_id,
-            usuario.id,
-            ["MUTE", "AUTO_MUTE", "HARDMUTE"],
-        )
-        self.db.log_action(interaction.guild_id, usuario.id, interaction.user.id, "UNMUTE", razon, status="revoked")
 
         embed = discord.Embed(
             title="Usuario desilenciado",
@@ -1573,7 +3756,7 @@ class Moderation(commands.Cog):
                 ephemeral=True,
             )
             return
-        err = self._can_moderate(interaction.user, usuario)  # type: ignore
+        err = self._can_moderate(interaction.user, usuario, action_type="TIMEOUT")  # type: ignore
         if err:
             await self._safe_interaction_send(interaction, _voice(self).line("error", err), ephemeral=True)
             return
@@ -1592,8 +3775,17 @@ class Moderation(commands.Cog):
             return
 
         until = datetime.now(timezone.utc) + timedelta(seconds=secs)
+        current_actor, current_target, auth_error = await self._fresh_moderation_context(
+            interaction, "moderate_members", target_id=usuario.id, action_type="TIMEOUT"
+        )
+        if auth_error:
+            await self._safe_interaction_send(
+                interaction, _voice(self).line("error", auth_error), ephemeral=True
+            )
+            return
+        usuario = current_target
         try:
-            await usuario.timeout(until, reason=f"Timeout: {razon} | Mod: {interaction.user}")
+            await usuario.timeout(until, reason=f"Timeout: {razon} | Mod: {current_actor}")
         except discord.Forbidden:
             await self._safe_interaction_send(interaction, "❌ No tengo permisos/jerarquía para aplicar timeout.", ephemeral=True)
             return
@@ -1603,7 +3795,7 @@ class Moderation(commands.Cog):
 
         case_id = self.db.log_action(
             interaction.guild_id, usuario.id, interaction.user.id,
-            "TIMEOUT", razon, {"duration_secs": secs},
+            "TIMEOUT", razon, {**interaction_metadata(interaction, usuario, interaction.user), **{"duration_secs": secs}},
             evidence_url=evidencia_url,
             duration_seconds=secs,
             expires_at=until.isoformat(),
@@ -1619,7 +3811,7 @@ class Moderation(commands.Cog):
             timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="Usuario", value=f"{usuario.mention}\n`{usuario.id}`", inline=True)
-        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Moderador", value=current_actor.mention, inline=True)
         embed.add_field(name="Expira", value=f"<t:{int(until.timestamp())}:R>", inline=True)
         if evidencia_url:
             embed.add_field(name="Evidencia", value=evidencia_url, inline=False)
@@ -1652,8 +3844,17 @@ class Moderation(commands.Cog):
         if err:
             await self._safe_interaction_send(interaction, _voice(self).line("error", err), ephemeral=True)
             return
+        current_actor, current_target, auth_error = await self._fresh_moderation_context(
+            interaction, "moderate_members", target_id=usuario.id
+        )
+        if auth_error:
+            await self._safe_interaction_send(
+                interaction, _voice(self).line("error", auth_error), ephemeral=True
+            )
+            return
+        usuario = current_target
         try:
-            await usuario.timeout(None, reason=f"Untimeout: {razon} | Mod: {interaction.user}")
+            await usuario.timeout(None, reason=f"Untimeout: {razon} | Mod: {current_actor}")
         except discord.Forbidden:
             await self._safe_interaction_send(interaction, "❌ No tengo permisos/jerarquía para quitar timeout.", ephemeral=True)
             return
@@ -1672,7 +3873,7 @@ class Moderation(commands.Cog):
             usuario.id,
             ["TIMEOUT"],
         )
-        self.db.log_action(interaction.guild_id, usuario.id, interaction.user.id, "UNTIMEOUT", razon, status="revoked")
+        self.db.log_action(interaction.guild_id, usuario.id, interaction.user.id, "UNTIMEOUT", razon, extra=interaction_metadata(interaction, usuario, interaction.user), status="revoked")
         embed = discord.Embed(
             title="Timeout retirado",
             description=f"{usuario.mention} ya no está en timeout.",
@@ -1680,7 +3881,7 @@ class Moderation(commands.Cog):
             timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="Usuario", value=usuario.mention, inline=True)
-        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Moderador", value=current_actor.mention, inline=True)
         embed.add_field(name="Razón", value=razon, inline=False)
         await self._safe_interaction_send(interaction, embed=embed)
         await self._send_log(interaction.guild, embed)
@@ -1703,26 +3904,62 @@ class Moderation(commands.Cog):
         self,
         interaction: discord.Interaction,
         usuario: discord.Member,
-        razon: str = "Sin razón especificada",
+        razon: str,
         evidencia_url: Optional[str] = None,
     ):
         if not self._has_mod_perms(interaction, "moderate_members"):
             return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
-        err = self._can_moderate(interaction.user, usuario)  # type: ignore
+        razon = razon.strip()
+        if not razon:
+            return await interaction.response.send_message(
+                "❌ Escribe el motivo en la opción `razon`. No se ha aplicado ninguna sanción.",
+                ephemeral=True,
+            )
+        err = self._can_moderate(interaction.user, usuario, action_type="WARN")  # type: ignore
         if err:
             return await interaction.response.send_message(_voice(self).line("error", err), ephemeral=True)
 
         await interaction.response.defer()
 
+        target_id = usuario.id
+
+        async def apply_warn_record():
+            current_actor, current_target, auth_error = await self._fresh_moderation_context(
+                interaction,
+                "moderate_members",
+                target_id=target_id,
+                action_type="WARN",
+            )
+            if auth_error or current_actor is None or current_target is None:
+                raise PermissionError(auth_error or "No pude verificar la operación.")
+            current_warns, current_case_id = self.db.add_warn_with_action(
+                target_id,
+                interaction.guild_id,
+                current_actor.id,
+                "WARN",
+                razon, extra=interaction_metadata(interaction, target_id, current_actor),
+                evidence_url=evidencia_url,
+            )
+            return current_actor, current_target, current_warns, current_case_id
+
+        try:
+            current_actor, usuario, warns, warn_case_id = await run_sanction_locked(
+                self.bot,
+                interaction.guild_id,
+                target_id,
+                "WARN",
+                apply_warn_record,
+            )
+        except PermissionError as exc:
+            return await interaction.followup.send(
+                _voice(self).line("error", str(exc)),
+                ephemeral=True,
+            )
+
         cfg = self.db.get_config(interaction.guild_id)
-        warns = self.db.add_warn(usuario.id, interaction.guild_id)
-        warn_case_id = self.db.log_action(
-            interaction.guild_id, usuario.id, interaction.user.id, "WARN", razon,
-            evidence_url=evidencia_url,
-        )
 
         # Embed de warn (configurable)
-        warn_embed = build_warn_embed(cfg, usuario, interaction.user, razon, warns)  # type: ignore
+        warn_embed = build_warn_embed(cfg, usuario, current_actor, razon, warns)
         if evidencia_url:
             warn_embed.add_field(name="Evidencia", value=evidencia_url, inline=False)
         await interaction.followup.send(embed=warn_embed)
@@ -1730,35 +3967,106 @@ class Moderation(commands.Cog):
         if not log_ok:
             await self._notify_modlog_issue(interaction)
 
-        view = AppealUserView(self.bot, interaction.guild_id, "WARN", razon)
-        await self._dm(usuario, warn_embed, view=view)
+        if warn_case_id:
+            view = AppealUserView(
+                self.bot, interaction.guild_id, "WARN", razon, warn_case_id
+            )
+            await self._dm(usuario, warn_embed, view=view)
 
         # ── Consecuencias automáticas (de mayor a menor severidad) ────────────
 
-        ban_thr   = cfg.get("warn_ban_threshold", 7)
-        kick_thr  = cfg.get("warn_kick_threshold", 5)
-        mute_thr  = cfg.get("warn_mute_threshold", 3)
-        ban_on    = bool(cfg.get("warn_ban_enabled", 0))
-        kick_on   = bool(cfg.get("warn_kick_enabled", 0))
-        mute_on   = bool(cfg.get("warn_mute_enabled", 1))
+        consequence_action, warns, consequence_duration = (
+            self._current_warn_consequence(interaction.guild_id, target_id)
+        )
 
         consequence_embed: Optional[discord.Embed] = None
         consequence_warning: Optional[str] = None
 
         # Ban automático
-        if ban_on and warns >= ban_thr:
-            try:
-                await usuario.ban(reason=f"Auto-ban: alcanzó {warns} warns")
-                self.db.log_action(
-                    interaction.guild_id, usuario.id, self.bot.user.id,
-                    "AUTO_BAN", f"Alcanzó {warns} warns",
+        if consequence_action == "BAN":
+            async def apply_warn_ban():
+                _, ban_target, ban_auth_error = await self._fresh_moderation_context(
+                    interaction,
+                    "ban_members",
+                    target_id=usuario.id,
+                    action_type="AUTO_BAN",
+                )
+                if ban_auth_error or ban_target is None:
+                    raise PermissionError(
+                        ban_auth_error or "no pude verificar el usuario objetivo."
+                    )
+                live_action, live_warns, _ = self._current_warn_consequence(
+                    interaction.guild_id, ban_target.id
+                )
+                if live_action != "BAN":
+                    raise LookupError("warn_policy_changed")
+                effect_token = new_ban_effect_token()
+                current_case_id = self.db.log_action(
+                    interaction.guild_id,
+                    ban_target.id,
+                    self.bot.user.id,
+                    "AUTO_BAN",
+                    f"Alcanzó {live_warns} warns",
+                    {**interaction_metadata(interaction, ban_target, self.bot.user), **{
+                        "ban_effect_token": effect_token,
+                        "source": "warn_threshold",
+                    }},
+                    status="applying",
                     parent_case_id=warn_case_id,
+                )
+                if not current_case_id:
+                    raise RuntimeError("ban_intent_not_persisted")
+                await ban_target.ban(
+                    reason=reason_with_ban_effect(
+                        f"Auto-ban: alcanzó {live_warns} warns",
+                        effect_token,
+                    )
+                )
+                await self._confirm_ban_effect(
+                    interaction.guild, ban_target.id, effect_token
+                )
+                if not self.db.activate_prepared_ban_case(
+                    interaction.guild_id,
+                    ban_target.id,
+                    current_case_id,
+                    self.bot.user.id,
+                    f"Alcanzó {live_warns} warns",
+                    None,
+                    None,
+                ):
+                    raise RuntimeError("ban_intent_changed")
+                return ban_target, live_warns
+
+            try:
+                usuario, warns = await run_sanctions_locked(
+                    self.bot,
+                    interaction.guild_id,
+                    usuario.id,
+                    ("WARN", "AUTO_BAN"),
+                    apply_warn_ban,
                 )
                 consequence_embed = discord.Embed(
                     title="Ban automático",
                     description=f"{usuario.mention} fue baneado por alcanzar **{warns} warns**.",
                     color=discord.Color.dark_red(),
                     timestamp=datetime.now(timezone.utc),
+                )
+            except PermissionError as exc:
+                consequence_warning = (
+                    "⚠️ Auto-ban cancelado: "
+                    f"{exc}"
+                )
+            except LookupError:
+                consequence_warning = (
+                    "ℹ️ Auto-ban cancelado: la política o el umbral de warns cambió."
+                )
+            except RuntimeError:
+                logger.error(
+                    "Auto-ban por warns aplicado sin identidad confirmada para %s",
+                    usuario.id,
+                )
+                consequence_warning = (
+                    "⚠️ Discord pudo aplicar el auto-ban, pero requiere revisión manual."
                 )
             except discord.Forbidden:
                 logger.warning("Sin permisos para auto-ban de %s", usuario)
@@ -1768,19 +4076,55 @@ class Moderation(commands.Cog):
                 )
 
         # Kick automático (solo si no se baneó)
-        elif kick_on and warns >= kick_thr:
-            try:
-                await usuario.kick(reason=f"Auto-kick: alcanzó {warns} warns")
+        elif consequence_action == "KICK":
+            async def apply_warn_kick():
+                _, kick_target, kick_auth_error = await self._fresh_moderation_context(
+                    interaction,
+                    "kick_members",
+                    target_id=usuario.id,
+                    action_type="AUTO_KICK",
+                )
+                if kick_auth_error or kick_target is None:
+                    raise PermissionError(
+                        kick_auth_error or "no pude verificar el usuario objetivo."
+                    )
+                live_action, live_warns, _ = self._current_warn_consequence(
+                    interaction.guild_id, kick_target.id
+                )
+                if live_action != "KICK":
+                    raise LookupError("warn_policy_changed")
+                await kick_target.kick(
+                    reason=f"Auto-kick: alcanzó {live_warns} warns"
+                )
                 self.db.log_action(
-                    interaction.guild_id, usuario.id, self.bot.user.id,
-                    "AUTO_KICK", f"Alcanzó {warns} warns",
+                    interaction.guild_id,
+                    kick_target.id,
+                    self.bot.user.id,
+                    "AUTO_KICK",
+                    f"Alcanzó {live_warns} warns", extra=interaction_metadata(interaction, kick_target, self.bot.user),
                     parent_case_id=warn_case_id,
+                )
+                return kick_target, live_warns
+
+            try:
+                usuario, warns = await run_sanctions_locked(
+                    self.bot,
+                    interaction.guild_id,
+                    usuario.id,
+                    ("WARN", "AUTO_KICK"),
+                    apply_warn_kick,
                 )
                 consequence_embed = discord.Embed(
                     title="Kick automático",
                     description=f"{usuario.mention} fue expulsado por alcanzar **{warns} warns**.",
                     color=discord.Color.dark_orange(),
                     timestamp=datetime.now(timezone.utc),
+                )
+            except PermissionError as exc:
+                consequence_warning = f"⚠️ Auto-kick cancelado: {exc}"
+            except LookupError:
+                consequence_warning = (
+                    "ℹ️ Auto-kick cancelado: la política o el umbral de warns cambió."
                 )
             except discord.Forbidden:
                 logger.warning("Sin permisos para auto-kick de %s", usuario)
@@ -1790,55 +4134,101 @@ class Moderation(commands.Cog):
                 )
 
         # Mute automático (solo si no se baneó ni kickeó)
-        elif mute_on and warns >= mute_thr:
-            mute_role = await self._ensure_mute_role(interaction.guild)
-            if not mute_role:
-                consequence_warning = (
-                    f"⚠️ Auto-mute en {warns} warns no se aplicó: no hay rol de mute"
-                    " y el bot no puede crearlo (falta permiso `Gestionar roles`)."
-                    " Configúralo manualmente en el dashboard → Moderación."
+        elif consequence_action == "MUTE":
+            async def apply_warn_mute():
+                live_action, _, _ = self._current_warn_consequence(
+                    interaction.guild_id, target_id
                 )
-            elif mute_role in usuario.roles:
-                consequence_warning = (
-                    f"ℹ️ {usuario.mention} ya tenía el rol de mute; no se re-aplicó."
-                )
-            else:
-                dur = int(cfg.get("warn_mute_duration", 3600) or 3600)
+                if live_action != "MUTE":
+                    raise LookupError("warn_policy_changed")
                 try:
-                    await usuario.add_roles(
-                        mute_role, reason=f"Auto-mute: alcanzó {warns} warns"
+                    mute_role_id = int(
+                        (self.db.get_config(interaction.guild_id) or {}).get(
+                            "mute_role_id"
+                        )
+                        or 0
                     )
-                    self.db.set_mute(usuario.id, interaction.guild_id, dur)
-                    expires_at = datetime.now(timezone.utc) + timedelta(seconds=dur)
-                    auto_mute_case_id = self.db.log_action(
-                        interaction.guild_id, usuario.id, self.bot.user.id,
-                        "AUTO_MUTE", f"Alcanzó {warns} warns", {"duration_secs": dur},
-                        duration_seconds=dur,
-                        expires_at=expires_at.isoformat(),
-                        parent_case_id=warn_case_id,
+                except (TypeError, ValueError):
+                    mute_role_id = 0
+                if not mute_role_id:
+                    raise ValueError("missing_mute_role")
+
+                _, current_target, current_role, current_error = (
+                    await self._fresh_mute_role_context(
+                        interaction,
+                        target_id,
+                        mute_role_id,
+                        for_assignment=True,
                     )
-                    self.db.add_pending_moderation_action(
-                        interaction.guild_id,
-                        usuario.id,
-                        "MUTE_EXPIRE",
-                        expires_at.isoformat(),
-                        case_id=auto_mute_case_id,
+                )
+                if (
+                    current_error
+                    or current_target is None
+                    or current_role is None
+                ):
+                    raise PermissionError(
+                        current_error or "no pude verificar el usuario objetivo."
                     )
-                    consequence_embed = discord.Embed(
-                        title="Mute automático",
-                        description=(
-                            f"{usuario.mention} fue silenciado por alcanzar **{warns} warns**.\n"
-                            f"Duración: **{fmt_duration(dur)}**"
-                        ),
-                        color=discord.Color.red(),
-                        timestamp=datetime.now(timezone.utc),
+                if mute_role_id in {
+                    int(value) for value in getattr(current_target, "_roles", ())
+                }:
+                    raise LookupError("already_muted")
+                live_action, live_warns, live_duration = (
+                    self._current_warn_consequence(
+                        interaction.guild_id, current_target.id
                     )
-                except discord.Forbidden:
-                    logger.warning("Sin permisos para auto-mute de %s", usuario)
+                )
+                if live_action != "MUTE" or live_duration is None:
+                    raise LookupError("warn_policy_changed")
+                _, confirmed_member, _, _ = await self._apply_role_mute(
+                    interaction, target_id, mute_role_id, "AUTO_MUTE",
+                    f"Alcanzó {live_warns} warns", live_duration,
+                    moderator_id=self.bot.user.id, parent_case_id=warn_case_id,
+                )
+                return confirmed_member, live_warns, live_duration
+
+            try:
+                usuario, warns, consequence_duration = await run_sanctions_locked(
+                    self.bot,
+                    interaction.guild_id,
+                    target_id,
+                    ("WARN", "AUTO_MUTE"),
+                    apply_warn_mute,
+                )
+                consequence_embed = discord.Embed(
+                    title="Mute automático",
+                    description=(
+                        f"{usuario.mention} fue silenciado por alcanzar **{warns} warns**.\n"
+                        f"Duración: **{fmt_duration(consequence_duration)}**"
+                    ),
+                    color=discord.Color.red(),
+                    timestamp=datetime.now(timezone.utc),
+                )
+            except PermissionError as exc:
+                consequence_warning = f"⚠️ Auto-mute cancelado: {exc}"
+            except ValueError:
+                consequence_warning = (
+                    "⚠️ Auto-mute cancelado: configura primero un rol de mute seguro."
+                )
+            except LookupError as exc:
+                if str(exc) == "warn_policy_changed":
                     consequence_warning = (
-                        "⚠️ Auto-mute falló: el rol del bot está debajo del rol de mute"
-                        " o falta permiso `Gestionar roles`."
+                        "ℹ️ Auto-mute cancelado: la política, el umbral o la duración cambió."
                     )
+                else:
+                    consequence_warning = (
+                        f"ℹ️ <@{target_id}> ya tenía un mute activo o pendiente; no se re-aplicó."
+                    )
+            except RuntimeError:
+                consequence_warning = (
+                    "⚠️ Auto-mute pendiente de reconciliación segura."
+                )
+            except discord.Forbidden:
+                logger.warning("Sin permisos para auto-mute de %s", usuario)
+                consequence_warning = (
+                    "⚠️ Auto-mute falló: el rol del bot está debajo del rol de mute"
+                    " o falta permiso `Gestionar roles`."
+                )
 
         if consequence_embed:
             await interaction.followup.send(embed=consequence_embed)
@@ -1930,19 +4320,72 @@ class Moderation(commands.Cog):
         if (case.get("status") or "active") == "revoked":
             return await interaction.response.send_message("ℹ️ Ese warn ya estaba revocado.", ephemeral=True)
 
-        new_total = self.db.decrement_warn(case["target_id"], interaction.guild_id)
-        updated = self.db.update_case_by_id(
-            interaction.guild_id,
-            int(case["id"]),
-            status="revoked",
-            extra_data=json.dumps({"revoked_by": interaction.user.id, "revoked_reason": razon}, ensure_ascii=False),
-        )
-        self.db.log_action(
-            interaction.guild_id, case["target_id"], interaction.user.id,
-            "UNWARN", razon, {"case_id": case.get("id"), "case_number": case.get("case_number")},
-            parent_case_id=int(case["id"]),
-            status="revoked",
-        )
+        target_id = int(case["target_id"])
+        internal_case_id = int(case["id"])
+
+        async def apply_unwarn():
+            current_actor, _, auth_error = await self._fresh_moderation_context(
+                interaction,
+                "moderate_members",
+                target_id=target_id,
+            )
+            if auth_error or current_actor is None:
+                raise PermissionError(auth_error or "Autorización no verificable.")
+            current_case = self.db.get_case_by_id(
+                interaction.guild_id, internal_case_id
+            )
+            if (
+                not current_case
+                or str(current_case.get("status") or "active").lower() != "active"
+                or str(current_case.get("action_type") or "").upper()
+                not in {"WARN", "AUTO_WARN"}
+                or int(current_case.get("target_id") or 0) != target_id
+            ):
+                raise LookupError("warn_not_active")
+            new_count = self.db.decrement_warn(target_id, interaction.guild_id)
+            updated_case = self.db.update_case_by_id(
+                interaction.guild_id,
+                internal_case_id,
+                status="revoked",
+                extra_data=json.dumps(
+                    {
+                        "revoked_by": current_actor.id,
+                        "revoked_reason": razon,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            self.db.log_action(
+                interaction.guild_id,
+                target_id,
+                current_actor.id,
+                "UNWARN",
+                razon,
+                {**interaction_metadata(interaction, target_id, current_actor), **{
+                    "case_id": current_case.get("id"),
+                    "case_number": current_case.get("case_number"),
+                }},
+                parent_case_id=internal_case_id,
+                status="revoked",
+            )
+            return current_actor, current_case, updated_case, new_count
+
+        try:
+            current_actor, case, updated, new_total = await run_sanction_locked(
+                self.bot,
+                interaction.guild_id,
+                target_id,
+                "UNWARN",
+                apply_unwarn,
+            )
+        except PermissionError as exc:
+            return await interaction.response.send_message(
+                _voice(self).line("error", str(exc)), ephemeral=True
+            )
+        except LookupError:
+            return await interaction.response.send_message(
+                "ℹ️ Ese warn ya no está activo.", ephemeral=True
+            )
 
         embed = discord.Embed(
             title="Warn revocado",
@@ -1951,7 +4394,7 @@ class Moderation(commands.Cog):
             timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="Usuario", value=f"<@{case['target_id']}>\n`{case['target_id']}`", inline=True)
-        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Moderador", value=current_actor.mention, inline=True)
         embed.add_field(name="Razón", value=razon, inline=False)
         await interaction.response.send_message(embed=embed)
         await self._send_log(interaction.guild, embed)
@@ -2094,7 +4537,7 @@ class Moderation(commands.Cog):
         updated = self.db.update_case_by_id(interaction.guild_id, int(case["id"]), **payload)
         self.db.log_action(
             interaction.guild_id, case["target_id"], interaction.user.id,
-            "CASE_UPDATE", "Caso actualizado", {"case_id": case.get("id"), "changes": payload},
+            "CASE_UPDATE", "Caso actualizado", {**interaction_metadata(interaction, case["target_id"], interaction.user.id), **{"case_id": case.get("id"), "changes": payload}},
             parent_case_id=int(case["id"]),
             status=payload.get("status", case.get("status") or "active"),
         )
@@ -2112,21 +4555,55 @@ class Moderation(commands.Cog):
         usuario: discord.Member,
         razon: str = "Sin razón especificada",
     ):
-        if not self._has_mod_perms(interaction, "administrator"):
-            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
-        record = self.db.get_user(usuario.id, interaction.guild_id)
-        old = record["warns"]
+        user = interaction.user
+        guild = interaction.guild
+        if (
+            not guild
+            or not isinstance(user, discord.Member)
+            or (user.id != guild.owner_id and not user.guild_permissions.administrator)
+        ):
+            return await interaction.response.send_message(
+                _voice(self).line("error", "Este comando requiere Administrador."),
+                ephemeral=True,
+            )
+        target_id = usuario.id
 
-        if old == 0:
+        async def apply_clear_warns():
+            current_actor, auth_error = await self._fresh_owner_or_admin(interaction)
+            if auth_error or current_actor is None:
+                raise PermissionError(auth_error or "Autorización no verificable.")
+            record = self.db.get_user(target_id, interaction.guild_id)
+            old_count = int(record["warns"] or 0)
+            if old_count <= 0:
+                raise LookupError("no_warns")
+            self.db.clear_warns(target_id, interaction.guild_id)
+            self.db.log_action(
+                interaction.guild_id,
+                target_id,
+                current_actor.id,
+                "CLEAR_WARNS",
+                razon,
+                {**interaction_metadata(interaction, target_id, current_actor), **{"removed": old_count}},
+                status="revoked",
+            )
+            return current_actor, old_count
+
+        try:
+            current_actor, old = await run_sanction_locked(
+                self.bot,
+                interaction.guild_id,
+                target_id,
+                "CLEAR_WARNS",
+                apply_clear_warns,
+            )
+        except PermissionError as exc:
+            return await interaction.response.send_message(
+                _voice(self).line("error", str(exc)), ephemeral=True
+            )
+        except LookupError:
             return await interaction.response.send_message(
                 f"ℹ️ {usuario.mention} no tiene warns.", ephemeral=True
             )
-
-        self.db.clear_warns(usuario.id, interaction.guild_id)
-        self.db.log_action(
-            interaction.guild_id, usuario.id, interaction.user.id,
-            "CLEAR_WARNS", razon, {"removed": old},
-        )
 
         embed = discord.Embed(
             title="Warns limpiados",
@@ -2135,7 +4612,7 @@ class Moderation(commands.Cog):
             timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="Usuario", value=usuario.mention, inline=True)
-        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Moderador", value=current_actor.mention, inline=True)
         embed.add_field(name="Razón", value=razon, inline=False)
 
         await interaction.response.send_message(embed=embed)
@@ -2150,6 +4627,7 @@ class Moderation(commands.Cog):
     # ─────────────────────────────────────────────────────────────────────────
 
     @app_commands.command(name="purgar", description="Elimina mensajes en masa del canal actual")
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.describe(
         cantidad="Número de mensajes recientes a eliminar (2-100)",
         usuario="Eliminar solo mensajes de este usuario (opcional)",
@@ -2169,8 +4647,19 @@ class Moderation(commands.Cog):
         usuario: Optional[discord.Member] = None,
         tipo: str = "all",
     ):
-        if not self._has_mod_perms(interaction, "manage_messages"):
-            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
+        channel = interaction.channel
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return await interaction.response.send_message(
+                "❌ Este comando solo puede usarse en canales con historial de mensajes.",
+                ephemeral=True,
+            )
+        if not await check_channel_perms(
+            interaction,
+            channel,
+            user_permission="manage_messages",
+            bot_permissions=("manage_messages", "read_message_history"),
+        ):
+            return
         await interaction.response.defer(ephemeral=True)
 
         tipo = (tipo or "all").lower().strip()
@@ -2191,8 +4680,39 @@ class Moderation(commands.Cog):
                 return bool(URL_RE.search(content))
             return True
 
+        current_actor, _, auth_error = await self._fresh_moderation_context(
+            interaction, "manage_messages"
+        )
+        guild = interaction.guild
+        if auth_error or current_actor is None or guild is None:
+            return await interaction.followup.send(
+                _voice(self).line("error", auth_error or "No pude verificar la operación."),
+                ephemeral=True,
+            )
+        current_channel = guild.get_channel_or_thread(channel.id)
+        bot_member = guild.me
+        if not isinstance(current_channel, (discord.TextChannel, discord.Thread)):
+            return await interaction.followup.send(
+                "❌ El canal ya no está disponible.", ephemeral=True
+            )
+        actor_channel_perms = current_channel.permissions_for(current_actor)
+        bot_channel_perms = (
+            current_channel.permissions_for(bot_member) if bot_member else None
+        )
+        if not (
+            actor_channel_perms.view_channel
+            and actor_channel_perms.read_message_history
+            and bot_channel_perms
+            and bot_channel_perms.manage_messages
+            and bot_channel_perms.read_message_history
+        ):
+            return await interaction.followup.send(
+                "❌ Los permisos actuales del canal no permiten completar la purga.",
+                ephemeral=True,
+            )
+        channel = current_channel
         try:
-            deleted = await interaction.channel.purge(limit=cantidad, check=check, bulk=True)
+            deleted = await channel.purge(limit=cantidad, check=check, bulk=True)
         except discord.Forbidden:
             return await interaction.followup.send("❌ No tengo permisos para eliminar mensajes.", ephemeral=True)
         except discord.HTTPException as exc:
@@ -2201,10 +4721,10 @@ class Moderation(commands.Cog):
         self.db.log_action(
             interaction.guild_id,
             0,
-            interaction.user.id,
+            current_actor.id,
             "PURGE",
             f"Purge {tipo}",
-            {"deleted": len(deleted), "requested": cantidad, "filter": tipo, "user_id": usuario.id if usuario else None},
+            {**interaction_metadata(interaction, 0, current_actor.id), **{"deleted": len(deleted), "requested": cantidad, "filter": tipo, "user_id": usuario.id if usuario else None}},
             status="expired",
         )
 
@@ -2214,7 +4734,7 @@ class Moderation(commands.Cog):
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Moderador", value=current_actor.mention, inline=True)
         embed.add_field(name="Filtro", value=tipo, inline=True)
         if usuario:
             embed.add_field(name="Usuario filtrado", value=usuario.mention, inline=True)
@@ -2315,37 +4835,61 @@ class Moderation(commands.Cog):
     @modconfig_group.command(name="mute_role", description="Asigna el rol que usará /mute")
     @app_commands.describe(rol="Rol que se aplicará a usuarios muteados")
     async def modconfig_mute_role(self, interaction: discord.Interaction, rol: discord.Role):
-        if not self._has_config_perms(interaction):
-            return await interaction.response.send_message("❌ Necesitas Administrador o Gestionar servidor.", ephemeral=True)
-        bot_member = interaction.guild.me if interaction.guild else None
-        if bot_member and rol >= bot_member.top_role:
+        live_role, error = await self._fresh_config_role(
+            interaction,
+            rol.id,
+            owner_or_admin_only=False,
+        )
+        if error or not safe_for_automatic_assignment(
+            live_role,
+            interaction.guild.me if interaction.guild else None,
+            forbidden_role_ids=delegated_bot_role_ids(
+                self.db, interaction.guild_id
+            ),
+        ):
             return await interaction.response.send_message(
-                "❌ Ese rol está por encima o al mismo nivel que mi rol. Muévelo debajo de mi rol antes de usarlo como mute.",
+                f"❌ {error or 'El rol no es seguro para una asignación automática.'}",
                 ephemeral=True,
             )
-        self.db.set_config(interaction.guild_id, mute_role_id=rol.id)
-        changed = await self._apply_mute_overwrites(interaction.guild, rol)
+        changed = await self._apply_mute_overwrites(interaction.guild, live_role)
+        live_role = interaction.guild.get_role(live_role.id)
+        if not mute_role_has_effective_denies(interaction.guild, live_role):
+            return await interaction.response.send_message(
+                "❌ No pude aplicar denies de envío y voz en todos los canales relevantes.",
+                ephemeral=True,
+            )
+        self.db.set_config(interaction.guild_id, mute_role_id=live_role.id)
         await interaction.response.send_message(
-            f"✅ Rol de mute configurado: {rol.mention}. Overrides aplicados en `{changed}` canales visibles.",
+            f"✅ Rol de mute configurado: {live_role.mention}. Overrides aplicados en `{changed}` canales visibles.",
             ephemeral=True,
         )
 
     @modconfig_group.command(name="mod_role", description="Asigna el rol con permisos de moderación del bot")
     @app_commands.describe(rol="Rol de moderador")
     async def modconfig_mod_role(self, interaction: discord.Interaction, rol: discord.Role):
-        if not self._has_config_perms(interaction):
-            return await interaction.response.send_message("❌ Necesitas Administrador o Gestionar servidor.", ephemeral=True)
-        self.db.set_server_config(interaction.guild_id, mod_role_id=rol.id)
-        await interaction.response.send_message(f"✅ Rol moderador configurado: {rol.mention}", ephemeral=True)
+        live_role, error = await self._fresh_config_role(
+            interaction,
+            rol.id,
+            owner_or_admin_only=True,
+        )
+        if error:
+            return await interaction.response.send_message(f"❌ {error}", ephemeral=True)
+        self.db.set_server_config(interaction.guild_id, mod_role_id=live_role.id)
+        await interaction.response.send_message(f"✅ Rol moderador configurado: {live_role.mention}", ephemeral=True)
 
     @modconfig_group.command(name="staff_role", description="Asigna el rol staff usado por moderación/tickets/reportes")
     @app_commands.describe(rol="Rol staff")
     async def modconfig_staff_role(self, interaction: discord.Interaction, rol: discord.Role):
-        if not self._has_config_perms(interaction):
-            return await interaction.response.send_message("❌ Necesitas Administrador o Gestionar servidor.", ephemeral=True)
-        self.db.set_config(interaction.guild_id, staff_role_id=rol.id)
-        self.db.set_server_config(interaction.guild_id, staff_role_id=rol.id)
-        await interaction.response.send_message(f"✅ Rol staff configurado: {rol.mention}", ephemeral=True)
+        live_role, error = await self._fresh_config_role(
+            interaction,
+            rol.id,
+            owner_or_admin_only=True,
+        )
+        if error:
+            return await interaction.response.send_message(f"❌ {error}", ephemeral=True)
+        self.db.set_config(interaction.guild_id, staff_role_id=live_role.id)
+        self.db.set_server_config(interaction.guild_id, staff_role_id=live_role.id)
+        await interaction.response.send_message(f"✅ Rol staff configurado: {live_role.mention}", ephemeral=True)
 
     @modconfig_group.command(name="modlog", description="Asigna el canal de logs de moderación")
     @app_commands.describe(canal="Canal de texto para logs de moderación")
@@ -2368,10 +4912,45 @@ class Moderation(commands.Cog):
     async def _handle_perm_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ):
+        interaction.extras["catsbot.app_command_error_handled"] = True
+
         if isinstance(error, app_commands.MissingPermissions):
             msg = f"❌ Te faltan permisos: `{', '.join(error.missing_permissions)}`"
         elif isinstance(error, app_commands.BotMissingPermissions):
             msg = f"❌ Al bot le faltan permisos: `{', '.join(error.missing_permissions)}`"
+        elif isinstance(error, app_commands.CommandSignatureMismatch):
+            msg = (
+                "❌ Discord envió una versión antigua o incompleta del comando. "
+                "Vuelve a abrirlo y rellena las opciones obligatorias, incluida `razon` "
+                "para /warn, /ban y /kick. No se ha aplicado ninguna sanción."
+            )
+        elif isinstance(error, app_commands.TransformerError):
+            command = interaction.command
+            command_name = getattr(command, "qualified_name", "desconocido")
+            if error.type is discord.AppCommandOptionType.user:
+                logger.warning(
+                    "No se pudo resolver el usuario de /%s como miembro "
+                    "(guild=%s, value_type=%s)",
+                    command_name,
+                    interaction.guild_id,
+                    type(error.value).__name__,
+                )
+                msg = (
+                    "❌ No pude reconocer ese usuario como miembro de este servidor. "
+                    "Vuelve a abrir el comando y selecciónalo desde la lista de Discord; "
+                    "si aún aparece como texto libre, reinicia Discord para actualizar los comandos."
+                )
+            else:
+                logger.warning(
+                    "Valor inválido para /%s (option_type=%s, value_type=%s)",
+                    command_name,
+                    error.type,
+                    type(error.value).__name__,
+                )
+                msg = (
+                    "❌ Uno de los valores del comando no es válido. "
+                    "Vuelve a abrirlo e inténtalo de nuevo."
+                )
         else:
             logger.error("Error en comando de moderación: %s", error, exc_info=True)
             msg = "❌ Error inesperado. Revisa los logs del bot."
@@ -2404,18 +4983,36 @@ class AppealUserModal(discord.ui.Modal, title="Apelar Sanción"):
         max_length=1000
     )
 
-    def __init__(self, bot: commands.Bot, guild_id: int, action_type: str, reason: str):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        guild_id: int,
+        action_type: str,
+        reason: str,
+        case_id: int,
+    ):
         super().__init__()
         self.bot = bot
         self.guild_id = guild_id
         self.action_type = action_type
         self.reason = reason
+        self.case_id = int(case_id)
 
     async def on_submit(self, interaction: discord.Interaction):
         db = getattr(self.bot, 'db')
         appeal_id = db.create_appeal(
-            self.guild_id, interaction.user.id, self.action_type, self.reason, self.appeal_text.value
+            self.guild_id,
+            interaction.user.id,
+            self.action_type,
+            self.reason,
+            self.appeal_text.value,
+            case_id=self.case_id,
         )
+        if not appeal_id:
+            return await interaction.response.send_message(
+                "❌ La sanción asociada ya no existe o no coincide con esta apelación.",
+                ephemeral=True,
+            )
 
         guild = self.bot.get_guild(self.guild_id)
         if not guild:
@@ -2476,22 +5073,85 @@ class AppealUserModal(discord.ui.Modal, title="Apelar Sanción"):
 
 
 class AppealUserView(discord.ui.View):
-    def __init__(self, bot: commands.Bot, guild_id: int, action_type: str, reason: str):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        guild_id: int,
+        action_type: str,
+        reason: str,
+        case_id: int,
+    ):
         super().__init__(timeout=86400)
         self.bot = bot
         self.guild_id = guild_id
         self.action_type = action_type
         self.reason = reason
+        self.case_id = int(case_id)
 
     @discord.ui.button(label="Apelar Sanción", style=discord.ButtonStyle.primary, emoji="📝")
     async def appeal_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AppealUserModal(self.bot, self.guild_id, self.action_type, self.reason))
-        button.disabled = True
-        if interaction.message:
-            try:
-                await interaction.message.edit(view=self)
-            except (discord.Forbidden, discord.HTTPException) as exc:
-                logger.debug("No se pudo deshabilitar botón de apelación: %s", exc)
+        await interaction.response.send_modal(
+            AppealUserModal(
+                self.bot,
+                self.guild_id,
+                self.action_type,
+                self.reason,
+                self.case_id,
+            )
+        )
+
+
+def _appeal_staff_allowed(
+    bot: commands.Bot,
+    interaction: discord.Interaction,
+    member: Optional[discord.Member] = None,
+) -> bool:
+    guild = interaction.guild
+    user = member or interaction.user
+    if (
+        not guild
+        or not isinstance(user, discord.Member)
+        or (
+            getattr(user, "guild", None) is not None
+            and getattr(user.guild, "id", None) != guild.id
+        )
+        or interaction.guild_id != guild.id
+    ):
+        return False
+    if user.id == guild.owner_id or user.guild_permissions.administrator:
+        return True
+    db = getattr(bot, "db", None)
+    allowed_ids = delegated_moderation_role_ids(db, guild.id)
+    if allowed_ids is None:
+        return False
+    return any(role.id in allowed_ids for role in user.roles)
+
+
+async def _fresh_appeal_staff_member(
+    bot: commands.Bot,
+    interaction: discord.Interaction,
+) -> Optional[discord.Member]:
+    moderation = bot.get_cog("Moderation")
+    if not isinstance(moderation, Moderation):
+        return None
+    member, _, error = await moderation._fresh_moderation_context(
+        interaction,
+        "administrator",
+    )
+    return member if error is None else None
+
+
+def _pending_appeal(bot: commands.Bot, interaction: discord.Interaction, appeal_id: int):
+    if not interaction.guild_id:
+        return None
+    appeal = getattr(bot, "db").get_appeal(appeal_id)
+    if not appeal:
+        return None
+    if int(appeal.get("guild_id", 0)) != interaction.guild_id:
+        return None
+    if str(appeal.get("status") or "").upper() != "PENDING":
+        return None
+    return appeal
 
 
 class AppealAcceptModal(discord.ui.Modal, title="Aceptar Apelación"):
@@ -2516,30 +5176,339 @@ class AppealAcceptModal(discord.ui.Modal, title="Aceptar Apelación"):
         self.action_type = action_type
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not _appeal_staff_allowed(self.bot, interaction):
+            return await interaction.response.send_message(
+                "❌ Ya no tienes permisos para gestionar apelaciones.", ephemeral=True
+            )
+        appeal = _pending_appeal(self.bot, interaction, self.appeal_id)
+        if not appeal:
+            return await interaction.response.send_message(
+                "❌ La apelación no existe, no pertenece a este servidor o ya fue resuelta.",
+                ephemeral=True,
+            )
+        self.user_id = int(appeal["user_id"])
+        self.action_type = str(appeal["action_type"]).upper()
         await interaction.response.defer(ephemeral=True)
+        current_actor = await _fresh_appeal_staff_member(self.bot, interaction)
+        appeal = _pending_appeal(self.bot, interaction, self.appeal_id)
+        if current_actor is None or not appeal:
+            return await interaction.followup.send(
+                "❌ Tus permisos cambiaron o la apelación ya no está pendiente.",
+                ephemeral=True,
+            )
+        self.user_id = int(appeal["user_id"])
+        self.action_type = str(appeal["action_type"]).upper()
         db = getattr(self.bot, 'db')
-        db.update_appeal_status(self.appeal_id, "ACCEPTED")
+        if not db.claim_pending_appeal(self.appeal_id, interaction.guild_id):
+            return await interaction.followup.send(
+                "❌ La apelación ya está siendo procesada o fue resuelta.",
+                ephemeral=True,
+            )
+        appeal = db.get_appeal(self.appeal_id)
+        if (
+            not appeal
+            or int(appeal.get("guild_id") or 0) != interaction.guild_id
+            or str(appeal.get("status") or "").upper() != "PROCESSING"
+        ):
+            db.release_appeal_claim(self.appeal_id, interaction.guild_id)
+            return await interaction.followup.send(
+                "❌ No se pudo verificar la apelación reservada.", ephemeral=True
+            )
+        self.user_id = int(appeal["user_id"])
+        self.action_type = str(appeal["action_type"]).upper()
         guild = interaction.guild
         member = guild.get_member(self.user_id) if guild else None
         recipient = member or self.bot.get_user(self.user_id)
 
         auto_text = self.auto_remove.value.strip().upper()
+        auto_remove_error: Optional[str] = None
+        appeal_finalized = False
         if auto_text == "SI" and guild:
+            sanction_guard = None
+            sanction_guard_acquired = False
             try:
+                moderation = self.bot.get_cog("Moderation")
+                if not isinstance(moderation, Moderation):
+                    raise RuntimeError("Moderation cog no disponible")
+                try:
+                    case_id = int(appeal.get("case_id") or 0)
+                except (TypeError, ValueError):
+                    case_id = 0
+                if not case_id:
+                    raise RuntimeError(
+                        "la apelación legacy no está ligada a un caso exacto"
+                    )
+                sanction_guard = sanction_lock(
+                    self.bot,
+                    guild.id,
+                    self.user_id,
+                    self.action_type,
+                )
+                await sanction_guard.acquire()
+                sanction_guard_acquired = True
+                appeal_case = db.get_appealable_active_case(
+                    guild.id,
+                    self.user_id,
+                    case_id,
+                    self.action_type,
+                )
+                if appeal_case is None:
+                    raise RuntimeError(
+                        "la sanción apelada ya no es la sanción activa actual"
+                    )
                 if self.action_type in ("BAN", "TEMPBAN"):
-                    await guild.unban(discord.Object(id=self.user_id), reason=f"Apelación Aceptada por {interaction.user}")
-                    db.clear_tempbans_for_user(self.user_id, guild.id)
+                    effect_state = await moderation._ban_effect_state(
+                        guild, self.user_id, appeal_case
+                    )
+                    if effect_state == "legacy":
+                        raise RuntimeError(
+                            "el caso apelado no conserva la identidad exacta del ban"
+                        )
+                    if effect_state == "replaced":
+                        raise RuntimeError(
+                            "el ban actual fue creado fuera del caso apelado"
+                        )
+                    if db.get_appealable_active_case(
+                        guild.id,
+                        self.user_id,
+                        case_id,
+                        self.action_type,
+                    ) is None:
+                        raise RuntimeError(
+                            "la sanción cambió durante la retirada automática"
+                        )
+                    action_actor, _, auth_error = (
+                        await moderation._fresh_moderation_context(
+                            interaction, "ban_members"
+                        )
+                    )
+                    if auth_error or action_actor is None:
+                        raise PermissionError(
+                            auth_error or "autorización no verificable"
+                        )
+                    effect_state = await moderation._ban_effect_state(
+                        guild, self.user_id, appeal_case
+                    )
+                    if effect_state == "legacy":
+                        raise RuntimeError(
+                            "el caso apelado no conserva la identidad exacta del ban"
+                        )
+                    if effect_state == "replaced":
+                        raise RuntimeError(
+                            "el ban actual fue creado fuera del caso apelado"
+                        )
+                    action_actor, _, auth_error = (
+                        await moderation._fresh_moderation_context(
+                            interaction, "ban_members"
+                        )
+                    )
+                    if auth_error or action_actor is None:
+                        raise PermissionError(
+                            auth_error or "autorización no verificable"
+                        )
+                    if effect_state == "match":
+                        try:
+                            await guild.unban(
+                                discord.Object(id=self.user_id),
+                                reason=f"Apelación Aceptada por {action_actor}",
+                            )
+                        except discord.NotFound:
+                            pass
+                    if not db.resolve_appealed_case(
+                        guild.id,
+                        self.user_id,
+                        case_id,
+                        self.action_type,
+                        self.appeal_id,
+                    ):
+                        raise RuntimeError(
+                            "la sanción cambió durante la retirada automática"
+                        )
+                    appeal_finalized = True
                 elif self.action_type == "MUTE":
-                    mem = guild.get_member(self.user_id)
-                    cfg = db.get_config(guild.id)
-                    mute_role = guild.get_role(cfg.get("mute_role_id") or 0)
-                    if mem and mute_role and mute_role in mem.roles:
-                        await mem.remove_roles(mute_role, reason=f"Apelación Aceptada por {interaction.user}")
-                    db.clear_mute(self.user_id, guild.id)
+                    try:
+                        mute_role_id = int(
+                            moderation._json_object(
+                                appeal_case.get("extra_data")
+                            )["role_id"]
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        raise RuntimeError(
+                            "el caso apelado no conserva el rol de mute exacto"
+                        )
+                    if db.get_appealable_active_case(
+                        guild.id,
+                        self.user_id,
+                        case_id,
+                        self.action_type,
+                    ) is None:
+                        raise RuntimeError(
+                            "la sanción cambió durante la retirada automática"
+                        )
+                    effect_state = await moderation._mute_effect_state(
+                        guild,
+                        self.user_id,
+                        mute_role_id,
+                        appeal_case,
+                    )
+                    if effect_state in {"legacy", "unverified"}:
+                        raise RuntimeError(
+                            "el caso apelado no conserva una identidad de mute verificable"
+                        )
+                    if effect_state == "replaced":
+                        raise RuntimeError(
+                            "el rol de mute actual fue reaplicado fuera del caso apelado"
+                        )
+                    if db.get_appealable_active_case(
+                        guild.id,
+                        self.user_id,
+                        case_id,
+                        self.action_type,
+                    ) is None:
+                        raise RuntimeError(
+                            "la sanción cambió durante la retirada automática"
+                        )
+                    action_actor, mem, mute_role, auth_error = (
+                        await moderation._fresh_mute_role_context(
+                            interaction,
+                            self.user_id,
+                            mute_role_id,
+                            allow_absent_target=True,
+                            allow_absent_effect=True,
+                        )
+                    )
+                    if auth_error or action_actor is None:
+                        raise PermissionError(
+                            auth_error or "autorización no verificable"
+                        )
+                    effect_state = await moderation._mute_effect_state(
+                        guild,
+                        self.user_id,
+                        mute_role_id,
+                        appeal_case,
+                    )
+                    if effect_state in {"legacy", "unverified"}:
+                        raise RuntimeError(
+                            "el caso apelado no conserva una identidad de mute verificable"
+                        )
+                    if effect_state == "replaced":
+                        raise RuntimeError(
+                            "el rol de mute actual fue reaplicado fuera del caso apelado"
+                        )
+                    action_actor, mem, mute_role, auth_error = (
+                        await moderation._fresh_mute_role_context(
+                            interaction,
+                            self.user_id,
+                            mute_role_id,
+                            allow_absent_target=True,
+                            allow_absent_effect=True,
+                        )
+                    )
+                    if auth_error or action_actor is None:
+                        raise PermissionError(
+                            auth_error or "autorización no verificable"
+                        )
+                    if effect_state == "match" and (mem is None or mute_role is None):
+                        raise RuntimeError(
+                            "el efecto de mute cambió durante la retirada automática"
+                        )
+                    if effect_state == "absent" and mute_role is not None:
+                        raise RuntimeError(
+                            "el efecto de mute cambió durante la retirada automática"
+                        )
+                    if effect_state == "match" and mem and mute_role and mute_role_id in {
+                        int(value) for value in getattr(mem, "_roles", ())
+                    }:
+                        await mem.remove_roles(
+                            mute_role,
+                            reason=f"Apelación Aceptada por {action_actor}",
+                        )
+                    await moderation._restore_mute_roles(
+                        guild, self.user_id, appeal_case, actor_id=action_actor.id
+                    )
+                    if not db.resolve_appealed_case(
+                        guild.id,
+                        self.user_id,
+                        case_id,
+                        self.action_type,
+                        self.appeal_id,
+                    ):
+                        raise RuntimeError(
+                            "la sanción cambió durante la retirada automática"
+                        )
+                    appeal_finalized = True
+                elif self.action_type == "WARN":
+                    action_actor, _, auth_error = await moderation._fresh_moderation_context(
+                        interaction,
+                        "manage_messages",
+                        target_id=self.user_id,
+                        allow_absent_target=True,
+                    )
+                    if auth_error or action_actor is None:
+                        raise PermissionError(auth_error or "autorización no verificable")
+                    if not db.resolve_appealed_case(
+                        guild.id,
+                        self.user_id,
+                        case_id,
+                        self.action_type,
+                        self.appeal_id,
+                    ):
+                        raise RuntimeError(
+                            "el warn apelado ya no estaba activo"
+                        )
+                    appeal_finalized = True
+            except asyncio.CancelledError:
+                db.release_appeal_claim(self.appeal_id, interaction.guild_id)
+                raise
+            except (PermissionError, RuntimeError) as exc:
+                logger.warning(
+                    "Retirada automática de apelación %s cancelada: %s",
+                    self.appeal_id,
+                    exc,
+                )
+                auto_remove_error = "No se pudo autorizar la retirada automática."
             except discord.Forbidden:
                 logger.warning("Sin permisos para retirar sanción automáticamente en apelación %s", self.appeal_id)
+                auto_remove_error = "El bot ya no tiene permisos para retirar la sanción."
             except discord.HTTPException as exc:
                 logger.warning("Error quitando sanción automáticamente en apelación %s: %s", self.appeal_id, exc)
+                auto_remove_error = "Discord no confirmó la retirada de la sanción."
+            except Exception as exc:
+                logger.warning(
+                    "Error interno retirando sanción de apelación %s: %s",
+                    self.appeal_id,
+                    exc,
+                )
+                auto_remove_error = "No se pudo completar la retirada automática."
+            finally:
+                if sanction_guard_acquired and sanction_guard is not None:
+                    sanction_guard.release()
+
+        if auto_remove_error:
+            db.release_appeal_claim(self.appeal_id, interaction.guild_id)
+            return await interaction.followup.send(
+                f"❌ {auto_remove_error} La apelación sigue pendiente.",
+                ephemeral=True,
+            )
+
+        if not appeal_finalized:
+            try:
+                finalized = db.finalize_claimed_appeal(
+                    self.appeal_id, interaction.guild_id, "ACCEPTED"
+                )
+            except Exception as exc:
+                db.release_appeal_claim(self.appeal_id, interaction.guild_id)
+                logger.warning("No se pudo finalizar apelación %s: %s", self.appeal_id, exc)
+                return await interaction.followup.send(
+                    "❌ No se pudo finalizar la apelación; vuelve a intentarlo.",
+                    ephemeral=True,
+                )
+            if not finalized:
+                db.release_appeal_claim(self.appeal_id, interaction.guild_id)
+                return await interaction.followup.send(
+                    "❌ La apelación cambió de estado durante el proceso.",
+                    ephemeral=True,
+                )
 
         if recipient and guild:
             embed = discord.Embed(
@@ -2560,7 +5529,7 @@ class AppealAcceptModal(discord.ui.Modal, title="Aceptar Apelación"):
             embed = interaction.message.embeds[0].copy()
             embed.color = discord.Color.green()
             embed.title = "✅ Apelación Aceptada"
-            embed.add_field(name="Moderador", value=interaction.user.mention, inline=False)
+            embed.add_field(name="Moderador", value=current_actor.mention, inline=False)
             embed.add_field(name="Motivo de Aceptación", value=self.mod_reason.value, inline=False)
             await interaction.message.edit(embed=embed, view=None)
 
@@ -2583,9 +5552,51 @@ class AppealDenyModal(discord.ui.Modal, title="Denegar Apelación"):
         self.action_type = action_type
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not _appeal_staff_allowed(self.bot, interaction):
+            return await interaction.response.send_message(
+                "❌ Ya no tienes permisos para gestionar apelaciones.", ephemeral=True
+            )
+        appeal = _pending_appeal(self.bot, interaction, self.appeal_id)
+        if not appeal:
+            return await interaction.response.send_message(
+                "❌ La apelación no existe, no pertenece a este servidor o ya fue resuelta.",
+                ephemeral=True,
+            )
+        self.user_id = int(appeal["user_id"])
+        self.action_type = str(appeal["action_type"]).upper()
         await interaction.response.defer(ephemeral=True)
+        current_actor = await _fresh_appeal_staff_member(self.bot, interaction)
+        appeal = _pending_appeal(self.bot, interaction, self.appeal_id)
+        if current_actor is None or not appeal:
+            return await interaction.followup.send(
+                "❌ Tus permisos cambiaron o la apelación ya no está pendiente.",
+                ephemeral=True,
+            )
+        self.user_id = int(appeal["user_id"])
+        self.action_type = str(appeal["action_type"]).upper()
         db = getattr(self.bot, 'db')
-        db.update_appeal_status(self.appeal_id, "DENIED")
+        if not db.claim_pending_appeal(self.appeal_id, interaction.guild_id):
+            return await interaction.followup.send(
+                "❌ La apelación ya está siendo procesada o fue resuelta.",
+                ephemeral=True,
+            )
+        try:
+            finalized = db.finalize_claimed_appeal(
+                self.appeal_id, interaction.guild_id, "DENIED"
+            )
+        except Exception as exc:
+            db.release_appeal_claim(self.appeal_id, interaction.guild_id)
+            logger.warning("No se pudo finalizar apelación %s: %s", self.appeal_id, exc)
+            return await interaction.followup.send(
+                "❌ No se pudo finalizar la apelación; vuelve a intentarlo.",
+                ephemeral=True,
+            )
+        if not finalized:
+            db.release_appeal_claim(self.appeal_id, interaction.guild_id)
+            return await interaction.followup.send(
+                "❌ La apelación cambió de estado durante el proceso.",
+                ephemeral=True,
+            )
         guild = interaction.guild
         member = guild.get_member(self.user_id) if guild else None
         recipient = member or self.bot.get_user(self.user_id)
@@ -2609,7 +5620,7 @@ class AppealDenyModal(discord.ui.Modal, title="Denegar Apelación"):
             embed = interaction.message.embeds[0].copy()
             embed.color = discord.Color.red()
             embed.title = "❌ Apelación Denegada"
-            embed.add_field(name="Moderador", value=interaction.user.mention, inline=False)
+            embed.add_field(name="Moderador", value=current_actor.mention, inline=False)
             embed.add_field(name="Motivo de Denegación", value=self.mod_reason.value, inline=False)
             await interaction.message.edit(embed=embed, view=None)
 
@@ -2623,6 +5634,14 @@ class AppealModView(discord.ui.View):
         self.appeal_id = appeal_id
         self.user_id = user_id
         self.action_type = action_type
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if _appeal_staff_allowed(self.bot, interaction):
+            return True
+        await interaction.response.send_message(
+            "❌ No tienes permisos actuales para gestionar apelaciones.", ephemeral=True
+        )
+        return False
 
     @staticmethod
     def _parse_embed(interaction: discord.Interaction) -> tuple:

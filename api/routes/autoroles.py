@@ -19,10 +19,12 @@ Endpoints:
 
 import json
 
+import discord
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from api.deps import get_db, require_guild_admin
+from api.deps import get_bot, get_db, require_guild_admin
+from api.discord_bridge import DiscordBridgeTimeout, DiscordBridgeUnavailable, run_on_bot_loop
 from api.snowflakes import coerce_snowflake, serialize_snowflake, stringify_rows
 
 router = APIRouter(
@@ -122,6 +124,7 @@ async def upsert_reaction_panel(
     guild_id: int,
     body: ReactionPanelBody,
     db=Depends(get_db),
+    bot=Depends(get_bot),
     _user=Depends(require_guild_admin),
 ):
     """Crea o actualiza un panel de reaction-role."""
@@ -129,6 +132,49 @@ async def upsert_reaction_panel(
 
     message_id = coerce_snowflake(body.message_id, "message_id")
     channel_id = coerce_snowflake(body.channel_id, "channel_id")
+    mapping = json.loads(mapping_data)
+
+    async def prepare_panel() -> None:
+        get_guild = getattr(bot, "get_guild", None)
+        guild = get_guild(guild_id) if callable(get_guild) else None
+        if guild is None:
+            raise HTTPException(status_code=409, detail="El bot no está conectado a este servidor.")
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await guild.fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                channel = None
+        if channel is None or not callable(getattr(channel, "fetch_message", None)):
+            raise HTTPException(status_code=400, detail="El canal no admite mensajes o no existe.")
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            raise HTTPException(status_code=404, detail="Mensaje no encontrado en el canal indicado.")
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            raise HTTPException(status_code=502, detail=f"Discord no permitió leer el mensaje: {exc}")
+
+        bot_member = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+        for role_id in mapping.values():
+            role = guild.get_role(int(role_id))
+            if role is None or role == guild.default_role or role.managed:
+                raise HTTPException(status_code=400, detail=f"Rol inválido o gestionado: {role_id}")
+            if bot_member is None or role.position >= bot_member.top_role.position:
+                raise HTTPException(status_code=400, detail=f"El bot no puede gestionar el rol {role.name}.")
+
+        try:
+            for emoji in mapping:
+                await message.add_reaction(emoji)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, TypeError) as exc:
+            raise HTTPException(status_code=502, detail=f"No se pudo añadir la reacción `{emoji}`: {exc}")
+
+    try:
+        await run_on_bot_loop(bot, prepare_panel, timeout=30)
+    except DiscordBridgeUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except DiscordBridgeTimeout as exc:
+        raise HTTPException(status_code=504, detail=str(exc))
+
     db.set_autorole(
         message_id=message_id,
         guild_id=guild_id,

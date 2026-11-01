@@ -3,6 +3,8 @@ import { apiGet, apiPatch } from '../lib/api';
 import { SearchableSelect } from './ui';
 import { Icon } from '../lib/icons';
 import Toast from './Toast';
+import IdentityBadge from './IdentityBadge';
+import ModerationReason from './ModerationReason';
 import { useSaveBar } from '../lib/SaveBarContext';
 
 const ACTION_META = {
@@ -145,7 +147,9 @@ export default function Logs({ selectedGuild }) {
         String(c.target_id).includes(q) ||
         String(c.moderator_id).includes(q) ||
         (c.reason || '').toLowerCase().includes(q) ||
-        (c.target_tag || '').toLowerCase().includes(q)
+        (c.target_tag || '').toLowerCase().includes(q) ||
+        (c.target_display || '').toLowerCase().includes(q) ||
+        (c.moderator_display || '').toLowerCase().includes(q)
       );
     }
     return true;
@@ -212,13 +216,13 @@ export default function Logs({ selectedGuild }) {
 
             <div className="glass-panel" style={{ padding: 24, borderRadius: 22 }}>
               <h3 style={{ margin: '0 0 16px' }}>Eventos a registrar</h3>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,220px),1fr))', gap: 10 }}>
                 {LOG_EVENTS.map(ev => {
                   const on = !!(logCfg.log_events_parsed || {})[ev.key];
                   return (
                     <div key={ev.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderRadius: 12, background: on ? 'rgba(139,92,246,0.08)' : 'rgba(255,255,255,0.02)', border: `1px solid ${on ? 'rgba(139,92,246,0.25)' : 'rgba(255,255,255,0.06)'}`, transition: 'all 0.15s' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <i className={`fa-solid ${ev.icon}`} style={{ color: on ? '#c4b5fd' : 'var(--muted)', fontSize: '0.9rem' }} />
+                        <i className={`fa-solid ${ev.icon}`} style={{ color: on ? 'var(--accent)' : 'var(--muted)', fontSize: '0.9rem' }} />
                         <span style={{ fontSize: '0.84rem', fontWeight: 600 }}>{ev.label}</span>
                       </div>
                       <label className="toggle-switch" style={{ transform: 'scale(0.8)' }}>
@@ -246,7 +250,7 @@ export default function Logs({ selectedGuild }) {
                 </span>
                 Auto-refresh
               </label>
-              <button onClick={load} style={{ padding: '8px 16px', borderRadius: 10, border: '1px solid rgba(139,92,246,0.25)', background: 'rgba(139,92,246,0.1)', color: '#c4b5fd', cursor: 'pointer', fontSize: '0.82rem', fontWeight: 700 }}>
+              <button onClick={load} style={{ padding: '8px 16px', borderRadius: 10, border: '1px solid rgba(139,92,246,0.25)', background: 'rgba(139,92,246,0.1)', color: 'var(--accent)', cursor: 'pointer', fontSize: '0.82rem', fontWeight: 700 }}>
                 ↻ Actualizar
               </button>
             </div>
@@ -289,7 +293,7 @@ export default function Logs({ selectedGuild }) {
             </div>
           ) : (
             <>
-              <div className="glass-panel" style={{ overflow: 'hidden', marginBottom: 16 }}>
+              <div className="glass-panel" style={{ overflowX: 'auto', marginBottom: 16 }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
                   <thead>
                     <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
@@ -308,13 +312,17 @@ export default function Logs({ selectedGuild }) {
                           <td style={{ padding: '10px 16px', color: 'var(--muted)', fontFamily: 'monospace', fontSize: '0.78rem' }}>#{c.id || page * PER_PAGE + i + 1}</td>
                           <td style={{ padding: '10px 16px' }}>
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 99, fontSize: '0.74rem', fontWeight: 700, background: meta.color + '18', color: meta.color, border: `1px solid ${meta.color}30` }}>
-                              {meta.icon} {meta.label}
+                              {meta.icon} {c.action_label || meta.label}
                             </span>
                           </td>
-                          <td style={{ padding: '10px 16px', fontFamily: 'monospace', fontSize: '0.78rem' }}>{c.target_tag || c.target_id || '—'}</td>
-                          <td style={{ padding: '10px 16px', color: 'var(--muted)', fontFamily: 'monospace', fontSize: '0.78rem' }}>{c.moderator_tag || c.moderator_id || '—'}</td>
+                          <td style={{ padding: '10px 16px' }}>
+                            <IdentityBadge item={c} />
+                          </td>
+                          <td style={{ padding: '10px 16px' }}>
+                            <IdentityBadge item={c} prefix="moderator" />
+                          </td>
                           <td style={{ padding: '10px 16px', maxWidth: 220 }}>
-                            <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: c.reason ? 'var(--text)' : 'var(--muted)', fontSize: '0.82rem' }}>{c.reason || 'Sin razón'}</span>
+                            <ModerationReason entry={c} />
                           </td>
                           <td style={{ padding: '10px 16px', color: 'var(--muted)', fontSize: '0.76rem', whiteSpace: 'nowrap' }}>{relativeTime(c.created_at)}</td>
                         </tr>

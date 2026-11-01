@@ -9,7 +9,7 @@ export default defineConfig({
       registerType: 'autoUpdate',
       filename: 'sw.js',
       manifestFilename: 'site.webmanifest',
-      includeAssets: ['favicon.svg', 'robots.txt', 'sitemap.xml'],
+      includeAssets: ['logo.png', 'robots.txt', 'sitemap.xml'],
       manifest: {
         id: '/panel/',
         name: "Cat's Bot",
@@ -30,7 +30,7 @@ export default defineConfig({
           { src: '/panel/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
           { src: '/panel/icons/icon-192-maskable.png', sizes: '192x192', type: 'image/png', purpose: 'maskable' },
           { src: '/panel/icons/icon-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
-          { src: '/panel/favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+          { src: '/panel/logo.png', sizes: '1024x1024', type: 'image/png', purpose: 'any' },
         ],
       },
       workbox: {

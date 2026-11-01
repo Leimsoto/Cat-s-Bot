@@ -6,6 +6,7 @@
 
 const getCache = new Map();
 const pendingGets = new Map();
+let cacheGeneration = 0;
 const MAX_GET_CACHE_ENTRIES = 120;
 
 const ttlByPath = [
@@ -25,7 +26,8 @@ const ttlByPath = [
 ];
 
 function getTtl(path) {
-  return ttlByPath.find(([pattern]) => pattern.test(path))?.[1] ?? 15_000;
+  const pathname = path.split('?', 1)[0];
+  return ttlByPath.find(([pattern]) => pattern.test(pathname))?.[1] ?? 15_000;
 }
 
 function pruneGetCache() {
@@ -42,6 +44,7 @@ function pruneGetCache() {
 }
 
 function invalidateRelated(path) {
+  cacheGeneration += 1;
   const guildMatch = path.match(/\/api\/guilds\/([^/]+)/);
   const keys = [...getCache.keys()];
   for (const key of keys) {
@@ -49,13 +52,16 @@ function invalidateRelated(path) {
       getCache.delete(key);
     }
   }
+  for (const key of [...pendingGets.keys()]) {
+    if (key === path || (guildMatch && key.includes(`/api/guilds/${guildMatch[1]}/`))) {
+      pendingGets.delete(key);
+    }
+  }
 }
 
 async function requestJson(path, options = {}) {
-  const token = localStorage.getItem('botES_token');
   const headers = {
     Accept: 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(options.headers || {}),
   };
 
@@ -66,7 +72,6 @@ async function requestJson(path, options = {}) {
   });
 
   if (response.status === 401) {
-    localStorage.removeItem('botES_token');
     sessionStorage.removeItem('botES_guilds_cache');
     sessionStorage.removeItem('botES_user_cache');
     window.location.href = '/';
@@ -86,7 +91,7 @@ async function requestJson(path, options = {}) {
       getCache.clear();
       sessionStorage.removeItem('botES_guilds_cache');
       sessionStorage.removeItem('botES_user_cache');
-      permissionDebug = await fetchPermissionDebug(path, token);
+      permissionDebug = await fetchPermissionDebug(path);
       console.warn('[CatBot API] 403', { path, detail: errBody?.detail, permissionDebug });
     }
     const detail = errBody?.detail;
@@ -94,14 +99,20 @@ async function requestJson(path, options = {}) {
     const message = typeof detail === 'string'
       ? detail
       : detail?.message || detail?.reason || debugReason || `Error ${response.status}`;
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    if (["http_confirmation_required", "private_confirmation_required", "endpoint_confirmation_required"].includes(detail?.code)) {
+      error.code = detail.code;
+      error.endpointUrl = typeof detail.endpoint_url === "string" ? detail.endpoint_url : "";
+      error.requiredConfirmations = Array.isArray(detail.required_confirmations) ? detail.required_confirmations.filter((value) => value === "http" || value === "private") : [];
+    }
+    throw error;
   }
 
   return response.json();
 }
 
-async function fetchPermissionDebug(path, token) {
-  if (!token) return null;
+async function fetchPermissionDebug(path) {
   const guildMatch = path.match(/\/api\/(?:guilds|moderation)\/(\d+)/);
   const guildId = guildMatch?.[1];
   if (!guildId || path.includes('/api/auth/permissions/')) return null;
@@ -110,7 +121,6 @@ async function fetchPermissionDebug(path, token) {
       credentials: 'include',
       headers: {
         Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
       },
     });
     return await response.json();
@@ -133,15 +143,18 @@ export async function apiGet(path, options = {}) {
     return pendingGets.get(path);
   }
 
+  const generation = cacheGeneration;
   const request = requestJson(path)
     .then((data) => {
-      if (useCache) {
+      if (useCache && generation === cacheGeneration) {
         getCache.set(path, { data, expiresAt: Date.now() + getTtl(path) });
         pruneGetCache();
       }
       return data;
     })
-    .finally(() => pendingGets.delete(path));
+    .finally(() => {
+      if (pendingGets.get(path) === request) pendingGets.delete(path);
+    });
 
   if (useCache) pendingGets.set(path, request);
   return request;

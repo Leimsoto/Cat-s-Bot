@@ -14,13 +14,16 @@ Listeners / funciones automáticas:
 
 import asyncio
 import logging
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
+
+from cogs._role_safety import delegated_bot_role_ids, safe_for_automatic_assignment
 
 logger = logging.getLogger("Utilities")
 
@@ -29,6 +32,9 @@ NUMBER_EMOJIS = [
     "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟",
 ]
 
+REMINDER_RETENTION_DAYS = 30
+REMINDER_CLEANUP_INTERVAL = timedelta(hours=1)
+
 
 # ── Modal para /poll ───────────────────────────────────────────────────────────
 
@@ -36,7 +42,7 @@ class PollModal(discord.ui.Modal, title="Nueva encuesta"):
     pregunta = discord.ui.TextInput(
         label="Pregunta",
         placeholder="¿Cuál es tu color favorito?",
-        max_length=256,
+        max_length=250,
         required=True,
     )
     opciones = discord.ui.TextInput(
@@ -87,12 +93,28 @@ class Utilities(commands.Cog):
 
         # Anti-raid: join timestamps por guild
         self._join_timestamps: dict[int, list[float]] = defaultdict(list)
+        self.db.recover_processing_reminders()
+        self._lockdowns: set[int] = {
+            int(row["guild_id"]) for row in self.db.get_active_raid_lockdowns()
+        }
+        self._last_reminder_cleanup = datetime.min.replace(tzinfo=timezone.utc)
+        self.runtime_jobs.start()
 
-        # Starboard: {guild_id: {message_id: starboard_message_id}}
-        self._starboard_cache: dict[int, dict[int, int]] = defaultdict(dict)
+    @staticmethod
+    def _starboard_preserves_audience(
+        guild: discord.Guild,
+        source: discord.TextChannel,
+        destination: discord.TextChannel,
+    ) -> bool:
+        principals = [guild.default_role, *guild.roles, *guild.members]
+        return all(
+            not destination.permissions_for(member).view_channel
+            or source.permissions_for(member).view_channel
+            for member in principals
+        )
 
-        # Lockdown activo: {guild_id: expiry_timestamp}
-        self._lockdowns: dict[int, float] = {}
+    def cog_unload(self):
+        self.runtime_jobs.cancel()
 
     # ─────────────────────────────────────────────────────────────────────────
     # /poll
@@ -115,8 +137,11 @@ class Utilities(commands.Cog):
         self,
         interaction: discord.Interaction,
         tiempo: str,
-        mensaje: str,
+        mensaje: app_commands.Range[str, 1, 1800],
     ):
+        mensaje = mensaje.strip()
+        if not mensaje:
+            return await interaction.response.send_message("❌ Escribe el mensaje del recordatorio.", ephemeral=True)
         secs = self._parse_duration(tiempo)
         if secs is None:
             return await interaction.response.send_message(
@@ -132,6 +157,25 @@ class Utilities(commands.Cog):
                 "❌ El tiempo máximo es 90 días.", ephemeral=True,
             )
 
+        limit_reached = self.db.create_reminder(
+            uuid.uuid4().hex,
+            interaction.user.id,
+            mensaje,
+            (datetime.now(timezone.utc) + timedelta(seconds=secs)).isoformat(),
+            interaction.guild_id,
+        )
+        if limit_reached == "user":
+            return await interaction.response.send_message(
+                "❌ Ya tienes demasiados recordatorios pendientes. "
+                "Espera a que se entregue alguno.",
+                ephemeral=True,
+            )
+        if limit_reached == "guild":
+            return await interaction.response.send_message(
+                "❌ Este servidor ha alcanzado el límite de recordatorios pendientes.",
+                ephemeral=True,
+            )
+
         await interaction.response.send_message(
             f"✅ Te recordaré **{mensaje}** en **{self._fmt_duration(secs)}**.",
             ephemeral=True,
@@ -145,15 +189,17 @@ class Utilities(commands.Cog):
         except discord.Forbidden:
             pass
 
-        asyncio.create_task(self._send_reminder(
-            interaction.user.id, mensaje, secs
-        ))
-
-    async def _send_reminder(self, user_id: int, mensaje: str, delay: int):
-        await asyncio.sleep(delay)
+    async def _deliver_reminder(self, row: dict):
+        user_id = int(row["user_id"])
+        mensaje = str(row["message"])
         user = self.bot.get_user(user_id)
         if not user:
-            return
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+                retry = int(row.get("attempts") or 0) + 1 < 5
+                self.db.fail_reminder(row["reminder_id"], str(exc), retry=retry)
+                return
         embed = discord.Embed(
             title="⏰ Recordatorio",
             description=mensaje,
@@ -163,10 +209,65 @@ class Utilities(commands.Cog):
         embed.set_footer(text="Recordatorio programado")
         try:
             await user.send(embed=embed)
+            self.db.complete_reminder(row["reminder_id"])
         except discord.Forbidden:
             logger.info("No se pudo enviar recordatorio a %s: DMs cerrados", user_id)
+            self.db.fail_reminder(row["reminder_id"], "DMs cerrados", retry=False)
         except discord.HTTPException as exc:
             logger.warning("Error enviando recordatorio a %s: %s", user_id, exc)
+            retry = int(row.get("attempts") or 0) + 1 < 5
+            self.db.fail_reminder(row["reminder_id"], str(exc), retry=retry)
+
+    @tasks.loop(seconds=15)
+    async def runtime_jobs(self):
+        now = datetime.now(timezone.utc)
+        if now - self._last_reminder_cleanup >= REMINDER_CLEANUP_INTERVAL:
+            self._last_reminder_cleanup = now
+            cutoff = (now - timedelta(days=REMINDER_RETENTION_DAYS)).isoformat()
+            try:
+                removed = self.db.cleanup_terminal_reminders(cutoff)
+                if removed:
+                    logger.info("Recordatorios terminales eliminados: %s", removed)
+            except Exception:
+                logger.exception("No se pudo limpiar el historial de recordatorios")
+        try:
+            reminders = self.db.get_due_reminders(now.isoformat(), limit=50)
+        except Exception:
+            logger.exception("No se pudieron leer los recordatorios pendientes")
+            reminders = []
+        for row in reminders:
+            claimed = False
+            try:
+                claimed = self.db.claim_reminder(row["reminder_id"])
+                if claimed:
+                    await self._deliver_reminder(row)
+            except Exception as exc:
+                logger.exception("Error procesando el recordatorio %s", row.get("reminder_id"))
+                if claimed:
+                    try:
+                        self.db.fail_reminder(
+                            row["reminder_id"], str(exc), retry=int(row.get("attempts") or 0) + 1 < 5,
+                        )
+                    except Exception:
+                        logger.exception("No se pudo liberar el recordatorio %s", row.get("reminder_id"))
+        try:
+            lockdowns = self.db.get_active_raid_lockdowns()
+        except Exception:
+            logger.exception("No se pudieron leer los bloqueos anti-raid")
+            lockdowns = []
+        for row in lockdowns:
+            try:
+                expires_at = datetime.fromisoformat(str(row["expires_at"]))
+            except (TypeError, ValueError):
+                expires_at = now
+            if expires_at <= now:
+                guild = self.bot.get_guild(int(row["guild_id"]))
+                if guild:
+                    await self._restore_lockdown(guild, row)
+
+    @runtime_jobs.before_loop
+    async def before_runtime_jobs(self):
+        await self.bot.wait_until_ready()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Anti-Raid
@@ -228,15 +329,30 @@ class Utilities(commands.Cog):
             role_id = cfg.get("anti_alt_role_id")
             if role_id:
                 role = member.guild.get_role(int(role_id))
-                if role:
+                if safe_for_automatic_assignment(
+                    role,
+                    member.guild.me,
+                    forbidden_role_ids=delegated_bot_role_ids(
+                        self.db, member.guild.id
+                    ),
+                ):
                     try:
                         await member.add_roles(role, reason="Anti-alt: cuenta muy reciente")
                     except discord.Forbidden:
                         logger.warning("Sin permisos para asignar rol anti-alt a %s", member)
+                else:
+                    logger.warning(
+                        "Rol anti-alt inseguro o no asignable ignorado en %s: %s",
+                        member.guild.id,
+                        role_id,
+                    )
 
     async def _activate_lockdown(self, guild: discord.Guild, cfg: dict):
         logger.warning("Anti-raid activado en %s (%s)", guild.name, guild.id)
-        self._lockdowns[guild.id] = asyncio.get_event_loop().time() + cfg.get("anti_raid_lockdown_duration", 300)
+        duration = int(cfg.get("anti_raid_lockdown_duration", 300) or 300)
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=duration)
+        self.db.save_raid_lockdown(guild.id, int(guild.verification_level.value), expires_at.isoformat())
+        self._lockdowns.add(guild.id)
 
         embed = discord.Embed(
             title="🔒 Lockdown activado — Anti-Raid",
@@ -245,7 +361,7 @@ class Utilities(commands.Cog):
                 "el modo lockdown.\n\n"
                 "**Medidas aplicadas:**\n"
                 "• Nivel de verificación → Alto\n"
-                "• Nuevos ingresos bloqueados temporalmente"
+                "• Las cuentas sin verificar deberán completar los requisitos de Discord"
             ),
             color=discord.Color.dark_red(),
             timestamp=datetime.now(timezone.utc),
@@ -259,31 +375,46 @@ class Utilities(commands.Cog):
             )
         except discord.Forbidden:
             logger.warning("Sin permisos para cambiar verificación en %s", guild.name)
+            self.db.delete_raid_lockdown(guild.id)
+            self._lockdowns.discard(guild.id)
+            return
         except discord.HTTPException as exc:
             logger.warning("Error cambiando verificación en %s: %s", guild.name, exc)
+            self.db.delete_raid_lockdown(guild.id)
+            self._lockdowns.discard(guild.id)
+            return
 
         # Notificar al modlog
         await self._send_log(guild, embed)
 
-        # Auto-desactivar después del periodo
-        asyncio.create_task(self._disable_lockdown_after(guild, cfg))
-
-    async def _disable_lockdown_after(self, guild: discord.Guild, cfg: dict):
-        duration = cfg.get("anti_raid_lockdown_duration", 300)
-        await asyncio.sleep(duration)
-
-        self._lockdowns.pop(guild.id, None)
+    async def _restore_lockdown(self, guild: discord.Guild, record: dict):
+        levels = {
+            0: discord.VerificationLevel.none,
+            1: discord.VerificationLevel.low,
+            2: discord.VerificationLevel.medium,
+            3: discord.VerificationLevel.high,
+            4: discord.VerificationLevel.highest,
+        }
+        original_level = levels.get(
+            int(record.get("original_verification_level") or 0),
+            discord.VerificationLevel.low,
+        )
+        self._lockdowns.discard(guild.id)
         self._join_timestamps[guild.id].clear()
 
         try:
             await guild.edit(
-                verification_level=discord.VerificationLevel.low,
+                verification_level=original_level,
                 reason="Anti-raid: fin del lockdown automático",
             )
         except discord.Forbidden:
             logger.warning("Sin permisos para restaurar verificación en %s", guild.name)
         except discord.HTTPException as exc:
             logger.warning("Error restaurando verificación en %s: %s", guild.name, exc)
+            self._lockdowns.add(guild.id)
+            return
+
+        self.db.delete_raid_lockdown(guild.id)
 
         embed = discord.Embed(
             title="🔓 Lockdown desactivado",
@@ -300,6 +431,13 @@ class Utilities(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        await self._sync_starboard(payload)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        await self._sync_starboard(payload)
+
+    async def _sync_starboard(self, payload: discord.RawReactionActionEvent):
         if not payload.guild_id or not payload.emoji.is_unicode_emoji():
             return
         if payload.emoji.name != "⭐":
@@ -323,6 +461,26 @@ class Utilities(commands.Cog):
         if not isinstance(channel, discord.TextChannel):
             return
 
+        if not self._starboard_preserves_audience(guild, channel, starboard_channel):
+            entry = self.db.get_starboard_entry(payload.guild_id, payload.message_id)
+            if entry:
+                try:
+                    existing = await starboard_channel.fetch_message(
+                        int(entry["starboard_message_id"])
+                    )
+                    await existing.delete()
+                except discord.NotFound:
+                    pass
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    logger.warning(
+                        "No se pudo retirar starboard con audiencia insegura en %s: %s",
+                        guild.name,
+                        exc,
+                    )
+                    return
+                self.db.delete_starboard_entry(payload.guild_id, payload.message_id)
+            return
+
         try:
             message = await channel.fetch_message(payload.message_id)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
@@ -331,15 +489,22 @@ class Utilities(commands.Cog):
         if message.author.bot:
             return
 
-        star_count = sum(
-            1 for r in message.reactions if r.emoji == "⭐"
-        )
+        star_count = sum(r.count for r in message.reactions if str(r.emoji) == "⭐")
+        entry = self.db.get_starboard_entry(payload.guild_id, payload.message_id)
+        existing_id = int(entry["starboard_message_id"]) if entry else None
 
         if star_count < threshold:
+            if existing_id:
+                try:
+                    existing_msg = await starboard_channel.fetch_message(existing_id)
+                    await existing_msg.delete()
+                except discord.NotFound:
+                    pass
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    logger.warning("No se pudo retirar mensaje del starboard en %s: %s", guild.name, exc)
+                    return
+                self.db.delete_starboard_entry(payload.guild_id, payload.message_id)
             return
-
-        star_cache = self._starboard_cache[payload.guild_id]
-        existing_id = star_cache.get(payload.message_id)
 
         if existing_id:
             try:
@@ -352,9 +517,19 @@ class Utilities(commands.Cog):
                         lines[0] = f"⭐ **{star_count}**"
                     embed.description = "\n".join(lines)
                     await existing_msg.edit(embed=embed)
+                    self.db.upsert_starboard_entry(
+                        payload.guild_id,
+                        payload.message_id,
+                        payload.channel_id,
+                        existing_id,
+                        star_count,
+                    )
                 return
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                star_cache.pop(payload.message_id, None)
+            except discord.NotFound:
+                self.db.delete_starboard_entry(payload.guild_id, payload.message_id)
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                logger.warning("No se pudo actualizar starboard en %s: %s", guild.name, exc)
+                return
 
         content = message.content or ""
         embed = discord.Embed(
@@ -375,7 +550,13 @@ class Utilities(commands.Cog):
 
         try:
             star_msg = await starboard_channel.send(embed=embed)
-            star_cache[payload.message_id] = star_msg.id
+            self.db.upsert_starboard_entry(
+                payload.guild_id,
+                payload.message_id,
+                payload.channel_id,
+                star_msg.id,
+                star_count,
+            )
         except (discord.Forbidden, discord.HTTPException) as exc:
             logger.warning("Error enviando starboard en %s: %s", guild.name, exc)
 
@@ -435,7 +616,8 @@ class Utilities(commands.Cog):
             return
 
         try:
-            await channel.send(embed=embed)
+            from cogs._managed_messages import send_managed
+            await send_managed(self.bot, guild.id, "utilities", channel.send, embed=embed)
         except discord.Forbidden:
             logger.warning("Sin permisos para enviar logs en %s", guild.name)
         except discord.HTTPException as exc:

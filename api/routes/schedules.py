@@ -11,14 +11,18 @@ POST   /api/guilds/{g}/schedules/{schedule_id}/test    → enviar mensaje ahora 
 DELETE /api/guilds/{g}/schedules/{schedule_id}         → eliminar (también acepta nombre)
 """
 
+import json
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from api.deps import get_db, require_guild_admin
+from api.discord_bridge import DiscordBridgeTimeout, DiscordBridgeUnavailable, run_on_bot_loop
 from api.snowflakes import coerce_snowflake, stringify_rows
+from cogs._message_payload import render_message_payload
 
 router = APIRouter(prefix="/api/guilds/{guild_id}/schedules", tags=["schedules"])
 
@@ -30,9 +34,9 @@ MAX_INTERVAL = 2_592_000
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
 class ScheduleCreate(BaseModel):
-    name:             str
+    name:             str = Field(min_length=1, max_length=50)
     channel_id:       int | str
-    content:          str = ""
+    content:          str = Field("", max_length=2000)
     interval_seconds: int = Field(MIN_INTERVAL, ge=0, le=MAX_INTERVAL)
     schedule_mode:    Optional[str] = None  # "interval" | "cron"
     cron_hour:        Optional[int] = Field(None, ge=0, le=23)
@@ -46,7 +50,7 @@ class ScheduleCreate(BaseModel):
 
 class SchedulePatch(BaseModel):
     channel_id:       Optional[int | str] = None
-    content:          Optional[str] = None
+    content:          Optional[str] = Field(None, max_length=2000)
     interval_seconds: Optional[int] = Field(None, ge=0, le=MAX_INTERVAL)
     enabled:          Optional[int] = None
     schedule_mode:    Optional[str] = None
@@ -64,13 +68,47 @@ def _find_schedule(db, guild_id: int, ident) -> Optional[dict]:
     schedules = db.get_schedules(guild_id)
     try:
         sid = int(ident)
-        return next((s for s in schedules if int(s["id"]) == sid), None)
+        match = next((s for s in schedules if int(s["id"]) == sid), None)
+        if match is not None:
+            return match
     except (ValueError, TypeError):
-        return next((s for s in schedules if s["name"] == str(ident)), None)
+        pass
+    return next((s for s in schedules if s["name"] == str(ident)), None)
+
+
+def _validate_schedule(settings: dict) -> None:
+    mode = settings.get("schedule_mode") or "interval"
+    if mode not in {"interval", "cron"}:
+        raise HTTPException(400, "schedule_mode debe ser 'interval' o 'cron'")
+    if mode == "interval" and not MIN_INTERVAL <= int(settings.get("interval_seconds") or 0) <= MAX_INTERVAL:
+        raise HTTPException(400, "El intervalo debe estar entre 10 minutos y 30 días")
+    if mode == "cron":
+        hour, minute = settings.get("cron_hour"), settings.get("cron_minute")
+        if hour is None or minute is None or not 0 <= int(hour) <= 23 or not 0 <= int(minute) <= 59:
+            raise HTTPException(400, "Indica una hora y un minuto válidos para el modo cron")
+        try:
+            ZoneInfo(settings.get("timezone") or "UTC")
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            raise HTTPException(400, "Zona horaria inválida")
+        try:
+            weekdays = json.loads(settings.get("cron_weekdays") or "[]")
+        except (ValueError, TypeError):
+            raise HTTPException(400, "cron_weekdays debe ser una lista de días entre 0 y 6")
+        if not isinstance(weekdays, list) or any(type(day) is not int or not 0 <= day <= 6 for day in weekdays):
+            raise HTTPException(400, "cron_weekdays debe ser una lista de días entre 0 y 6")
+    if settings.get("message_data"):
+        try:
+            payload = render_message_payload(settings["message_data"])
+        except (ValueError, TypeError, AttributeError):
+            raise HTTPException(400, "El formato del mensaje programado es inválido")
+        if not payload["content"] and payload["embed"] is None:
+            raise HTTPException(400, "El mensaje programado no puede estar vacío")
+    elif not (settings.get("content") or "").strip():
+        raise HTTPException(400, "El mensaje programado no puede estar vacío")
 
 
 def _schedule_payload(row: dict) -> dict:
-    return stringify_rows([row], ("guild_id", "channel_id", "creator_id"))[0]
+    return stringify_rows([row], ("guild_id", "channel_id", "created_by"))[0]
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -84,7 +122,7 @@ async def list_schedules(
     schedules = db.get_schedules(guild_id)
     return {
         "guild_id": str(guild_id),
-        "schedules": stringify_rows(schedules, ("guild_id", "channel_id", "creator_id")),
+        "schedules": [_schedule_payload(row) for row in schedules],
         "count": len(schedules),
         "limits": {
             "max_schedules": MAX_SCHEDULES,
@@ -115,6 +153,7 @@ async def create_schedule(
         raise HTTPException(400, f"Intervalo mínimo {MIN_INTERVAL}s")
     if mode == "cron" and (body.cron_hour is None or body.cron_minute is None):
         raise HTTPException(400, "cron_hour y cron_minute son requeridos en modo cron")
+    _validate_schedule({**body.model_dump(), "schedule_mode": mode})
 
     existing = db.get_schedules(guild_id)
     if len(existing) >= MAX_SCHEDULES:
@@ -157,6 +196,9 @@ async def patch_schedule(
         update["enabled"] = 1 if int(update["enabled"]) else 0
     if not update:
         raise HTTPException(400, "Sin campos para actualizar")
+    if "schedule_mode" in update:
+        update["schedule_mode"] = update["schedule_mode"].strip().lower()
+    _validate_schedule({**sched, **update})
 
     db.update_schedule(int(sched["id"]), **update)
     updated = dict(update)
@@ -205,13 +247,22 @@ async def test_schedule(
         raise HTTPException(404, "Canal de texto no encontrado")
 
     cog = bot.get_cog("Scheduler")
-    try:
+    async def send_now() -> None:
         if cog and hasattr(cog, "_send_scheduled_message"):
             await cog._send_scheduled_message(channel, sched, guild)
         else:
             await channel.send(sched.get("content") or "(vacío)")
+
+    try:
+        await run_on_bot_loop(bot, send_now, timeout=30)
+    except DiscordBridgeUnavailable as exc:
+        raise HTTPException(503, str(exc))
+    except DiscordBridgeTimeout as exc:
+        raise HTTPException(504, str(exc))
     except discord.Forbidden:
         raise HTTPException(403, "Sin permisos para enviar en ese canal")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     except discord.HTTPException as e:
         raise HTTPException(500, f"Error enviando mensaje: {e}")
     return {"status": "ok", "schedule_id": int(sched["id"])}

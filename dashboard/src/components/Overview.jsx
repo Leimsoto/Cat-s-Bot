@@ -1,285 +1,59 @@
 import { useEffect, useState } from "react";
 import { apiGet } from "../lib/api";
+import { Icon } from "../lib/icons";
+import "./DashboardPanels.css";
 
-export default function Overview({ selectedGuild }) {
+const SERIES = [
+  ["commands", "Comandos", "var(--accent)"],
+  ["automod", "AutoMod", "var(--success, #91d6b0)"],
+  ["security", "Seguridad", "var(--danger, #efa1b1)"],
+  ["moderation", "Moderación", "var(--warning, #edc37d)"],
+];
+
+export default function Overview({ selectedGuild, onNavigate }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [retry, setRetry] = useState(0);
+  const [visible, setVisible] = useState(SERIES.map(([key]) => key));
 
   useEffect(() => {
-    if (!selectedGuild) return;
+    let current = true;
     setLoading(true);
-    apiGet(`/api/guilds/${selectedGuild}/overview`)
-      .then(setData)
-      .catch(() => setData(null))
-      .finally(() => setLoading(false));
-  }, [selectedGuild]);
+    setData(null);
+    if (!selectedGuild) { setLoading(false); return; }
+    apiGet(`/api/guilds/${selectedGuild}/overview`, { cache: retry === 0 })
+      .then((result) => { if (current) setData(result); })
+      .catch(() => { if (current) setData(null); })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [selectedGuild, retry]);
 
-  if (loading)
-    return (
-      <div className="overview-loading">
-        <div className="loading-spinner" />
-        <p>Cargando estadísticas...</p>
-      </div>
-    );
-  if (!data)
-    return (
-      <div className="overview-loading">
-        <i
-          className="fa-solid fa-triangle-exclamation"
-          style={{ fontSize: "2rem", color: "#f59e0b", marginBottom: "12px" }}
-        />
-        <p>No se pudieron cargar las estadísticas. Recarga la página.</p>
-      </div>
-    );
+  if (loading) return <div className="cr-page cr-loading" role="status"><div className="loading-spinner" /><p>Cargando la actividad de tu comunidad…</p></div>;
+  if (!data) return <div className="cr-page cr-empty" role="alert"><Icon name="warning" /><h2>No pudimos cargar el resumen</h2><p>Vuelve a intentarlo para ver la actividad del servidor.</p><button className="btn-secondary" onClick={() => setRetry((value) => value + 1)}>Reintentar</button></div>;
 
   const metrics = data.metrics || {};
   const server = data.server || {};
   const charts = data.charts || [];
-  const maxVal = Math.max(
-    ...charts.flatMap((p) => [
-      p.commands || 0,
-      p.automod || 0,
-      p.security || 0,
-      p.moderation || 0,
-    ]),
-    1,
-  );
-  const series = [
-    ["commands", "Comandos", "#38bdf8"],
-    ["automod", "AutoMod", "#34d399"],
-    ["security", "Seguridad", "#f97316"],
-    ["moderation", "Moderación", "#a78bfa"],
+  const maximum = Math.max(1, ...charts.flatMap((point) => SERIES.filter(([key]) => visible.includes(key)).map(([key]) => point[key] || 0)));
+  const statItems = [
+    ["users", "Miembros", server.memberCount ?? 0, `${server.onlineCount ?? 0} en línea`],
+    ["customCommands", "Comandos", metrics.totalCommands ?? 0, "Actividad registrada"],
+    ["automod", "AutoMod", metrics.automodTriggers ?? 0, "Acciones registradas"],
+    ["moderation", "Moderación", metrics.moderationActions ?? 0, "Acciones registradas"],
   ];
 
-  return (
-    <div className="ov-container">
-      <div className="ov-stats-grid">
-        {[
-          [
-            "fa-terminal",
-            "Comandos",
-            metrics.totalCommands || 0,
-            "rgba(56,189,248,0.12)",
-            "#38bdf8",
-          ],
-          [
-            "fa-shield-halved",
-            "AutoMod",
-            metrics.automodTriggers || 0,
-            "rgba(103,232,249,0.12)",
-            "#67e8f9",
-          ],
-          [
-            "fa-gavel",
-            "Acciones de Mod.",
-            metrics.moderationActions || 0,
-            "rgba(245,158,11,0.12)",
-            "#f59e0b",
-          ],
-          [
-            "fa-lock",
-            "Alertas de Seguridad",
-            metrics.securityAlerts || 0,
-            "rgba(239,68,68,0.12)",
-            "#ef4444",
-          ],
-          [
-            "fa-users",
-            "Miembros",
-            server.memberCount || 0,
-            "rgba(99,102,241,0.12)",
-            "#818cf8",
-          ],
-          [
-            "fa-circle",
-            "En línea",
-            server.onlineCount || 0,
-            "rgba(16,185,129,0.12)",
-            "#10b981",
-          ],
-          [
-            "fa-bolt-lightning",
-            "Nivel de Boost",
-            `Nivel ${server.boostLevel || 0}${server.boostCount ? ` · ${server.boostCount} boosts` : ""}`,
-            "rgba(245,158,11,0.12)",
-            "#f59e0b",
-          ],
-        ].map(([icon, label, value, bg, color]) => (
-          <div key={label} className="ov-stat-card glass-panel">
-            <div className="ov-stat-icon" style={{ background: bg, color }}>
-              <i className={`fa-solid ${icon}`} />
-            </div>
-            <div className="ov-stat-info">
-              <span className="ov-stat-label">{label}</span>
-              <span className="ov-stat-value">{value}</span>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="ov-charts-row">
-        <div className="ov-chart-card glass-panel">
-          <div className="ov-chart-header">
-            <div>
-              <h3>Actividad de 7 días</h3>
-              <p className="ov-subtitle">
-                Comandos, moderación, automod y seguridad
-              </p>
-            </div>
-            <div className="ov-chart-badge">
-              <i className="fa-solid fa-arrow-trend-up" />
-              <span>7d</span>
-            </div>
-          </div>
-          <div className="pogy-bars">
-            {charts.map((point) => (
-              <div key={point.label} className="pogy-bar-day">
-                <div className="pogy-bar-stack">
-                  {series.map(([key, lbl, color]) => (
-                    <span
-                      key={key}
-                      className="pogy-bar"
-                      style={{
-                        height: `${Math.max(((point[key] || 0) / maxVal) * 100, 4)}%`,
-                        "--bar-color": color}}
-                      title={`${point.label} ${lbl}: ${point[key] || 0}`}
-                    />
-                  ))}
-                </div>
-                <span>{point.label}</span>
-              </div>
-            ))}
-          </div>
-          <div className="pogy-chart-legend">
-            {series.map(([key, lbl, color]) => (
-              <span key={key} style={{ "--legend-color": color }}>
-                <i />
-                {lbl}
-              </span>
-            ))}
-          </div>
-        </div>
-
-        <div className="ov-chart-card glass-panel">
-          <div className="ov-chart-header">
-            <div>
-              <h3>Resumen de Protección</h3>
-              <p className="ov-subtitle">Actividad del período actual</p>
-            </div>
-          </div>
-          <div
-            className="ov-ai-footer"
-            style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}
-          >
-            {[
-              [
-                "fa-terminal",
-                `${metrics.totalCommands || 0} comandos ejecutados`,
-              ],
-              ["fa-shield", `${metrics.automodTriggers || 0} alertas automod`],
-              [
-                "fa-lock",
-                `${metrics.securityAlerts || 0} alertas de seguridad`,
-              ],
-              [
-                "fa-gavel",
-                `${metrics.moderationActions || 0} acciones de moderación`,
-              ],
-              [
-                "fa-users",
-                `${server.memberCount || 0} miembros en el servidor`,
-              ],
-              [
-                "fa-bolt-lightning",
-                `Boost nivel ${server.boostLevel || 0}${server.boostCount ? ` (${server.boostCount} boosts)` : ""}`,
-              ],
-            ].map(([icon, text]) => (
-              <div key={text} className="ov-ai-footer-item">
-                <i className={`fa-solid ${icon}`} />
-                <span>{text}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="ov-bottom-row">
-        <div className="ov-activity-card glass-panel">
-          <div className="ov-chart-header">
-            <h3>Eventos Recientes</h3>
-            <span className="ov-activity-count">
-              {data.recentEvents?.length || 0} eventos
-            </span>
-          </div>
-          <div className="ov-activity-list">
-            {(data.recentEvents || []).map((e, i) => (
-              <div key={i} className="ov-activity-item">
-                <div
-                  className="ov-activity-badge"
-                  style={{
-                    background: "rgba(56,189,248,0.12)",
-                    color: "#38bdf8"}}
-                >
-                  <i className="fa-solid fa-bolt" />
-                </div>
-                <div className="ov-activity-info">
-                  <div className="ov-activity-top">
-                    <span className="ov-activity-action">{e.type}</span>
-                  </div>
-                  <span className="ov-activity-target">{e.summary}</span>
-                  <span className="ov-activity-time">
-                    {new Date(e.createdAt).toLocaleString("es")}
-                  </span>
-                </div>
-              </div>
-            ))}
-            {!data.recentEvents?.length && (
-              <div className="empty-mini">Sin eventos recientes.</div>
-            )}
-          </div>
-        </div>
-
-        <div className="ov-ai-card glass-panel">
-          <div className="ov-ai-header">
-            <div className="ov-ai-title-row">
-              <div className="ov-ai-icon-wrap">
-                <i className="fa-solid fa-gavel" />
-              </div>
-              <div>
-                <h3>Casos de Moderación</h3>
-                <p className="ov-subtitle">Historial reciente</p>
-              </div>
-            </div>
-          </div>
-          <div className="ov-activity-list">
-            {(data.recentCases || []).map((e, i) => (
-              <div key={i} className="ov-activity-item">
-                <div
-                  className="ov-activity-badge"
-                  style={{
-                    background: "rgba(245,158,11,0.12)",
-                    color: "#f59e0b"}}
-                >
-                  <i className="fa-solid fa-folder-open" />
-                </div>
-                <div className="ov-activity-info">
-                  <div className="ov-activity-top">
-                    <span className="ov-activity-action">Caso #{e.caseId}</span>
-                    <span className="ov-activity-target">{e.action}</span>
-                  </div>
-                  <span className="ov-activity-target">{e.userId}</span>
-                  <span className="ov-activity-time">
-                    {new Date(e.date).toLocaleString("es")}
-                  </span>
-                </div>
-              </div>
-            ))}
-            {!data.recentCases?.length && (
-              <div className="empty-mini">Sin casos recientes.</div>
-            )}
-          </div>
-        </div>
-      </div>
+  return <div className="cr-page cr-overview">
+    <header className="cr-heading"><div><span className="cr-eyebrow">Tu comunidad</span><h1>{server.name || "Resumen del servidor"}</h1><p>Lo que pasa en tu comunidad, a primera vista.</p></div></header>
+    <section className="cr-brand-band"><div><h2>Tu comunidad tiene quien la cuide.</h2><p>Revisa tus reglas, recibe a los nuevos y dale espacio a cada conversación.</p>{onNavigate && <button className="btn-primary" onClick={() => onNavigate("automod")}><Icon name="automod" /> Revisar protección <Icon name="arrowRight" /></button>}</div><img src={`${import.meta.env.BASE_URL}logo.png`} alt="Gato original de Cat's Bot con auricular" /></section>
+    <div className="cr-metric-strip">{statItems.map(([icon, label, value, context]) => <div className="cr-metric" key={label}><span><Icon name={icon} />{label}</span><strong>{Number(value).toLocaleString("es")}</strong><small>{context}</small></div>)}</div>
+    <div className="cr-overview-middle">
+      <section className="cr-activity"><header className="cr-section-heading"><div><h2>El pulso del servidor</h2><p>Actividad de los últimos 7 días</p></div></header>
+        {charts.length ? <div className="cr-chart" role="img" aria-label="Actividad diaria de comandos, AutoMod, seguridad y moderación"><div className="cr-chart-scale"><span>{maximum}</span><span>{Math.round(maximum / 2)}</span><span>0</span></div><div className="cr-chart-days">{charts.map((point, index) => <div className="cr-chart-day" key={`${point.label}-${index}`}><div className="cr-chart-bars">{SERIES.filter(([key]) => visible.includes(key)).map(([key, label, color]) => <span key={key} style={{ height: `${((point[key] || 0) / maximum) * 100}%`, "--cr-series": color }} aria-label={`${point.label}: ${point[key] || 0} ${label}`} title={`${point.label}: ${point[key] || 0} ${label}`} />)}</div><span>{point.label}</span></div>)}</div></div> : <p className="cr-empty-inline">Todavía no hay actividad para mostrar en este período.</p>}
+        <div className="cr-chart-legend">{SERIES.map(([key, label, color]) => <button key={key} type="button" aria-pressed={visible.includes(key)} onClick={() => setVisible((values) => values.includes(key) ? values.filter((value) => value !== key) : [...values, key])}><i style={{ background: color }} />{label}</button>)}</div>
+      </section>
+      <section><header className="cr-section-heading"><h2>Lo último que pasó</h2><span>{data.recentEvents?.length || 0} eventos</span></header><div className="cr-event-list">{(data.recentEvents || []).map((event, index) => <article className="cr-event" key={event.id || index}><span className="cr-row-icon"><Icon name="logs" /></span><div><h3>{event.type}</h3><p>{event.summary}</p><small>{event.createdAt ? new Date(event.createdAt).toLocaleString("es") : "Fecha no disponible"}</small></div></article>)}{!data.recentEvents?.length && <p className="cr-empty-inline">Sin eventos recientes. Aquí aparecerá la próxima actividad registrada.</p>}</div></section>
     </div>
-  );
+    <div className="cr-overview-bottom"><section><header className="cr-section-heading"><h2>Tu servidor, a tu manera</h2></header>{[["automod", "Automoderación", "Reglas, excepciones y registro de acciones", "Ajustar"], ["welcome", "Bienvenidas", "Mensajes, boosters e invitaciones", "Editar"], ["tickets", "Tickets", "Categorías, plantillas y atención privada", "Configurar"]].map(([id, title, description, action]) => <div className="cr-module-row" key={id}><span className="cr-row-icon"><Icon name={id} /></span><div><h3>{title}</h3><p>{description}</p></div>{onNavigate && <button className="cr-text-button" onClick={() => onNavigate(id)}>{action}<Icon name="arrowRight" /></button>}</div>)}<div className="cr-server-facts"><span><Icon name="lock" />{metrics.securityAlerts ?? 0} alertas de seguridad</span><span><Icon name="giveaways" />Boost nivel {server.boostLevel ?? 0} · {server.boostCount ?? 0} boosts</span></div></section>
+      <section><header className="cr-section-heading"><h2>Casos de moderación</h2><span>Historial reciente</span></header>{(data.recentCases || []).map((entry, index) => <article className="cr-event" key={entry.caseId || index}><span className="cr-row-icon"><Icon name="moderation" /></span><div><h3>Caso #{entry.caseId} · {entry.action}</h3><p>{entry.userId}</p><small>{entry.date ? new Date(entry.date).toLocaleString("es") : "Fecha no disponible"}</small></div></article>)}{!data.recentCases?.length && <p className="cr-empty-inline">Sin casos recientes.</p>}</section></div>
+  </div>;
 }

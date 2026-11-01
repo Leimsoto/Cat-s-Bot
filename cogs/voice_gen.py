@@ -8,14 +8,14 @@ Flujo:
   2. Cuando alguien se conecta al hub → se crea un VC nuevo con el nombre
      "{username}'s VC" en la categoría configurada.
   3. El bot mueve al usuario al VC recién creado.
-  4. Se envía un panel de control (mensaje con botones) al canal de panel
-     configurado (o al propio VC si tiene chat de texto).
-  5. El owner puede gestionar su canal con los botones del panel.
+  4. Se mantiene un único panel permanente en el canal configurado.
+  5. Cada botón resuelve el VC actual y solo permite operarlo a su owner.
   6. Cuando el VC queda vacío → se elimina automáticamente.
 """
 
 import asyncio
 import logging
+import re
 import time
 
 import discord
@@ -23,6 +23,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 
 logger = logging.getLogger(__name__)
+VOICE_CHANNEL_FOOTER_RE = re.compile(r"ID del canal:\s*(\d{15,22})")
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -32,11 +33,10 @@ def _channel_owner(db, channel_id: int) -> int | None:
 
 
 def _is_guild_admin(member: discord.abc.User | discord.Member, guild: discord.Guild | None) -> bool:
-    """True si el usuario puede administrar controles de VoiceGen.
+    """True si el usuario puede administrar VoiceGen por las rutas permitidas.
 
-    Los canales JTC tienen dueño, pero los administradores/owner del servidor
-    deben poder intervenir cualquier canal generado para desbloquear, moderar o
-    corregir configuración sin depender de la propiedad interna del canal.
+    Los botones del panel pasan ``allow_admin=False``; los comandos slash
+    conservan el bypass administrativo histórico.
     """
     if guild is None:
         return False
@@ -46,19 +46,80 @@ def _is_guild_admin(member: discord.abc.User | discord.Member, guild: discord.Gu
     return bool(perms and perms.administrator)
 
 
-async def _assert_owner(interaction: discord.Interaction, db) -> bool:
-    if not interaction.user.voice or not interaction.user.voice.channel:
-        await interaction.response.send_message("❌ Debes estar en tu canal de voz.", ephemeral=True)
-        return False
-    channel_id = interaction.user.voice.channel.id
-    owner_id = _channel_owner(db, channel_id)
-    if owner_id != interaction.user.id and not _is_guild_admin(interaction.user, interaction.guild):
+async def _authorized_channel(
+    interaction: discord.Interaction,
+    db,
+    channel_id: int | None = None,
+    *,
+    allow_admin: bool = True,
+):
+    """Devuelve un VC generado si el actor puede administrarlo."""
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("❌ Servidor no disponible.", ephemeral=True)
+        return None
+    if channel_id is None:
+        voice = getattr(interaction.user, "voice", None)
+        channel = getattr(voice, "channel", None)
+        if channel is None:
+            await interaction.response.send_message(
+                "❌ Debes estar en un canal de voz generado.", ephemeral=True
+            )
+            return None
+    else:
+        channel = guild.get_channel(int(channel_id))
+    row = db.get_voice_gen_channel(channel.id) if channel is not None else None
+    if channel is None or (row is not None and int(row["guild_id"]) != int(guild.id)):
+        await interaction.response.send_message(
+            "❌ El canal de voz ya no está disponible.", ephemeral=True
+        )
+        return None
+    if row is None:
+        await interaction.response.send_message(
+            "❌ Este canal de voz no fue creado por el bot.", ephemeral=True
+        )
+        return None
+    owner_id = row["owner_id"]
+    is_admin = allow_admin and _is_guild_admin(interaction.user, guild)
+    if owner_id != interaction.user.id and not is_admin:
         await interaction.response.send_message("❌ Solo el dueño del canal puede hacer esto.", ephemeral=True)
-        return False
-    return True
+        return None
+    return channel
+
+
+async def _assert_owner(
+    interaction: discord.Interaction,
+    db,
+    channel_id: int | None = None,
+) -> bool:
+    return await _authorized_channel(interaction, db, channel_id) is not None
+
+
+def _ban_target_error(actor: discord.Member, target: discord.Member, guild: discord.Guild) -> str | None:
+    if actor.id == target.id:
+        return "❌ No puedes banearte a ti mismo."
+
+    actor_is_owner = actor.id == guild.owner_id
+    target_perms = getattr(target, "guild_permissions", None)
+    if not actor_is_owner:
+        if target.id == guild.owner_id or bool(target_perms and target_perms.administrator):
+            return "❌ No puedes banear al owner o a un administrador del servidor."
+        if target.top_role >= actor.top_role:
+            return "❌ No puedes banear a un miembro con jerarquía igual o superior."
+
+    bot_member = guild.me
+    if bot_member is None or target.top_role >= bot_member.top_role:
+        return "❌ No puedo gestionar a ese miembro por la jerarquía de roles."
+    return None
 
 
 # ─── Panel de control: botones ───────────────────────────────────────────────
+
+async def _update_permissions(channel, target, **changes):
+    overwrite = channel.overwrites_for(target)
+    overwrite.update(**changes)
+    await channel.set_permissions(target, overwrite=overwrite)
+
 
 class VCControlView(discord.ui.View):
     """Vista persistente con todos los controles del VC."""
@@ -67,83 +128,97 @@ class VCControlView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
 
+    async def _channel(self, interaction: discord.Interaction):
+        return await _authorized_channel(
+            interaction,
+            self.cog.db,
+            allow_admin=False,
+        )
+
     # ── Fila 1: Visibilidad ──────────────────────────────────────────────────
 
     @discord.ui.button(emoji="🔒", label="Bloquear", style=discord.ButtonStyle.secondary, custom_id="vc:lock", row=0)
     async def lock(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        vc = interaction.user.voice.channel
-        await vc.set_permissions(interaction.guild.default_role, connect=False)
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await _update_permissions(vc, vc.guild.default_role, connect=False)
         await interaction.response.send_message("🔒 Canal bloqueado.", ephemeral=True)
 
     @discord.ui.button(emoji="🔓", label="Desbloquear", style=discord.ButtonStyle.secondary, custom_id="vc:unlock", row=0)
     async def unlock(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        vc = interaction.user.voice.channel
-        await vc.set_permissions(interaction.guild.default_role, connect=None)
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await _update_permissions(vc, vc.guild.default_role, connect=None)
         await interaction.response.send_message("🔓 Canal desbloqueado.", ephemeral=True)
 
     @discord.ui.button(emoji="🫥", label="Ocultar", style=discord.ButtonStyle.secondary, custom_id="vc:hide", row=0)
     async def hide(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        vc = interaction.user.voice.channel
-        await vc.set_permissions(interaction.guild.default_role, view_channel=False)
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await _update_permissions(vc, vc.guild.default_role, view_channel=False)
         await interaction.response.send_message("🫥 Canal oculto.", ephemeral=True)
 
     @discord.ui.button(emoji="👁️", label="Mostrar", style=discord.ButtonStyle.secondary, custom_id="vc:unhide", row=0)
     async def unhide(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        vc = interaction.user.voice.channel
-        await vc.set_permissions(interaction.guild.default_role, view_channel=None)
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await _update_permissions(vc, vc.guild.default_role, view_channel=None)
         await interaction.response.send_message("👁️ Canal visible.", ephemeral=True)
 
     # ── Fila 2: Usuarios ────────────────────────────────────────────────────
 
     @discord.ui.button(emoji="👥", label="Límite", style=discord.ButtonStyle.secondary, custom_id="vc:limit", row=1)
     async def limit(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        await interaction.response.send_modal(LimitModal(self.cog))
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await interaction.response.send_modal(LimitModal(self.cog, vc.id))
 
     @discord.ui.button(emoji="📩", label="Invitar", style=discord.ButtonStyle.secondary, custom_id="vc:invite", row=1)
     async def invite(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        vc = interaction.user.voice.channel
+        vc = await self._channel(interaction)
+        if vc is None: return
         inv = await vc.create_invite(max_age=3600, max_uses=10)
         await interaction.response.send_message(f"📩 Enlace de invitación (expira en 1h, máx. 10 usos):\n{inv.url}", ephemeral=True)
 
     @discord.ui.button(emoji="🚫", label="Banear", style=discord.ButtonStyle.danger, custom_id="vc:ban", row=1)
     async def ban(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        await interaction.response.send_modal(BanModal(self.cog))
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await interaction.response.send_modal(BanModal(self.cog, vc.id))
 
     @discord.ui.button(emoji="✅", label="Permitir", style=discord.ButtonStyle.success, custom_id="vc:permit", row=1)
     async def permit(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        await interaction.response.send_modal(PermitModal(self.cog))
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await interaction.response.send_modal(PermitModal(self.cog, vc.id))
 
     # ── Fila 3: Canal ───────────────────────────────────────────────────────
 
     @discord.ui.button(emoji="✏️", label="Renombrar", style=discord.ButtonStyle.secondary, custom_id="vc:rename", row=2)
     async def rename(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        await interaction.response.send_modal(RenameModal(self.cog))
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await interaction.response.send_modal(RenameModal(self.cog, vc.id))
 
     @discord.ui.button(emoji="🎵", label="Bitrate", style=discord.ButtonStyle.secondary, custom_id="vc:bitrate", row=2)
     async def bitrate(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        await interaction.response.send_modal(BitrateModal(self.cog))
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await interaction.response.send_modal(BitrateModal(self.cog, vc.id))
 
     @discord.ui.button(emoji="🌍", label="Región", style=discord.ButtonStyle.secondary, custom_id="vc:region", row=2)
     async def region(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        await interaction.response.send_modal(RegionModal(self.cog))
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await interaction.response.send_modal(RegionModal(self.cog, vc.id))
 
     # ── Fila 4: Propiedad ────────────────────────────────────────────────────
 
     @discord.ui.button(emoji="👑", label="Ceder", style=discord.ButtonStyle.primary, custom_id="vc:transfer", row=3)
     async def transfer(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await _assert_owner(interaction, self.cog.db): return
-        await interaction.response.send_modal(TransferModal(self.cog))
+        vc = await self._channel(interaction)
+        if vc is None: return
+        await interaction.response.send_modal(TransferModal(self.cog, vc.id))
 
     @discord.ui.button(emoji="🏴", label="Reclamar", style=discord.ButtonStyle.primary, custom_id="vc:claim", row=3)
     async def claim(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -152,7 +227,7 @@ class VCControlView(discord.ui.View):
             return
         vc = interaction.user.voice.channel
         row = self.cog.db.get_voice_gen_channel(vc.id)
-        if not row:
+        if not row or int(row["guild_id"]) != int(interaction.guild.id):
             await interaction.response.send_message("❌ Este canal no es un VC generado.", ephemeral=True)
             return
         # Solo se puede reclamar si el dueño actual NO está en el canal
@@ -170,40 +245,79 @@ class VCControlView(discord.ui.View):
 class LimitModal(discord.ui.Modal, title="Límite de usuarios"):
     limit = discord.ui.TextInput(label="Máximo de usuarios (0 = ilimitado)", placeholder="0–99", max_length=2)
 
-    def __init__(self, cog): super().__init__(); self.cog = cog
+    def __init__(self, cog, channel_id: int):
+        super().__init__(); self.cog = cog; self.channel_id = int(channel_id)
 
     async def on_submit(self, interaction: discord.Interaction):
+        vc = await _authorized_channel(
+            interaction, self.cog.db, self.channel_id, allow_admin=False
+        )
+        if vc is None: return
         try:
             n = int(self.limit.value)
             if not 0 <= n <= 99: raise ValueError
         except ValueError:
             return await interaction.response.send_message("❌ Valor inválido (0–99).", ephemeral=True)
-        await interaction.user.voice.channel.edit(user_limit=n)
+        await vc.edit(user_limit=n)
         await interaction.response.send_message(f"👥 Límite establecido: **{n if n else 'ilimitado'}**.", ephemeral=True)
 
 
 class RenameModal(discord.ui.Modal, title="Renombrar canal"):
     name = discord.ui.TextInput(label="Nuevo nombre", max_length=100)
 
-    def __init__(self, cog): super().__init__(); self.cog = cog
+    def __init__(self, cog, channel_id: int):
+        super().__init__(); self.cog = cog; self.channel_id = int(channel_id)
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.user.voice.channel.edit(name=self.name.value)
+        vc = await _authorized_channel(
+            interaction, self.cog.db, self.channel_id, allow_admin=False
+        )
+        if vc is None: return
+        await vc.edit(name=self.name.value)
         await interaction.response.send_message(f"✏️ Canal renombrado a **{self.name.value}**.", ephemeral=True)
 
 
 class BitrateModal(discord.ui.Modal, title="Bitrate de audio"):
-    bitrate = discord.ui.TextInput(label="Bitrate en kbps (8–384)", placeholder="96", max_length=3)
+    bitrate = discord.ui.TextInput(label="Bitrate en kbps", placeholder="Ej. 96", max_length=3)
 
-    def __init__(self, cog): super().__init__(); self.cog = cog
+    def __init__(self, cog, channel_id: int):
+        super().__init__(); self.cog = cog; self.channel_id = int(channel_id)
 
     async def on_submit(self, interaction: discord.Interaction):
+        channel = await _authorized_channel(
+            interaction, self.cog.db, self.channel_id, allow_admin=False
+        )
+        if channel is None: return
+        guild_limit_bps = int(getattr(interaction.guild, "bitrate_limit", 96_000) or 96_000)
+        max_kbps = min(384, max(8, guild_limit_bps // 1000))
         try:
             n = int(self.bitrate.value)
-            if not 8 <= n <= 384: raise ValueError
+            if not 8 <= n <= max_kbps:
+                raise ValueError
         except ValueError:
-            return await interaction.response.send_message("❌ Valor inválido (8–384).", ephemeral=True)
-        await interaction.user.voice.channel.edit(bitrate=n * 1000)
+            return await interaction.response.send_message(
+                f"❌ Valor inválido. Este servidor permite **8–{max_kbps} kbps**.",
+                ephemeral=True,
+            )
+
+        try:
+            await channel.edit(bitrate=n * 1000)
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "❌ No tengo permiso para cambiar el bitrate de este canal.",
+                ephemeral=True,
+            )
+        except discord.HTTPException as exc:
+            logger.warning(
+                "No se pudo cambiar bitrate en guild=%s channel=%s: %s",
+                getattr(interaction.guild, "id", "?"),
+                getattr(channel, "id", "?"),
+                exc,
+            )
+            return await interaction.response.send_message(
+                f"❌ Discord rechazó el bitrate. Límite actual: **{max_kbps} kbps**.",
+                ephemeral=True,
+            )
         await interaction.response.send_message(f"🎵 Bitrate: **{n} kbps**.", ephemeral=True)
 
 
@@ -214,12 +328,17 @@ class RegionModal(discord.ui.Modal, title="Región del servidor de voz"):
         max_length=30,
     )
 
-    def __init__(self, cog): super().__init__(); self.cog = cog
+    def __init__(self, cog, channel_id: int):
+        super().__init__(); self.cog = cog; self.channel_id = int(channel_id)
 
     async def on_submit(self, interaction: discord.Interaction):
+        vc = await _authorized_channel(
+            interaction, self.cog.db, self.channel_id, allow_admin=False
+        )
+        if vc is None: return
         val = None if self.region.value.lower() == "auto" else self.region.value.lower()
         try:
-            await interaction.user.voice.channel.edit(rtc_region=val)
+            await vc.edit(rtc_region=val)
         except discord.HTTPException as e:
             return await interaction.response.send_message(f"❌ Región inválida: {e}", ephemeral=True)
         await interaction.response.send_message(f"🌍 Región: **{val or 'automática'}**.", ephemeral=True)
@@ -228,17 +347,24 @@ class RegionModal(discord.ui.Modal, title="Región del servidor de voz"):
 class BanModal(discord.ui.Modal, title="Banear usuario del canal"):
     user_id = discord.ui.TextInput(label="ID de Discord del usuario", placeholder="123456789012345678", max_length=20)
 
-    def __init__(self, cog): super().__init__(); self.cog = cog
+    def __init__(self, cog, channel_id: int):
+        super().__init__(); self.cog = cog; self.channel_id = int(channel_id)
 
     async def on_submit(self, interaction: discord.Interaction):
+        vc = await _authorized_channel(
+            interaction, self.cog.db, self.channel_id, allow_admin=False
+        )
+        if vc is None: return
         try:
             uid = int(self.user_id.value)
             member = interaction.guild.get_member(uid)
             if not member: raise ValueError
         except (ValueError, TypeError):
             return await interaction.response.send_message("❌ ID de usuario inválido.", ephemeral=True)
-        vc = interaction.user.voice.channel
-        await vc.set_permissions(member, connect=False, view_channel=False)
+        error = _ban_target_error(interaction.user, member, interaction.guild)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+        await _update_permissions(vc, member, connect=False, view_channel=False)
         if member.voice and member.voice.channel == vc:
             await member.move_to(None)
         await interaction.response.send_message(f"🚫 **{member.display_name}** baneado del canal.", ephemeral=True)
@@ -247,33 +373,41 @@ class BanModal(discord.ui.Modal, title="Banear usuario del canal"):
 class PermitModal(discord.ui.Modal, title="Permitir usuario en el canal"):
     user_id = discord.ui.TextInput(label="ID de Discord del usuario", placeholder="123456789012345678", max_length=20)
 
-    def __init__(self, cog): super().__init__(); self.cog = cog
+    def __init__(self, cog, channel_id: int):
+        super().__init__(); self.cog = cog; self.channel_id = int(channel_id)
 
     async def on_submit(self, interaction: discord.Interaction):
+        vc = await _authorized_channel(
+            interaction, self.cog.db, self.channel_id, allow_admin=False
+        )
+        if vc is None: return
         try:
             uid = int(self.user_id.value)
             member = interaction.guild.get_member(uid)
             if not member: raise ValueError
         except (ValueError, TypeError):
             return await interaction.response.send_message("❌ ID de usuario inválido.", ephemeral=True)
-        vc = interaction.user.voice.channel
-        await vc.set_permissions(member, connect=True, view_channel=True)
+        await _update_permissions(vc, member, connect=True, view_channel=True)
         await interaction.response.send_message(f"✅ **{member.display_name}** puede conectarse.", ephemeral=True)
 
 
 class TransferModal(discord.ui.Modal, title="Transferir propiedad"):
     user_id = discord.ui.TextInput(label="ID del nuevo dueño", placeholder="123456789012345678", max_length=20)
 
-    def __init__(self, cog): super().__init__(); self.cog = cog
+    def __init__(self, cog, channel_id: int):
+        super().__init__(); self.cog = cog; self.channel_id = int(channel_id)
 
     async def on_submit(self, interaction: discord.Interaction):
+        vc = await _authorized_channel(
+            interaction, self.cog.db, self.channel_id, allow_admin=False
+        )
+        if vc is None: return
         try:
             uid = int(self.user_id.value)
             member = interaction.guild.get_member(uid)
             if not member: raise ValueError
         except (ValueError, TypeError):
             return await interaction.response.send_message("❌ ID de usuario inválido.", ephemeral=True)
-        vc = interaction.user.voice.channel
         self.cog.db.update_voice_gen_channel_owner(vc.id, member.id)
         await vc.edit(name=f"{member.display_name}'s VC")
         await interaction.response.send_message(f"👑 Propiedad transferida a **{member.display_name}**.", ephemeral=True)
@@ -287,6 +421,9 @@ class VoiceGen(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = bot.db  # type: ignore
+        self._delete_locks: dict[int, asyncio.Lock] = {}
+        self._panel_locks: dict[int, asyncio.Lock] = {}
+        self._legacy_panel_swept: set[int] = set()
         self._cleanup.start()
 
     def cog_unload(self):
@@ -306,14 +443,20 @@ class VoiceGen(commands.Cog):
                 continue
             channel = guild.get_channel(row["channel_id"])
             if channel is None:
-                self.db.delete_voice_gen_channel(row["channel_id"])
+                await self._remove_generated_channel(guild, row, None)
                 continue
             if len(channel.members) == 0:
-                try:
-                    await channel.delete(reason="VoiceGen: canal vacío")
-                except discord.NotFound:
-                    pass
-                self.db.delete_voice_gen_channel(row["channel_id"])
+                await self._remove_generated_channel(guild, row, channel)
+
+        # Mantener un único panel permanente por servidor y retirar los paneles
+        # antiguos que estaban vinculados a cada VC individual.
+        for guild in self.bot.guilds:
+            cfg = self.db.get_voice_gen_config(guild.id)
+            if cfg.get("enabled") and int(cfg.get("auto_send_panel", 1) or 0):
+                await self.send_panel(guild)
+            if guild.id not in self._legacy_panel_swept:
+                if await self._cleanup_legacy_panels(guild):
+                    self._legacy_panel_swept.add(guild.id)
 
     @_cleanup.before_loop
     async def _before_cleanup(self):
@@ -337,13 +480,146 @@ class VoiceGen(commands.Cog):
 
         # ── Si salió de un canal generado → limpiar si está vacío ───────────
         if before.channel and before.channel != after.channel:
-            if self.db.get_voice_gen_channel(before.channel.id):
+            row = self.db.get_voice_gen_channel(before.channel.id)
+            if row:
                 if len(before.channel.members) == 0:
+                    await self._remove_generated_channel(guild, row, before.channel)
+
+    @commands.Cog.listener()
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
+        """Limpia referencias si se elimina un VC o el canal del panel."""
+        row = self.db.get_voice_gen_channel(channel.id)
+        if row:
+            await self._remove_generated_channel(channel.guild, row, None)
+        cfg = self.db.get_voice_gen_config(channel.guild.id)
+        if int(cfg.get("panel_message_channel_id") or 0) == int(channel.id):
+            self.db.set_voice_gen_config(
+                channel.guild.id,
+                panel_message_channel_id=None,
+                panel_message_id=None,
+            )
+
+    def _delete_lock(self, channel_id: int) -> asyncio.Lock:
+        lock = self._delete_locks.get(channel_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._delete_locks[channel_id] = lock
+        return lock
+
+    def _panel_lock(self, guild_id: int) -> asyncio.Lock:
+        lock = self._panel_locks.get(guild_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._panel_locks[guild_id] = lock
+        return lock
+
+    async def _resolve_panel_channel(self, guild: discord.Guild, channel_id: int | None):
+        if not channel_id:
+            return None
+        channel = guild.get_channel(int(channel_id))
+        if channel is not None:
+            return channel
+        try:
+            return await guild.fetch_channel(int(channel_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
+    @staticmethod
+    def _panel_voice_channel_id(message) -> int | None:
+        for embed in getattr(message, "embeds", ()):
+            footer_text = getattr(getattr(embed, "footer", None), "text", None) or ""
+            match = VOICE_CHANNEL_FOOTER_RE.search(footer_text)
+            if match:
+                return int(match.group(1))
+        return None
+
+    async def _cleanup_legacy_panels(self, guild: discord.Guild) -> bool:
+        cfg = self.db.get_voice_gen_config(guild.id)
+        rows = self.db.get_voice_gen_channels_by_guild(guild.id)
+        panel_channel_ids = {
+            int(channel_id)
+            for channel_id in (
+                cfg.get("panel_channel_id"),
+                *(row.get("panel_channel_id") for row in rows),
+            )
+            if channel_id
+        }
+        if not panel_channel_ids:
+            return True
+        permanent_message_id = int(cfg.get("panel_message_id") or 0)
+        deleted_message_ids: set[int] = set()
+
+        # Las versiones recientes del flujo por-VC sí persistían cada mensaje;
+        # eliminarlos por ID evita depender del límite del historial.
+        for row in rows:
+            message_id = int(row.get("panel_message_id") or 0)
+            channel_id = int(row.get("panel_channel_id") or 0)
+            if not message_id or message_id == permanent_message_id or not channel_id:
+                continue
+            panel_channel = await self._resolve_panel_channel(guild, channel_id)
+            if panel_channel is None or not hasattr(panel_channel, "fetch_message"):
+                return False
+            try:
+                legacy_message = await panel_channel.fetch_message(message_id)
+                await legacy_message.delete()
+                deleted_message_ids.add(message_id)
+            except discord.NotFound:
+                deleted_message_ids.add(message_id)
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                logger.warning("VoiceGen: no se pudo borrar el panel antiguo %s: %s", message_id, exc)
+                return False
+
+        for panel_channel_id in panel_channel_ids:
+            panel_channel = await self._resolve_panel_channel(guild, panel_channel_id)
+            history = getattr(panel_channel, "history", None) if panel_channel else None
+            if not callable(history):
+                return False
+            try:
+                async for message in history(limit=200):
+                    if getattr(getattr(message, "author", None), "id", None) != getattr(self.bot.user, "id", None):
+                        continue
+                    if int(getattr(message, "id", 0)) == permanent_message_id:
+                        continue
+                    if int(getattr(message, "id", 0)) in deleted_message_ids:
+                        continue
+                    if self._panel_voice_channel_id(message) is None:
+                        continue
                     try:
-                        await before.channel.delete(reason="VoiceGen: canal vacío")
-                    except (discord.NotFound, discord.Forbidden):
-                        pass
-                    self.db.delete_voice_gen_channel(before.channel.id)
+                        await message.delete()
+                    except discord.NotFound:
+                        continue
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                logger.warning("VoiceGen: no se pudieron limpiar paneles antiguos en %s: %s", guild.id, exc)
+                return False
+
+        for row in rows:
+            if row.get("panel_channel_id") or row.get("panel_message_id"):
+                self.db.update_voice_gen_channel_panel(row["channel_id"], None, None)
+        return True
+
+    async def _remove_generated_channel(
+        self,
+        guild: discord.Guild,
+        row: dict,
+        voice_channel,
+    ) -> bool:
+        """Borra el VC generado y su fila sin tocar el panel permanente."""
+        channel_id = int(row["channel_id"])
+        async with self._delete_lock(channel_id):
+            current = self.db.get_voice_gen_channel(channel_id)
+            if current is None:
+                return False
+            if voice_channel is not None:
+                try:
+                    await voice_channel.delete(reason="VoiceGen: canal vacío")
+                except discord.NotFound:
+                    pass
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    logger.warning("VoiceGen: no se pudo borrar VC %s: %s", channel_id, exc)
+                    return False
+            self.db.delete_voice_gen_channel(channel_id)
+            self._delete_locks.pop(channel_id, None)
+            return True
 
     async def _create_vc(self, member: discord.Member, cfg: dict):
         guild = member.guild
@@ -385,11 +661,11 @@ class VoiceGen(commands.Cog):
 
         # Panel automático (si no está desactivado por config).
         if int(cfg.get("auto_send_panel", 1) or 0):
-            await self.send_panel(guild, vc)
+            await self.send_panel(guild)
 
-    async def send_panel(self, guild: discord.Guild, vc: discord.VoiceChannel, force: bool = False) -> bool:
+    async def send_panel(self, guild: discord.Guild, force: bool = False) -> bool:
         """
-        Envía el panel de control al canal de panel configurado.
+        Publica o mantiene el único panel de control permanente del servidor.
 
         Toma la configuración en este orden:
           1. ``panel_embed_data``: JSON con la forma de MessageEditor
@@ -398,28 +674,26 @@ class VoiceGen(commands.Cog):
           2. Fallback a los campos sueltos: ``panel_title``,
              ``panel_description``, ``panel_color``.
 
-        Si ``force=False``, respeta ``auto_send_panel``. ``force=True`` lo manda
-        igual (usado por el endpoint ``resend-panel`` desde el dashboard).
+        Si ``force=False``, respeta ``auto_send_panel``. ``force=True`` también
+        actualiza el mensaje existente (usado desde el dashboard).
 
         Variables soportadas en title/description/footer/author:
           ``{channel}``, ``{owner}``, ``{guild}``, ``{channel_id}``.
+        Las variables históricas de canal/owner ahora son etiquetas genéricas:
+        el VC concreto se resuelve cuando el usuario pulsa un botón.
         """
         cfg = self.db.get_voice_gen_config(guild.id)
+        if not force and not int(cfg.get("auto_send_panel", 1) or 0):
+            return False
         panel_ch_id = cfg.get("panel_channel_id")
-        panel_ch = guild.get_channel(panel_ch_id) if panel_ch_id else None
+        panel_ch = await self._resolve_panel_channel(guild, panel_ch_id)
         if not panel_ch or not isinstance(panel_ch, discord.TextChannel):
             return False
 
-        # Resolver el dueño desde la tabla.
-        row = self.db.get_voice_gen_channel(vc.id) or {}
-        owner_id = int(row.get("owner_id", 0)) or 0
-        owner = guild.get_member(owner_id) if owner_id else None
-        owner_str = owner.mention if owner else (f"<@{owner_id}>" if owner_id else "el dueño")
-
         variables = {
-            "channel": vc.name,
-            "channel_id": vc.id,
-            "owner": owner_str,
+            "channel": "tu canal de voz",
+            "channel_id": "detectado automáticamente",
+            "owner": "propietario del canal",
             "guild": guild.name,
         }
 
@@ -465,11 +739,11 @@ class VoiceGen(commands.Cog):
                 )
             if emb.get("footer") or emb.get("footer_icon"):
                 embed.set_footer(
-                    text=fmt(emb.get("footer") or f"ID del canal: {vc.id}"),
+                    text=fmt(emb.get("footer") or "Control permanente de VoiceChat"),
                     icon_url=emb.get("footer_icon") or None,
                 )
             else:
-                embed.set_footer(text=f"ID del canal: {vc.id}")
+                embed.set_footer(text="Los controles se aplican a tu VC actual")
             if emb.get("image"):
                 embed.set_image(url=emb["image"])
             if emb.get("thumbnail"):
@@ -481,11 +755,12 @@ class VoiceGen(commands.Cog):
 
         if embed is None and content is None:
             # Fallback legacy.
-            title = cfg.get("panel_title") or "Tu canal de voz está listo"
+            title = cfg.get("panel_title") or "Panel de control de VoiceChat"
             desc_template = cfg.get("panel_description") or (
-                "**{owner}** — Bienvenido a **{channel}**\n\n"
-                "Usa los botones de abajo para configurar tu canal.\n"
-                "El canal se eliminará automáticamente cuando esté vacío."
+                "Entra en un canal temporal creado por el bot y usa los botones "
+                "para configurarlo.\n\n"
+                "Solo el propietario puede aplicar los ajustes. El canal se "
+                "eliminará automáticamente cuando quede vacío."
             )
             desc = fmt(desc_template)
             color_str = (cfg.get("panel_color") or "").lstrip("#").strip()
@@ -494,14 +769,93 @@ class VoiceGen(commands.Cog):
             except ValueError:
                 color = 0x7c3aed
             embed = discord.Embed(title=fmt(title), description=desc, color=color)
-            embed.set_footer(text=f"ID del canal: {vc.id}")
+            embed.set_footer(text="Los controles se aplican a tu VC actual")
 
-        try:
-            await panel_ch.send(content=content, embed=embed, view=VCControlView(self))
+        async with self._panel_lock(guild.id):
+            cfg = self.db.get_voice_gen_config(guild.id)
+            old_message_id = int(cfg.get("panel_message_id") or 0)
+            old_channel_id = int(
+                cfg.get("panel_message_channel_id") or cfg.get("panel_channel_id") or 0
+            )
+            old_channel = await self._resolve_panel_channel(guild, old_channel_id)
+            old_message = None
+            if old_message_id and old_channel and hasattr(old_channel, "fetch_message"):
+                try:
+                    old_message = await old_channel.fetch_message(old_message_id)
+                except discord.NotFound:
+                    old_message = None
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    logger.warning(
+                        "VoiceGen: no se pudo consultar el panel permanente %s: %s",
+                        old_message_id,
+                        exc,
+                    )
+                    return False
+
+            if old_message is not None and int(old_channel.id) == int(panel_ch.id) and not force:
+                return True
+
+            from cogs._managed_messages import manage_payload
+            payload = await manage_payload(self.bot, guild.id, {"content": content, "embed": embed},
+                                           enabled=msg_data.get("ai_managed") is True if msg_data else None,
+                                           category="voice_gen", protected=variables.values())
+            content, embed = payload["content"], payload["embed"]
+
+            if old_message is not None and int(old_channel.id) == int(panel_ch.id):
+                try:
+                    await old_message.edit(
+                        content=content,
+                        embed=embed,
+                        view=VCControlView(self),
+                    )
+                    return True
+                except discord.NotFound:
+                    # Fue eliminado entre fetch y edit: recrearlo debajo.
+                    old_message = None
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    logger.warning("VoiceGen: no se pudo actualizar el panel permanente: %s", exc)
+                    return False
+
+            try:
+                message = await panel_ch.send(
+                    content=content,
+                    embed=embed,
+                    view=VCControlView(self),
+                )
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                logger.warning("VoiceGen: no se pudo publicar el panel en %s: %s", panel_ch, exc)
+                return False
+
+            if old_message is not None:
+                try:
+                    await old_message.delete()
+                except discord.NotFound:
+                    pass
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    logger.warning(
+                        "VoiceGen: no se pudo retirar el panel permanente anterior: %s",
+                        exc,
+                    )
+                    try:
+                        await message.delete()
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        pass
+                    return False
+
+            try:
+                self.db.set_voice_gen_config(
+                    guild.id,
+                    panel_message_channel_id=panel_ch.id,
+                    panel_message_id=message.id,
+                )
+            except Exception:
+                try:
+                    await message.delete()
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+                logger.exception("VoiceGen: no se pudo persistir el panel permanente")
+                return False
             return True
-        except discord.Forbidden:
-            logger.warning("VoiceGen: sin permisos para enviar panel en %s", panel_ch)
-            return False
 
     # ─── Comandos slash /vc ──────────────────────────────────────────────────
 
@@ -513,13 +867,13 @@ class VoiceGen(commands.Cog):
     @vc_group.command(name="lock", description="Bloquear el canal a nuevas conexiones")
     async def vc_lock(self, interaction: discord.Interaction):
         if not await _assert_owner(interaction, self.db): return
-        await interaction.user.voice.channel.set_permissions(interaction.guild.default_role, connect=False)
+        await _update_permissions(interaction.user.voice.channel, interaction.guild.default_role, connect=False)
         await interaction.response.send_message("Canal bloqueado.", ephemeral=True)
 
     @vc_group.command(name="unlock", description="Permitir que cualquiera se conecte")
     async def vc_unlock(self, interaction: discord.Interaction):
         if not await _assert_owner(interaction, self.db): return
-        await interaction.user.voice.channel.set_permissions(interaction.guild.default_role, connect=None)
+        await _update_permissions(interaction.user.voice.channel, interaction.guild.default_role, connect=None)
         await interaction.response.send_message("🔓 Canal desbloqueado.", ephemeral=True)
 
     @vc_group.command(name="limit", description="Establecer el límite de usuarios")
@@ -542,8 +896,11 @@ class VoiceGen(commands.Cog):
     @app_commands.describe(usuario="Usuario a banear")
     async def vc_ban(self, interaction: discord.Interaction, usuario: discord.Member):
         if not await _assert_owner(interaction, self.db): return
+        error = _ban_target_error(interaction.user, usuario, interaction.guild)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
         vc = interaction.user.voice.channel
-        await vc.set_permissions(usuario, connect=False, view_channel=False)
+        await _update_permissions(vc, usuario, connect=False, view_channel=False)
         if usuario.voice and usuario.voice.channel == vc:
             await usuario.move_to(None)
         await interaction.response.send_message(f"🚫 **{usuario.display_name}** baneado.", ephemeral=True)
@@ -553,7 +910,7 @@ class VoiceGen(commands.Cog):
     async def vc_permit(self, interaction: discord.Interaction, usuario: discord.Member):
         if not await _assert_owner(interaction, self.db): return
         vc = interaction.user.voice.channel
-        await vc.set_permissions(usuario, connect=True, view_channel=True)
+        await _update_permissions(vc, usuario, connect=True, view_channel=True)
         await interaction.response.send_message(f"✅ **{usuario.display_name}** puede conectarse.", ephemeral=True)
 
     @vc_group.command(name="claim", description="Reclamar la propiedad de un canal abandonado")
