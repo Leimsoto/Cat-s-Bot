@@ -33,6 +33,7 @@ const NAV_SECTIONS = [
     items: [
       { id: "autoroles", icon: ICONS.autoroles, label: "Autoroles" },
       { id: "autoresponses", icon: ICONS.autoresponses, label: "Auto-Respuestas" },
+      { id: "autoreactions", icon: "fa-face-smile", label: "Autorreacciones" },
       { id: "custom-commands", icon: ICONS.customCommands, label: "Comandos Custom" },
     ]},
   {

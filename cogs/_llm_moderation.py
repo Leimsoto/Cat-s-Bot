@@ -31,6 +31,13 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 IMAGE_MIMES = {"image/png", "image/jpeg", "image/webp"}
 
 
+class EndpointIncompleteResponse(ValueError):
+    """Safe completion metadata; never retain the rejected text or provider body."""
+    def __init__(self, reason):
+        super().__init__("endpoint_incomplete_response")
+        self.reason = reason if isinstance(reason, str) and reason in {"length", "max_output_tokens", "content_filter"} else "unknown"
+
+
 class UnsupportedToolsError(ValueError):
     """The endpoint explicitly rejected tool support; contains no provider response."""
 
@@ -174,11 +181,18 @@ async def request_completion(session, cfg, messages, *, moderation=False, tools=
     transport_options = {"timeout_seconds": timeout_seconds} if timeout_seconds is not None and not moderation else {}
     result = await endpoint_json(session, cfg, payload, **transport_options)
     if is_responses:
-        choice, replay_items = response_choice(result)
+        try:
+            choice, replay_items = response_choice(result)
+        except ValueError as exc:
+            if str(exc) != "endpoint_incomplete_response":
+                raise
+            details = result.get("incomplete_details") if isinstance(result, dict) else None
+            reason = details.get("reason") if isinstance(details, dict) else None
+            raise EndpointIncompleteResponse(reason) from None
     else:
         choice = result["choices"][0]
     if choice.get("finish_reason") not in ((None, "stop", "tool_calls") if structured and tools else (None, "stop")):
-        raise ValueError("endpoint_incomplete_response")
+        raise EndpointIncompleteResponse(choice.get("finish_reason"))
     content = choice["message"].get("content")
     if structured:
         calls = choice["message"].get("tool_calls") or []

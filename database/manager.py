@@ -59,6 +59,7 @@ VALID_CHANNEL_CONFIG_COLUMNS = frozenset(
         "media_only",
         "media_config",
         "auto_react",
+        "auto_react_enabled",
         "slowmode",
     }
 )
@@ -1579,6 +1580,7 @@ class DatabaseManager:
         "media_only": 0,
         "media_config": None,
         "auto_react": None,
+        "auto_react_enabled": 1,
         "slowmode": 0,
     }
 
@@ -2452,6 +2454,11 @@ class DatabaseManager:
             21,
             "guild_config: message_role_notice",
             "ALTER TABLE guild_config ADD COLUMN message_role_notice TEXT DEFAULT 'Necesitas el rol requerido para hablar en este servidor.'",
+        ),
+        (
+            22,
+            "channel_config: activar o pausar autorreacciones sin perder emojis",
+            "ALTER TABLE channel_config ADD COLUMN auto_react_enabled INTEGER DEFAULT 1",
         ),
     ]
 
@@ -3910,8 +3917,8 @@ class DatabaseManager:
         for col, val in kwargs.items():
             ops.append(
                 (
-                    f"UPDATE channel_config SET {col} = ? WHERE channel_id = ?",
-                    (val, channel_id),
+                    f"UPDATE channel_config SET {col} = ? WHERE channel_id = ? AND guild_id = ?",
+                    (val, channel_id, guild_id),
                 )
             )
 

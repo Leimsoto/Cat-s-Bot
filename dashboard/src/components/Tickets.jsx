@@ -595,6 +595,7 @@ function TicketSettings({ guildId }) {
                 <label>Emoji</label>
                 <EmojiPicker
                   guildId={guildId}
+                  disabled={addingCat}
                   value={newCat.emoji}
                   onChange={(v) => setNewCat({ ...newCat, emoji: v })}
                 />

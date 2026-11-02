@@ -50,6 +50,18 @@ Cat's Bot reúne herramientas de moderación, conversación con IA, radio y gest
 | Chat y recuerdos | IA y Endpoints; roles de acceso/restringidos y ámbitos de memoria. | [Respuestas, permisos y memoria](./docs/chat-y-memorias.md) |
 | Investigación web | Internet, fuentes estándar (1–20; 3 por defecto), permiso Deep Think y cupo diario (3 por defecto). | [Flujo, evidencia y límites](./docs/investigacion-web.md) |
 
+## Registros del servidor
+
+En **Registros → Configuración de Logs**, activa **Cambios de canales y categorías (incluye permisos)** y guarda. Usa el canal de Server Logs y el interruptor general ya existentes. Registra ajustes de texto, voz, categorías y foros con valores antes/después, además de permisos por rol o usuario añadidos, eliminados o modificados: **permitir**, **denegar** y **heredar** (sin permiso explícito).
+
+Los cambios extensos se dividen en varios mensajes; los textos largos se indican con `…`. No se envían menciones ni se atribuye un autor o una razón sin evidencia. Se conservan las configuraciones anteriores de `channel_updates`; un valor explícito de `channel_update` tiene prioridad. Requiere que el bot vea los canales y pueda enviar embeds al canal de logs. Los cambios anteriores a la activación no se reconstruyen.
+
+**Roles: asignación, retirada y definición** registra altas/bajas de roles de miembros, incluso roles superiores al bot o gestionados, y creación/edición/eliminación de roles. Los apodos tienen su propio control. Con el intent de moderación y **Ver registro de auditoría**, roles y apodos usan la auditoría de Discord (también para miembros fuera de caché); sin esa capacidad, usan cambios Gateway de miembros cacheados. Registrar no concede capacidad para asignar esos roles.
+
+Activa **Auditoría administrativa adicional** para ajustes del servidor, expulsiones/depuraciones, bots añadidos, emojis/stickers, invitaciones, webhooks/integraciones, hilos, eventos programados, onboarding, AutoMod, mensajes fijados y otras acciones que Discord publique en su auditoría. Incluye autor, objetivo e ID de auditoría cuando Discord los proporciona; los atributos compatibles muestran antes/después, y los demás solo su nombre, sin volcar secretos del SDK. Los controles existentes de mensajes, entradas/salidas, bans, voz y canales siguen independientes. Las configuraciones explícitas anteriores no activan automáticamente el nuevo control; las nuevas con valores por defecto sí. Los valores canónicos explícitos desactivados prevalecen sobre aliases antiguos, también al guardar desde `/serverlogs`.
+
+La cobertura depende de los eventos, intents, permisos y visibilidad que Discord permita: no reconstruye actividad offline ni garantiza acciones que Discord no exponga. Las ediciones y eliminaciones de mensajes fuera de caché registran sus IDs y el nuevo texto disponible, sin inventar contenido anterior; las ediciones sin texto no tienen ese fallback. No registra cada mensaje enviado, reacción o cambio de presencia.
+
 ## Comunidad y contribuidores
 
 Cat's Bot se desarrolla para la comunidad Las Tortuguitas de Ezku.

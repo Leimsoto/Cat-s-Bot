@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from api.deps import get_bot, get_db, require_guild_admin
 from api.discord_bridge import DiscordBridgeTimeout, DiscordBridgeUnavailable, run_on_bot_loop
 from api.snowflakes import coerce_snowflake, serialize_snowflake, stringify_rows
+from cogs.autoroles import normalize_reaction_mapping
 
 router = APIRouter(
     prefix="/api/guilds/{guild_id}/autoroles",
@@ -43,7 +44,13 @@ def _normalize_mapping_data(raw: str) -> str:
         )
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="mapping_data debe ser un objeto JSON.")
+    if not data or len(data) > 20:
+        raise HTTPException(400, "Configura entre 1 y 20 emojis por mensaje.")
+    if any(not emoji.strip() or len(emoji) > 100 for emoji in data):
+        raise HTTPException(400, "Cada clave debe contener un emoji, ID o nombre válido.")
     normalized = {str(emoji): coerce_snowflake(role_id, "role_id") for emoji, role_id in data.items()}
+    if any(not 0 < role_id < 2**64 for role_id in normalized.values()):
+        raise HTTPException(400, "Los IDs de rol deben ser enteros positivos de Discord.")
     return json.dumps(normalized, ensure_ascii=False)
 
 
@@ -134,11 +141,15 @@ async def upsert_reaction_panel(
     channel_id = coerce_snowflake(body.channel_id, "channel_id")
     mapping = json.loads(mapping_data)
 
-    async def prepare_panel() -> None:
+    async def prepare_panel() -> dict:
         get_guild = getattr(bot, "get_guild", None)
         guild = get_guild(guild_id) if callable(get_guild) else None
         if guild is None:
             raise HTTPException(status_code=409, detail="El bot no está conectado a este servidor.")
+        try:
+            normalized = await normalize_reaction_mapping(bot, guild, mapping)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
         channel = guild.get_channel(channel_id)
         if channel is None:
             try:
@@ -163,23 +174,32 @@ async def upsert_reaction_panel(
                 raise HTTPException(status_code=400, detail=f"El bot no puede gestionar el rol {role.name}.")
 
         try:
-            for emoji in mapping:
+            for emoji in normalized:
                 await message.add_reaction(emoji)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException, TypeError) as exc:
-            raise HTTPException(status_code=502, detail=f"No se pudo añadir la reacción `{emoji}`: {exc}")
+        except discord.Forbidden:
+            raise HTTPException(400, "El bot necesita Ver canal, Leer historial y Añadir reacciones; comprueba también Usar emojis externos.")
+        except discord.HTTPException as exc:
+            if exc.code == 10014:
+                raise HTTPException(400, f"El emoji {emoji} no está disponible para el bot. Comprueba su ID y permisos.")
+            raise HTTPException(502, "Discord no permitió preparar las reacciones. No se confirmó el guardado; inténtalo de nuevo.")
+        except TypeError:
+            raise HTTPException(400, f"Discord no reconoce el emoji {emoji}.")
+        return normalized
 
     try:
-        await run_on_bot_loop(bot, prepare_panel, timeout=30)
+        mapping = await run_on_bot_loop(bot, prepare_panel, timeout=30)
     except DiscordBridgeUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except DiscordBridgeTimeout as exc:
         raise HTTPException(status_code=504, detail=str(exc))
+    except discord.HTTPException:
+        raise HTTPException(502, "No pude consultar los emojis disponibles en Discord. Inténtalo de nuevo.")
 
     db.set_autorole(
         message_id=message_id,
         guild_id=guild_id,
         channel_id=channel_id,
-        mapping_data=mapping_data,
+        mapping_data=json.dumps(mapping, ensure_ascii=False),
     )
     return {"status": "ok", "message_id": serialize_snowflake(message_id), "channel_id": serialize_snowflake(channel_id)}
 

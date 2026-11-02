@@ -246,10 +246,7 @@ def delegated_bot_role_ids(db, guild_id: int) -> set[int] | None:
             guild_cfg.get("staff_role_id"),
         ]
 
-        get_ai_config = getattr(db, "get_ai_config", None)
-        if callable(get_ai_config):
-            configured_ids.append((get_ai_config(guild_id) or {}).get("ai_role_id"))
-
+        # El rol de chat IA permite conversar; no delega administración del bot.
         get_ticket_categories = getattr(db, "get_ticket_categories", None)
         if callable(get_ticket_categories):
             configured_ids.extend(

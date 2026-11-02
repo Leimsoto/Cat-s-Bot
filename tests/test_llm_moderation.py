@@ -732,3 +732,20 @@ class ConfigPersistenceTests(unittest.IsolatedAsyncioTestCase):
         case = self.db.list_cases(30)[0]
         self.assertEqual((case["action_type"], case["duration_seconds"], case["status"]), ("AUTO_MUTE", 321, "active"))
         self.assertTrue(any(row["action_type"] == "MUTE_EXPIRE" for row in self.db.get_pending_moderation_actions(30)))
+
+
+class CompletionMetadataTests(unittest.IsolatedAsyncioTestCase):
+    async def test_incomplete_metadata_is_safe_and_distinguishes_limits_in_both_protocols(self):
+        from cogs._llm_moderation import EndpointIncompleteResponse
+        cases = [
+            ("chat_completions", {"choices": [{"finish_reason": "length", "message": {"content": "PRIVATE_TRUNCATED"}}]}, "length"),
+            ("chat_completions", {"choices": [{"finish_reason": "PRIVATE_REASON", "message": {"content": "PRIVATE_TRUNCATED"}}]}, "unknown"),
+            ("responses", {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}, "output": "PRIVATE_TRUNCATED"}, "max_output_tokens"),
+            ("responses", {"status": "incomplete", "incomplete_details": {"reason": {"PRIVATE_REASON": 1}}}, "unknown")]
+        for protocol, body, reason in cases:
+            with self.subTest(protocol=protocol, reason=reason), patch("cogs._llm_moderation.endpoint_json", new=AsyncMock(return_value=body)):
+                with self.assertRaises(EndpointIncompleteResponse) as caught:
+                    await request_completion(None, {"model": "fixture", "api_type": protocol}, [])
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertEqual(str(caught.exception), "endpoint_incomplete_response")
+                self.assertNotIn("PRIVATE", repr(caught.exception.__dict__))

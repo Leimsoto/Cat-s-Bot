@@ -865,7 +865,8 @@ class ConversationRuntimeTest(unittest.IsolatedAsyncioTestCase):
         intent = {"role": "assistant", "tool_calls": [{"id": "intent", "type": "function", "function": {
             "name": "request_public_web_research", "arguments": json.dumps({"public_brief": {"topic": "Example", "question": "Compare current Example releases"}})}}]}
         url = "https://official.example/releases"
-        self.engine.web = SimpleNamespace(search_web=AsyncMock(return_value={"results": [{"url": url, "title": "Example releases"}]}),
+        self.engine.web = SimpleNamespace(search_web=AsyncMock(side_effect=lambda query: {"results": [{"url": url, "title": "Example releases"},
+            {"url": "https://official.example/discovery/" + query.rsplit(" ", 1)[-1]}]}),
             read_webpage=AsyncMock(return_value={"url": url, "text": "Release 9 is current."}), close=AsyncMock())
         responses = [intent] + [{"role": "assistant", "tool_calls": [self.tool_call(argument=f"Example release {index}", call_id=f"q{index}")]} for index in range(5)]
         responses += [{"role": "assistant", "tool_calls": [self.tool_call("read_webpage", url, "release")]},

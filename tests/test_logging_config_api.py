@@ -1,4 +1,5 @@
 import logging
+import json
 import sqlite3
 import threading
 import unittest
@@ -86,6 +87,17 @@ class LoggingConfigApiTest(unittest.IsolatedAsyncioTestCase):
 
         loaded = await get_logging_config(guild_id, self.db, {"user_id": 42})
         self.assertEqual(loaded["serverlog_channel"], str(real_id))
+
+    async def test_channel_update_flag_roundtrips_preserving_other_events_and_guild_isolation(self):
+        events = {"channel_update": True, "channel_updates": True, "channel_create": False, "message_delete": True,
+                  "role_change": False, "role_changes": True, "nickname_changes": True, "audit_events": True}
+        bot = _Bot(_Guild(123, 900))
+        for enabled in (True, False):
+            events["channel_update"] = enabled
+            await patch_logging_config(123, _Request({"log_events": json.dumps(events)}), self.db, bot, {"user_id": 42})
+            loaded = await get_logging_config(123, self.db, {"user_id": 42})
+            self.assertEqual(json.loads(loaded["log_events"]), events)
+            self.assertIsNone(self.db.get_server_config(124)["log_events"])
 
 
 if __name__ == "__main__":

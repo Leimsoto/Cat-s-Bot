@@ -140,7 +140,10 @@ export default function Autoroles({ selectedGuild, onToast }) {
       setPanelMapping('{\n  "👍": 0\n}');
       await load();
     } catch (e) {
-      toast("error", e?.message || "Error guardando panel");
+      const message = e?.message || "Error guardando panel";
+      toast("error", /<!doctype|<html|cloudflare|origin web server/i.test(message)
+        ? "El servidor no pudo confirmar el guardado. Tus datos siguen aquí; vuelve a intentarlo."
+        : message);
     } finally {
       setSavingPanel(false);
     }
@@ -314,8 +317,9 @@ export default function Autoroles({ selectedGuild, onToast }) {
                   style={{ fontFamily: "monospace", fontSize: "0.85rem" }}
                 />
                 <p className="hint" style={{ marginTop: 4 }}>
-                  Usa el emoji como clave (ej: <code>"👍"</code>) o el nombre del emoji
-                  custom. El valor es el ID numérico del rol.
+                  Usa Unicode (<code>"👍"</code>), ID (<code>"1403084927637000363"</code>),
+                  nombre (<code>":coraverde2:"</code>) o mención (<code>{'"<:coraverde2:1403084927637000363>"'}</code>).
+                  Para el rol, recomendamos su ID entre comillas; también se aceptan enteros sin redondearlos.
                 </p>
               </div>
             </div>

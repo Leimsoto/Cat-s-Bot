@@ -17,11 +17,173 @@ from discord.ext import commands
 
 logger = logging.getLogger(__name__)
 
+CHANNEL_SETTINGS = (
+    ("name", "Nombre"), ("topic", "Tema"), ("type", "Tipo"),
+    ("position", "Posición"), ("category_id", "Categoría"),
+    ("nsfw", "NSFW"), ("slowmode_delay", "Modo lento"),
+    ("bitrate", "Bitrate"), ("user_limit", "Límite de usuarios"),
+    ("rtc_region", "Región de voz"), ("video_quality_mode", "Calidad de vídeo"),
+    ("default_auto_archive_duration", "Autoarchivo de hilos"),
+    ("default_thread_slowmode_delay", "Modo lento de hilos"),
+    ("default_sort_order", "Orden del foro"), ("default_layout", "Vista del foro"),
+    ("default_reaction_emoji", "Reacción del foro"), ("available_tags", "Etiquetas del foro"),
+    ("permissions_synced", "Permisos sincronizados con categoría"),
+)
+PERMISSION_NAMES = {
+    "view_channel": "Ver canal", "send_messages": "Enviar mensajes",
+    "manage_channels": "Gestionar canal", "manage_roles": "Gestionar permisos",
+    "read_message_history": "Leer historial", "add_reactions": "Añadir reacciones",
+    "connect": "Conectar", "speak": "Hablar", "stream": "Vídeo",
+    "attach_files": "Adjuntar archivos", "embed_links": "Insertar enlaces",
+    "manage_messages": "Gestionar mensajes", "mention_everyone": "Mencionar a todos",
+    "send_messages_in_threads": "Enviar en hilos", "create_public_threads": "Crear hilos públicos",
+    "create_private_threads": "Crear hilos privados", "manage_threads": "Gestionar hilos",
+}
+AUDIT_FIELDS = {
+    "name": "Nombre", "description": "Descripción", "topic": "Tema", "nick": "Apodo",
+    "permissions": "Permisos", "colour": "Color", "hoist": "Rol separado", "mentionable": "Rol mencionable",
+    "position": "Posición", "type": "Tipo", "enabled": "Activo", "flags": "Opciones",
+    "verification_level": "Verificación", "explicit_content_filter": "Filtro de contenido",
+    "default_notifications": "Notificaciones", "afk_channel": "Canal AFK", "afk_timeout": "Tiempo AFK",
+    "system_channel": "Canal del sistema", "rules_channel": "Canal de reglas", "owner": "Propietario",
+    "timed_out_until": "Aislamiento hasta", "mute": "Silenciado", "deaf": "Ensordecido",
+    "archived": "Archivado", "locked": "Bloqueado", "invitable": "Invitaciones permitidas",
+    "slowmode_delay": "Modo lento", "auto_archive_duration": "Autoarchivo",
+    "channel": "Canal", "roles": "Roles", "exempt_roles": "Roles exentos", "exempt_channels": "Canales exentos",
+    "trigger_type": "Tipo de regla", "event_type": "Tipo de evento", "privacy_level": "Privacidad",
+    "start_time": "Inicio", "end_time": "Fin", "status": "Estado", "unicode_emoji": "Emoji",
+}
+AUDIT_GATEWAY_ACTIONS = {
+    "channel_create", "channel_update", "channel_delete", "overwrite_create", "overwrite_update", "overwrite_delete",
+    "ban", "unban", "message_delete", "message_bulk_delete", "member_move", "member_disconnect",
+}
+AUDIT_ACTION_NAMES = {
+    "guild_update": "Servidor actualizado", "member_role_update": "Roles de miembro", "member_update": "Miembro actualizado",
+    "role_create": "Rol creado", "role_update": "Rol actualizado", "role_delete": "Rol eliminado",
+    "kick": "Miembro expulsado", "member_prune": "Depuración de miembros", "bot_add": "Bot añadido",
+    "message_pin": "Mensaje fijado", "message_unpin": "Mensaje desfijado",
+}
+
+
+def _log_clip(value, limit):
+    text = discord.utils.escape_mentions(discord.utils.escape_markdown(str(value)))
+    encoded = text.encode("utf-16-le")
+    if len(encoded) > limit * 2:
+        return encoded[:(limit - 1) * 2].decode("utf-16-le", errors="ignore") + "…"
+    return text
+
+
+def _channel_setting(channel, attribute):
+    value = getattr(channel, attribute, None)
+    if attribute == "available_tags" and value is not None:
+        return "; ".join(f"{tag.name} (ID {tag.id}, emoji {tag.emoji or 'ninguno'}, moderada: {'sí' if tag.moderated else 'no'})" for tag in value) or "Sin etiquetas"
+    if attribute == "category_id" and value is not None:
+        category = getattr(channel, "category", None)
+        return f"{category.name} (ID {value})" if category else str(value)
+    if value is None:
+        return "Sin configurar"
+    if isinstance(value, bool):
+        return "Sí" if value else "No"
+    if attribute in {"slowmode_delay", "default_thread_slowmode_delay"}:
+        return f"{value} s"
+    if attribute == "default_auto_archive_duration":
+        return f"{value} min"
+    if attribute == "bitrate":
+        return f"{value / 1000:g} kbps"
+    if attribute == "user_limit" and value == 0:
+        return "Sin límite"
+    if attribute == "default_reaction_emoji":
+        return str(value)
+    return str(getattr(value, "name", value))
+
+
+def _channel_changes(before, after):
+    changes = []
+    for attribute, label in CHANNEL_SETTINGS:
+        old, new = getattr(before, attribute, None), getattr(after, attribute, None)
+        if attribute == "available_tags":
+            old, new = [None if value is None else [(tag.id, tag.name, tag.moderated, str(tag.emoji)) for tag in value] for value in (old, new)]
+        if old != new:
+            old, new = _channel_setting(before, attribute), _channel_setting(after, attribute)
+            changes.append((label, f"Antes: {_log_clip(old, 480)}\nDespués: {_log_clip(new, 480)}"))
+    for flag, label in (("require_tag", "Exigir etiqueta"), ("hide_media_download_options", "Ocultar descarga multimedia")):
+        old = getattr(getattr(before, "flags", None), flag, False)
+        new = getattr(getattr(after, "flags", None), flag, False)
+        if old != new:
+            changes.append((label, f"Antes: {'Sí' if old else 'No'}\nDespués: {'Sí' if new else 'No'}"))
+
+    def overwrites(channel):
+        return {("Rol" if isinstance(target, discord.Role) or getattr(target, "type", None) is discord.Role else "Usuario", target.id): (target, dict(overwrite))
+                for target, overwrite in getattr(channel, "overwrites", {}).items()}
+
+    old_overwrites, new_overwrites = overwrites(before), overwrites(after)
+    states = {None: "heredar", True: "permitir", False: "denegar"}
+    for key in sorted(old_overwrites.keys() | new_overwrites.keys()):
+        target, old = old_overwrites.get(key, (None, {}))
+        new_target, new = new_overwrites.get(key, (None, {}))
+        target = new_target or target
+        lines = []
+        for permission in sorted(old.keys() | new.keys()):
+            if old.get(permission) != new.get(permission):
+                label = PERMISSION_NAMES.get(permission, permission)
+                lines.append(f"{label} (`{permission}`): {states[old.get(permission)]} → {states[new.get(permission)]}")
+        if not lines and key in old_overwrites and key in new_overwrites:
+            continue
+        action = "añadido" if key not in old_overwrites else "eliminado" if key not in new_overwrites else "modificado"
+        name = getattr(target, "display_name", getattr(target, "name", "sin caché"))
+        heading = f"Permisos · {key[0]} {_log_clip(name, 120)} (ID {key[1]}) · {action}"
+        chunk = ""
+        for line in lines or ["Sin permisos explícitos (heredar)."]:
+            if len((chunk + "\n" + line).encode("utf-16-le")) // 2 > 1024:
+                changes.append((heading, chunk))
+                chunk = ""
+            chunk = f"{chunk}\n{line}" if chunk else line
+        changes.append((heading, chunk))
+    return changes
+
+
+def _audit_value(value):
+    if value is None:
+        return "Sin configurar"
+    if isinstance(value, bool):
+        return "Sí" if value else "No"
+    if isinstance(value, discord.Permissions):
+        return ", ".join(PERMISSION_NAMES.get(name, name) for name, enabled in value if enabled) or "Sin permisos"
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_audit_value(item) for item in value) or "Ninguno"
+    if hasattr(value, "id"):
+        return f"{getattr(value, 'display_name', getattr(value, 'name', 'Sin caché'))} (ID {value.id})"
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    if hasattr(value, "value"):
+        return str(value.value)
+    return "Valor actualizado"  # No volcar repr del SDK ni estructuras que puedan contener secretos.
+
+
+def _role_change_fields(added, removed):
+    fields = []
+    for title, roles in (("Roles añadidos", added), ("Roles quitados", removed)):
+        chunk = ""
+        for role in roles:
+            line = f"{_log_clip(getattr(role, 'name', 'Sin caché'), 120)} (ID {role.id})"
+            if len((chunk + "\n" + line).encode("utf-16-le")) // 2 > 960:
+                fields.append((title, chunk))
+                chunk = ""
+            chunk = f"{chunk}\n{line}" if chunk else line
+        if chunk:
+            fields.append((title, chunk))
+    return fields
+
 
 class Logging(commands.Cog):
     """Logs server events to a configurable channel."""
 
     EVENT_ALIASES = {
+        "channel_update": ("channel_update", "channel_updates"),
+        "role_change": ("role_change", "role_changes", "member_update"),
+        "nickname_changes": ("nickname_changes", "member_update"),
         "bulk_message_delete": ("bulk_message_delete", "message_delete"),
         "member_update": ("member_update", "role_change", "nickname_changes", "role_changes"),
         "voice_state_update": ("voice_state_update", "voice_join", "voice_leave", "voice_join_leave"),
@@ -46,6 +208,8 @@ class Logging(commands.Cog):
         if isinstance(raw, dict):
             if not raw:
                 return True
+            if event_name in {"channel_update", "role_change", "nickname_changes", "audit_events"} and event_name in raw:
+                return bool(raw[event_name])
             return any(bool(raw.get(key)) for key in aliases)
         if isinstance(raw, list):
             return any(key in raw for key in aliases)
@@ -119,7 +283,8 @@ class Logging(commands.Cog):
 
         try:
             from cogs._managed_messages import send_managed
-            await send_managed(self.bot, guild.id, "serverutils", channel.send, embed=embed)
+            await send_managed(self.bot, guild.id, "serverutils", channel.send, embed=embed,
+                               allowed_mentions=discord.AllowedMentions.none())
         except discord.Forbidden:
             logger.warning("Sin permisos para enviar serverlog en %s", guild.name)
             self._enqueue_serverlog_outbox(guild, embed, event_name, resolved_ch_id, "missing_send_messages")
@@ -213,38 +378,110 @@ class Logging(commands.Cog):
 
         await self._send_log(guild, embed, "bulk_message_delete")
 
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload):
+        if payload.cached_message is not None:
+            return
+        guild = self.bot.get_guild(payload.guild_id)
+        if guild is None:
+            return
+        embed = discord.Embed(title="🗑️ Mensaje eliminado (sin caché)", color=discord.Color.red(), timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Canal / mensaje", value=f"Canal ID {payload.channel_id}\nMensaje ID {payload.message_id}")
+        embed.add_field(name="Contenido anterior", value="No disponible: el mensaje no estaba en caché.", inline=False)
+        await self._send_log(guild, embed, "message_delete")
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, payload):
+        uncached = set(payload.message_ids) - {message.id for message in payload.cached_messages}
+        guild = self.bot.get_guild(payload.guild_id)
+        if not uncached or guild is None:
+            return
+        fields = [("Canal", f"ID {payload.channel_id}"), ("Mensajes no disponibles en caché", str(len(uncached)))]
+        identifiers = sorted(uncached)
+        for start in range(0, len(identifiers), 40):
+            fields.append(("IDs", ", ".join(str(ident) for ident in identifiers[start:start+40])))
+        await self._send_fields(guild, "🗑️ Mensajes eliminados en lote (sin caché)", fields, "bulk_message_delete")
+
+    @commands.Cog.listener()
+    async def on_raw_message_edit(self, payload):
+        if payload.cached_message is not None or "content" not in payload.data:
+            return
+        guild = self.bot.get_guild(payload.guild_id)
+        if guild is None:
+            return
+        embed = discord.Embed(title="✏️ Mensaje editado (sin caché)", color=discord.Color.yellow(), timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Canal / mensaje", value=f"Canal ID {payload.channel_id}\nMensaje ID {payload.message_id}")
+        embed.add_field(name="Antes", value="No disponible: el mensaje no estaba en caché.", inline=False)
+        embed.add_field(name="Después", value=_log_clip(payload.data.get("content") or "Sin texto", 960), inline=False)
+        await self._send_log(guild, embed, "message_edit")
+
     # ── Member events ───────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         guild = after.guild
-
-        nick_changed = before.nick != after.nick
-        added = [r for r in after.roles if r not in before.roles and r.is_assignable()]
-        removed = [r for r in before.roles if r not in after.roles and r.is_assignable()]
-
-        if not nick_changed and not added and not removed:
+        # La auditoría incluye miembros no cacheados y el actor real; una sola fuente.
+        if self._audit_available(guild):
             return
+        added = [role for role in after.roles if role not in before.roles and role.id != guild.id]
+        removed = [role for role in before.roles if role not in after.roles and role.id != guild.id]
+        identity = [("Miembro", _log_clip(_audit_value(after), 240))]
+        fields = _role_change_fields(added, removed)
+        if fields:
+            await self._send_fields(guild, "📝 Roles de miembro", identity + fields, "role_change")
+        if before.nick != after.nick:
+            await self._send_fields(guild, "📝 Apodo de miembro", identity + [
+                ("Apodo", f"Antes: {_log_clip(before.nick or 'Ninguno', 450)}\nDespués: {_log_clip(after.nick or 'Ninguno', 450)}")], "nickname_changes")
 
-        embed = discord.Embed(
-            title="📝 Miembro actualizado",
-            color=discord.Color.blue(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        embed.set_author(name=after.display_name, icon_url=after.display_avatar.url)
-        embed.add_field(name="Usuario", value=after.mention, inline=True)
+    def _audit_available(self, guild):
+        permissions = getattr(getattr(guild, "me", None), "guild_permissions", None)
+        return bool(getattr(getattr(self.bot, "intents", None), "moderation", False)
+                    and permissions and (permissions.administrator or permissions.view_audit_log))
 
-        if nick_changed:
-            embed.add_field(name="Apodo anterior", value=before.nick or "Ninguno", inline=True)
-            embed.add_field(name="Apodo nuevo", value=after.nick or "Ninguno", inline=True)
+    async def _send_fields(self, guild, title, fields, event_name, *, entry_id=None):
+        for start in range(0, len(fields), 4):
+            embed = discord.Embed(title=title, color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
+            for name, value in fields[start:start+4]:
+                embed.add_field(name=name, value=value, inline=False)
+            embed.set_footer(text=f"Auditoría ID {entry_id} · {start//4 + 1}/{(len(fields)+3)//4} · … = texto recortado" if entry_id else f"Gateway · {start//4 + 1}/{(len(fields)+3)//4}")
+            await self._send_log(guild, embed, event_name)
 
-        if added:
-            embed.add_field(name="Roles añadidos", value=", ".join(r.mention for r in added), inline=False)
-
-        if removed:
-            embed.add_field(name="Roles quitados", value=", ".join(r.mention for r in removed), inline=False)
-
-        await self._send_log(guild, embed, "member_update")
+    @commands.Cog.listener()
+    async def on_audit_log_entry_create(self, entry):
+        if not self._audit_available(entry.guild):
+            return
+        action = entry.action.name
+        if action in AUDIT_GATEWAY_ACTIONS:
+            return
+        identity = [("Objetivo", _log_clip(_audit_value(entry.target), 240)),
+                    ("Autor", _log_clip(_audit_value(entry.user) if entry.user else f"ID {entry.user_id}" if entry.user_id else "No informado", 240))]
+        if entry.reason:
+            identity.append(("Razón", _log_clip(entry.reason, 480)))
+        title = "📋 " + AUDIT_ACTION_NAMES.get(action, "Auditoría · " + action.replace("_", " "))
+        if action == "member_role_update":
+            fields = _role_change_fields(getattr(entry.after, "roles", []), getattr(entry.before, "roles", []))
+            if fields:
+                await self._send_fields(entry.guild, title, identity + fields, "role_change", entry_id=entry.id)
+            return
+        old, new = dict(entry.before), dict(entry.after)
+        changed = {key for key in old.keys() | new.keys() if old.get(key) != new.get(key)}
+        if action == "member_update" and "nick" in changed:
+            fields = [("Apodo", f"Antes: {_log_clip(_audit_value(old.get('nick')), 450)}\nDespués: {_log_clip(_audit_value(new.get('nick')), 450)}")]
+            await self._send_fields(entry.guild, title, identity + fields, "nickname_changes", entry_id=entry.id)
+        fields = []
+        for key, label in AUDIT_FIELDS.items():
+            if key == "nick" or key not in old.keys() | new.keys() or old.get(key) == new.get(key):
+                continue
+            fields.append((label, f"Antes: {_log_clip(_audit_value(old.get(key)), 450)}\nDespués: {_log_clip(_audit_value(new.get(key)), 450)}"))
+        omitted = sorted(changed - AUDIT_FIELDS.keys())
+        if omitted:
+            fields.append(("Otros atributos modificados (sin valores)", _log_clip(", ".join(omitted), 960)))
+        if action == "member_update" and not fields:
+            return
+        if not fields:
+            fields = [("Detalles", "Discord registró la acción; no proporcionó cambios compatibles para mostrar.")]
+        event_name = "role_change" if action in {"role_create", "role_update", "role_delete"} else "audit_events"
+        await self._send_fields(entry.guild, title, identity + fields, event_name, entry_id=entry.id)
 
     # ── Channel events ──────────────────────────────────────────────────────
 
@@ -282,30 +519,22 @@ class Logging(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_channel_update(self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel):
-        guild = after.guild
-
-        name_changed = before.name != after.name
-        topic_changed = getattr(before, "topic", None) != getattr(after, "topic", None)
-
-        if not name_changed and not topic_changed:
+        changes = _channel_changes(before, after)
+        if not changes:
             return
-
-        embed = discord.Embed(
-            title="✏️ Canal actualizado",
-            color=discord.Color.yellow(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        embed.add_field(name="Canal", value=after.mention, inline=True)
-
-        if name_changed:
-            embed.add_field(name="Nombre anterior", value=f"#{before.name}", inline=True)
-            embed.add_field(name="Nombre nuevo", value=f"#{after.name}", inline=True)
-
-        if topic_changed:
-            embed.add_field(name="Tópico anterior", value=before.topic or "Ninguno", inline=False)
-            embed.add_field(name="Tópico nuevo", value=after.topic or "Ninguno", inline=False)
-
-        await self._send_log(guild, embed, "channel_update")
+        kind = "Categoría" if after.type == discord.ChannelType.category else "Canal"
+        # Cuatro campos por embed mantienen el total por debajo de 6000 caracteres.
+        pages = (len(changes) + 3) // 4
+        for index in range(pages):
+            embed = discord.Embed(
+                title=f"✏️ {kind} actualizado/a · {index + 1}/{pages}",
+                color=discord.Color.yellow(), timestamp=datetime.now(timezone.utc),
+            )
+            embed.add_field(name=kind, value=f"{_log_clip(after.name, 180)} (ID {after.id})", inline=False)
+            for label, value in changes[index * 4:(index + 1) * 4]:
+                embed.add_field(name=label, value=value, inline=False)
+            embed.set_footer(text="Antes → después · heredar = sin permiso explícito · … = texto recortado")
+            await self._send_log(after.guild, embed, "channel_update")
 
     # ── Voice events ────────────────────────────────────────────────────────
 

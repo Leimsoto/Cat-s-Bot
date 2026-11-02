@@ -2454,7 +2454,7 @@ class Moderation(commands.Cog):
                     self.db.mark_log_outbox(log_id, "failed", "missing_embed_payload")
                     continue
 
-                await channel.send(embed=discord.Embed.from_dict(embed_data))
+                await channel.send(embed=discord.Embed.from_dict(embed_data), allowed_mentions=discord.AllowedMentions.none())
                 self.db.mark_log_outbox(log_id, "sent")
                 logger.info("log_outbox enviado: id=%s attempts=%s", log_id, attempts)
             except (discord.Forbidden, discord.HTTPException) as exc:

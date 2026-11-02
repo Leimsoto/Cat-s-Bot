@@ -27,8 +27,16 @@ const LOG_EVENTS = [
   { key: 'voice_leave', label: 'Voz: desconectar', icon: 'fa-phone-slash' },
   { key: 'channel_create', label: 'Canal creado', icon: 'fa-plus' },
   { key: 'channel_delete', label: 'Canal eliminado', icon: 'fa-minus' },
-  { key: 'role_change', label: 'Cambios de roles', icon: 'fa-user-gear' },
+  { key: 'channel_update', label: 'Cambios de canales y categorías (incluye permisos)', icon: 'fa-sliders' },
+  { key: 'role_change', label: 'Roles: asignación, retirada y definición', icon: 'fa-user-gear' },
+  { key: 'nickname_changes', label: 'Cambios de apodo', icon: 'fa-user-pen' },
+  { key: 'audit_events', label: 'Auditoría administrativa adicional', icon: 'fa-clipboard-list' },
 ];
+
+const EVENT_ALIASES = {
+  channel_update: ['channel_updates'], role_change: ['role_changes', 'member_update'],
+  nickname_changes: ['member_update'],
+};
 
 function relativeTime(ts) {
   if (!ts) return '—';
@@ -91,7 +99,23 @@ export default function Logs({ selectedGuild }) {
       // Parse log_events from JSON string or default to all enabled
       let events = Object.fromEntries(LOG_EVENTS.map((ev) => [ev.key, true]));
       if (data.log_events) {
-        try { events = { ...events, ...JSON.parse(data.log_events) }; } catch { /* keep defaults */ }
+        try {
+          const raw = JSON.parse(data.log_events);
+          if (Array.isArray(raw)) {
+            events = { ...Object.fromEntries(raw.filter((key) => typeof key === 'string').map((key) => [key, true])),
+              ...Object.fromEntries(LOG_EVENTS.map((event) => [event.key, raw.includes(event.key)])) };
+            for (const [key, aliases] of Object.entries(EVENT_ALIASES)) {
+              events[key] = [key, ...aliases].some((alias) => raw.includes(alias));
+            }
+          } else if (raw && typeof raw === 'object') {
+            const defaultEnabled = Object.keys(raw).length === 0;
+            events = { ...Object.fromEntries(LOG_EVENTS.map((event) => [event.key, defaultEnabled])), ...raw };
+            for (const [key, aliases] of Object.entries(EVENT_ALIASES)) {
+              events[key] = Object.prototype.hasOwnProperty.call(raw, key)
+                ? Boolean(raw[key]) : defaultEnabled || aliases.some((alias) => Boolean(raw[alias]));
+            }
+          }
+        } catch { /* keep defaults */ }
       }
       setLogCfg({ ...data, log_events_parsed: events });
     } catch { showToast('Error cargando config de logging', 'error'); }
@@ -216,6 +240,7 @@ export default function Logs({ selectedGuild }) {
 
             <div className="glass-panel" style={{ padding: 24, borderRadius: 22 }}>
               <h3 style={{ margin: '0 0 16px' }}>Eventos a registrar</h3>
+              <p className="text-muted" style={{ marginTop: 0 }}>La auditoría adicional registra cambios administrativos del servidor, emojis, hilos, invitaciones, webhooks y otros eventos que Discord comunica. Requiere Ver registro de auditoría. Los roles y apodos tienen controles propios. No recupera cambios mientras el bot estuvo desconectado; en mensajes sin caché el contenido anterior no está disponible.</p>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,220px),1fr))', gap: 10 }}>
                 {LOG_EVENTS.map(ev => {
                   const on = !!(logCfg.log_events_parsed || {})[ev.key];
@@ -226,7 +251,7 @@ export default function Logs({ selectedGuild }) {
                         <span style={{ fontSize: '0.84rem', fontWeight: 600 }}>{ev.label}</span>
                       </div>
                       <label className="toggle-switch" style={{ transform: 'scale(0.8)' }}>
-                        <input type="checkbox" checked={on} onChange={() => toggleEvent(ev.key)} />
+                        <input type="checkbox" aria-label={ev.label} checked={on} onChange={() => toggleEvent(ev.key)} />
                         <span className="slider" />
                       </label>
                     </div>

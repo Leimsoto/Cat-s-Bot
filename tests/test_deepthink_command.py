@@ -208,3 +208,27 @@ class DeepThinkCommandTests(unittest.IsolatedAsyncioTestCase):
             await self.engine.process(job)
         self.assertTrue(job["_deep_answer_sent"])
         refund.assert_not_called()
+
+    async def test_research_failure_still_delivers_grounded_answer_with_saved_checkpoint(self):
+        from cogs._llm_moderation import EndpointIncompleteResponse
+        from tests.test_conversation_memory import research_report, research_fact
+        job, anchor = await self.enqueue()
+        url = "https://official.example/version"
+        self.engine.web = SimpleNamespace(close=AsyncMock(), read_webpage=AsyncMock(return_value={"url": url, "text": "Release 9 is current."}))
+        intent = {"tool_calls": [{"id": "intent", "type": "function", "function": {
+            "name": "request_public_web_research", "arguments": "{}"}}]}
+        replies = [intent, {"tool_calls": [self.fixture.tool_call("read_webpage", url)]},
+                   research_report([research_fact(url, "Release 9 is current.")], gaps=["Performance remains unknown"]),
+                   TimeoutError(), EndpointIncompleteResponse("length"), "La versión documentada es 9; la mejora de rendimiento no está verificada."]
+        with patch("cogs._conversation.request_completion", new=AsyncMock(side_effect=replies)) as provider:
+            await self.engine.process(job)
+        text = anchor.reply.await_args_list[0].args[0]
+        self.assertIn("La versión documentada es 9", text)
+        self.assertNotIn("No pude completar", text)
+        final_context = json.loads(provider.await_args.args[2][1]["content"])
+        self.assertFalse(final_context["web_research_untrusted"]["complete"])
+        self.assertIn("Release 9 is current.", json.dumps(final_context))
+        self.assertEqual(provider.await_args.kwargs["reasoning_effort"], "none")
+        self.assertEqual(provider.await_args.kwargs["timeout_seconds"], 60)
+        self.assertTrue(job["_deep_answer_sent"])
+        self.assertIsNotNone(self.engine.research.load(self.engine.research_key(job), self.engine.research_token(job)))

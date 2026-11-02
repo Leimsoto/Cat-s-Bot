@@ -15,7 +15,8 @@
  *     persistir la cadena tal cual.
  */
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { apiGet } from "../lib/api";
 
 const UNICODE_EMOJIS = [
@@ -30,7 +31,7 @@ const UNICODE_EMOJIS = [
   "👋","🤚","🖐️","✋","🖖","👏","🙌","👐","🤲","🤝","🙏","✍️","💪","🦾","🦿","🦵",
   "❤️","🧡","💛","💚","💙","💜","🖤","🤍","🤎","💔","❣️","💕","💞","💓","💗","💖",
   "💘","💝","💟","☮️","✝️","☪️","🕉️","☸️","✡️","🔯","🕎","☯️","☦️","🛐","⛎","♈",
-  "✅","❌","⭕","🚫","⛔","📛","🔞","♨️","🚷","🚯","🚳","🚱","🔞","📵","🚭","❗",
+  "✅","❌","⭕","🚫","⛔","📛","🔞","♨️","🚷","🚯","🚳","🚱","📵","🚭","❗",
   "❓","❕","❔","‼️","⁉️","💯","🔥","✨","🌟","⭐","💫","💥","💢","💦","💨","🕳️",
   "🎉","🎊","🎈","🎁","🎀","🎗️","🎟️","🎫","🎖️","🏆","🏅","🥇","🥈","🥉","⚽","🏀",
   "🏈","⚾","🥎","🎾","🏐","🏉","🥏","🎱","🪀","🏓","🏸","🏒","🏑","🥍","🏏","🥅",
@@ -45,6 +46,52 @@ export default function EmojiPicker({ guildId, value, onChange, label, disabled 
   const [loaded, setLoaded] = useState(false);
   const popRef = useRef(null);
   const triggerRef = useRef(null);
+  const [popoverPos, setPopoverPos] = useState(null);
+
+  const recalcPos = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger || trigger.matches(":disabled") || trigger.closest("[inert]")) {
+      setOpen(false);
+      return;
+    }
+    const rect = trigger.getBoundingClientRect();
+    const margin = 8;
+    const gap = 6;
+    const width = Math.min(320, window.innerWidth - margin * 2);
+    if (rect.bottom <= 0 || rect.top >= window.innerHeight || rect.right <= 0 || rect.left >= window.innerWidth) {
+      setOpen(false);
+      return;
+    }
+    const below = window.innerHeight - rect.bottom - margin - gap;
+    const above = rect.top - margin - gap;
+    const placeAbove = below < 360 && above > below;
+    const height = Math.min(360, Math.max(0, placeAbove ? above : below));
+    const next = {
+      top: placeAbove ? rect.top - height - gap : rect.bottom + gap,
+      left: Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin)),
+      width,
+      height,
+    };
+    setPopoverPos((current) => current && Object.keys(next).every((key) => current[key] === next[key]) ? current : next);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    if (disabled) {
+      setOpen(false);
+      return;
+    }
+    recalcPos();
+    let frame;
+    const onMove = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(recalcPos); };
+    window.addEventListener("scroll", onMove, true);
+    window.addEventListener("resize", onMove);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", onMove, true);
+      window.removeEventListener("resize", onMove);
+    };
+  }, [open, disabled, recalcPos]);
 
   const load = useCallback(async () => {
     if (!guildId || loaded) return;
@@ -83,6 +130,7 @@ export default function EmojiPicker({ guildId, value, onChange, label, disabled 
   }, [open, load]);
 
   const pick = (val) => {
+    if (disabled || triggerRef.current?.matches(":disabled") || triggerRef.current?.closest("[inert]")) return;
     onChange(val);
     setOpen(false);
   };
@@ -122,18 +170,17 @@ export default function EmojiPicker({ guildId, value, onChange, label, disabled 
         {displayValue}
       </button>
 
-      {open && (
+      {open && !disabled && popoverPos && createPortal(
         <div
           ref={popRef}
           style={{
-            position: "absolute",
-            zIndex: 50,
-            top: "100%",
-            left: 0,
-            marginTop: 6,
-            width: 320,
-            maxHeight: 360,
-            background: "var(--bg-glass, #1e1f22)",
+            position: "fixed",
+            zIndex: 9999,
+            ...popoverPos,
+            boxSizing: "border-box",
+            overflow: "hidden",
+            color: "var(--text)",
+            background: "var(--surface, #1e1f22)",
             border: "1px solid rgba(139,92,246,0.3)",
             borderRadius: 14,
             boxShadow: "0 12px 36px rgba(0,0,0,0.5)",
@@ -143,7 +190,7 @@ export default function EmojiPicker({ guildId, value, onChange, label, disabled 
             gap: 8,
           }}
         >
-          <div style={{ display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
             {[
               ["server", `Servidor (${serverEmojis.length})`],
               ["bot", `Bot (${botEmojis.length})`],
@@ -165,7 +212,7 @@ export default function EmojiPicker({ guildId, value, onChange, label, disabled 
             placeholder="Buscar…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{ padding: "6px 10px", fontSize: "0.82rem" }}
+            style={{ padding: "6px 10px", fontSize: "0.82rem", flexShrink: 0 }}
           />
           <div
             style={{
@@ -174,7 +221,8 @@ export default function EmojiPicker({ guildId, value, onChange, label, disabled 
               gap: 4,
               overflowY: "auto",
               flex: 1,
-              minHeight: 200,
+              minHeight: 0,
+              alignContent: "start",
             }}
           >
             {tab === "server" &&
@@ -239,7 +287,8 @@ export default function EmojiPicker({ guildId, value, onChange, label, disabled 
                 </button>
               ))}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

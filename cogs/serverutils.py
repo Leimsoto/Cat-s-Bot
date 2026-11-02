@@ -24,6 +24,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs.logging import Logging
+
 logger = logging.getLogger("ServerUtils")
 
 DEFAULT_LOG_EVENTS = {
@@ -35,22 +37,11 @@ DEFAULT_LOG_EVENTS = {
     "role_changes": True,
     "nickname_changes": True,
     "channel_updates": True,
+    "audit_events": True,
     "message_send": False,
     "reactions": False,
 }
 
-DASHBOARD_LOG_KEYS = {
-    "message_edit",
-    "message_delete",
-    "member_join",
-    "member_leave",
-    "member_ban",
-    "voice_join",
-    "voice_leave",
-    "channel_create",
-    "channel_delete",
-    "role_change",
-}
 
 
 class ServerUtils(commands.Cog):
@@ -62,32 +53,17 @@ class ServerUtils(commands.Cog):
 
     def _get_log_events(self, guild_id: int) -> dict:
         cfg = self.db.get_server_config(guild_id)
-        events = dict(DEFAULT_LOG_EVENTS)
-        if cfg.get("log_events"):
-            try:
-                raw_events = json.loads(cfg["log_events"])
-                if isinstance(raw_events, dict):
-                    if any(key in raw_events for key in DASHBOARD_LOG_KEYS):
-                        # Si el dashboard ya guardó su esquema nuevo, no mantener
-                        # defaults legacy activos, porque eso hace que ServerUtils
-                        # ignore toggles apagados desde el panel.
-                        events = {key: False for key in DEFAULT_LOG_EVENTS}
-                        events["message_delete"] = bool(raw_events.get("message_delete"))
-                        events["message_edit"] = bool(raw_events.get("message_edit"))
-                        events["member_join"] = bool(raw_events.get("member_join"))
-                        events["member_leave"] = bool(raw_events.get("member_leave"))
-                        events["voice_join_leave"] = bool(
-                            raw_events.get("voice_join") or raw_events.get("voice_leave") or raw_events.get("voice_join_leave")
-                        )
-                        events["role_changes"] = bool(raw_events.get("role_change") or raw_events.get("role_changes"))
-                        events["nickname_changes"] = bool(raw_events.get("nickname_changes"))
-                        events["channel_updates"] = bool(raw_events.get("channel_update") or raw_events.get("channel_updates"))
-                    else:
-                        events.update({key: bool(value) for key, value in raw_events.items() if key in DEFAULT_LOG_EVENTS})
-                else:
-                    logger.warning("log_events inválido en guild %s: no es un objeto JSON", guild_id)
-            except json.JSONDecodeError:
-                logger.warning("log_events contiene JSON inválido en guild %s", guild_id)
+        raw = cfg.get("log_events")
+        try:
+            raw = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            raw = None
+        aliases = {"role_changes": "role_change", "channel_updates": "channel_update",
+                   "voice_join_leave": "voice_state_update"}
+        events = {key: Logging._event_enabled(raw, aliases.get(key, key))
+                  for key in DEFAULT_LOG_EVENTS}
+        if raw is None or raw == {}:
+            events.update(DEFAULT_LOG_EVENTS)
         return events
 
     def _nearby_messageable_channel(self, guild: discord.Guild, channel_id: int):
@@ -321,9 +297,10 @@ class ServerUtils(commands.Cog):
             "member_join": "📥 Miembros: unión",
             "member_leave": "📤 Miembros: salida",
             "voice_join_leave": "🔊 Voz: unión/salida",
-            "role_changes": "🏷️ Cambios de roles",
-            "nickname_changes": "📛 Cambios de nickname",
-            "channel_updates": "📝 Cambios en canales",
+            "role_changes": "🏷️ Roles: miembros y definición",
+            "nickname_changes": "📛 Cambios de apodo",
+            "channel_updates": "📝 Canales y categorías (ajustes y permisos)",
+            "audit_events": "📋 Auditoría administrativa adicional",
             "message_send": "💬 Cada mensaje enviado",
             "reactions": "😀 Reacciones",
         }
@@ -332,7 +309,7 @@ class ServerUtils(commands.Cog):
             icon = "✅" if events.get(key, False) else "❌"
             lines.append(f"{icon} {label}")
         embed.add_field(name="Eventos activos", value="\n".join(lines), inline=False)
-        embed.set_footer(text="Usa los botones para cambiar eventos")
+        embed.set_footer(text="Auditoría: requiere Ver registro de auditoría. Sin historial offline; contenido anterior sin caché no disponible.")
         return embed
 
     # ─────────────────────────────────────────────────────────────────────
@@ -436,9 +413,10 @@ class ServerLogsView(discord.ui.View):
             "member_join": "📥 Miembros: unión",
             "member_leave": "📤 Miembros: salida",
             "voice_join_leave": "🔊 Voz: unión/salida",
-            "role_changes": "🏷️ Cambios de roles",
-            "nickname_changes": "📛 Cambios de nickname",
-            "channel_updates": "📝 Cambios en canales",
+            "role_changes": "🏷️ Roles: miembros y definición",
+            "nickname_changes": "📛 Cambios de apodo",
+            "channel_updates": "📝 Canales y categorías (ajustes y permisos)",
+            "audit_events": "📋 Auditoría administrativa adicional",
             "message_send": "💬 Cada mensaje enviado",
             "reactions": "😀 Reacciones",
         }
@@ -463,9 +441,23 @@ class ServerLogsView(discord.ui.View):
         selected = set(interaction.data.get("values", []))
         for key in self.events:
             self.events[key] = key in selected
+        raw = self.cog.db.get_server_config(interaction.guild_id).get("log_events")
+        try:
+            saved = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            saved = {}
+        if isinstance(saved, list):
+            saved = {key: True for key in saved if isinstance(key, str)}
+        saved = dict(saved) if isinstance(saved, dict) else {}
+        saved.update(self.events)
+        saved["role_change"] = self.events["role_changes"]
+        saved["channel_update"] = self.events["channel_updates"]
+        saved["voice_join"] = saved["voice_leave"] = self.events["voice_join_leave"]
+        if "voice_state_update" in saved:
+            saved["voice_state_update"] = self.events["voice_join_leave"]
         self.cog.db.set_server_config(
             interaction.guild_id,
-            log_events=json.dumps(self.events),
+            log_events=json.dumps(saved),
         )
         srv = self.cog.db.get_server_config(interaction.guild_id)
         embed = self.cog._build_logs_embed(interaction.guild, srv, self.events)

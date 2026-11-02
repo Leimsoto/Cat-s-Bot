@@ -27,6 +27,7 @@ const Welcome = lazy(() => import("../components/Welcome"));
 const Suggestions = lazy(() => import("../components/Suggestions"));
 const AutoMod = lazy(() => import("../components/AutoMod"));
 const AutoResponses = lazy(() => import("../components/AutoResponses"));
+const AutoReactions = lazy(() => import("../components/AutoReactions"));
 const CustomCommands = lazy(() => import("../components/CustomCommands"));
 
 const PANELS = {
@@ -50,6 +51,7 @@ const PANELS = {
   suggestions: Suggestions,
   automod: AutoMod,
   autoresponses: AutoResponses,
+  autoreactions: AutoReactions,
   "custom-commands": CustomCommands,
 };
 
@@ -74,6 +76,7 @@ const PAGE_TITLES = {
   suggestions: "Sugerencias",
   automod: "Automoderación",
   autoresponses: "Auto-respuestas",
+  autoreactions: "Autorreacciones",
   "custom-commands": "Comandos personalizados",
 };
 

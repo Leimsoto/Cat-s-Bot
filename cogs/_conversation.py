@@ -1,6 +1,7 @@
 """Persistent, attributed Discord conversations with explicit scoped memories."""
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import re
@@ -21,7 +22,7 @@ from cogs._channel_history import CHANNEL_HISTORY_TOOL, CHANNEL_HISTORY_CONFIRM_
 from cogs._conversation_budget import ConversationBudget, ContextBudgetError
 from cogs._ai_mentions import format_ai_mentions, mention_context, split_ai_text
 from cogs._research_context import ResearchWorkspace, RESEARCH_REPORT_TOOL, assess_research, bound_research, public_brief, research_scope_token, select_passages
-from cogs._llm_moderation import EndpointResolver, fingerprint, request_completion, LLMReview, UnsupportedToolsError
+from cogs._llm_moderation import EndpointIncompleteResponse, EndpointResolver, fingerprint, request_completion, LLMReview, UnsupportedToolsError
 from cogs._moderation_history import moderation_details
 from cogs._personal_memory import PERSONAL_MEMORY_TOOL, memory_candidate
 from cogs._web_access import WebReadError, _url as public_web_url
@@ -246,20 +247,36 @@ class Conversation:
                 "timeout_seconds": 300 if deep else 180}
 
     async def generate(self, job, messages, *, tools=None, structured=False, task="chat", internal=False):
-        if not await self.scope_current(job) or not await self.timed(job, "rate", self.cog._acquire_slot(provider="strata")):
-            return None
-        # Authority and source bytes are fetched fresh after any rate-limit wait.
-        if not await self.timed(job, "authorization", self.unchanged(job)):
-            return None
-        job["_llm_calls"] = job.get("_llm_calls", 0) + 1
         options = {"tools": tools, "structured": structured} if tools or structured else {}
         options.update(self.generation_profile(job, task, internal=internal))
-        clock = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        messages = [{**messages[0], "content": messages[0]["content"] +
-                     f"\nVerified runtime clock: {clock}; timezone=UTC. This is the current time, not the training date. "
-                     "Do not infer the user's local timezone from it."}, *messages[1:]]
-        job.setdefault("_first_dispatch_at", monotonic())
-        return await self.timed(job, "model", request_completion(self.session, job["endpoint"], messages, **options))
+        for attempt in range(2):
+            if not await self.scope_current(job) or not await self.timed(job, "rate", self.cog._acquire_slot(provider="strata")):
+                return None
+            # Authority and source bytes are fetched fresh after any rate-limit wait, including recovery.
+            if not await self.timed(job, "authorization", self.unchanged(job)):
+                return None
+            job["_llm_calls"] = job.get("_llm_calls", 0) + 1
+            clock = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            current_messages = [{**messages[0], "content": messages[0]["content"] +
+                         f"\nVerified runtime clock: {clock}; timezone=UTC. This is the current time, not the training date. "
+                         "Do not infer the user's local timezone from it."}, *messages[1:]]
+            job.setdefault("_first_dispatch_at", monotonic())
+            try:
+                return await self.timed(job, "model", request_completion(self.session, job["endpoint"], current_messages, **options))
+            except EndpointIncompleteResponse as exc:
+                logger.warning("Conversation incomplete task=%s reason=%s output_reserve=%d recovery=%s",
+                    task, exc.reason, options["max_output_tokens"], bool(attempt))
+                if attempt or internal or not job.get("deep_think") or exc.reason not in {"length", "max_output_tokens"}:
+                    raise
+                # Keep the reserved window and discard truncated output; make room by omitting reasoning.
+                options["reasoning_effort"] = "none"
+                options["timeout_seconds"] = min(60, options["timeout_seconds"])
+                if task == "web" and tools and RESEARCH_REPORT_TOOL in tools:
+                    options["tools"] = [RESEARCH_REPORT_TOOL]
+                    instruction = "Output limit recovery: call submit_research now with a compact complete ledger of validated evidence and material gaps. Do not search or read more pages in this recovery."
+                else:
+                    instruction = "Output limit recovery: provide a concise complete answer to the central question, grounded in the supplied evidence; retain material uncertainty and omit tangents."
+                messages = [{**messages[0], "content": messages[0]["content"] + "\n" + instruction}, *messages[1:]]
 
     @staticmethod
     def budget_config(job, task="chat"):
@@ -690,10 +707,12 @@ class Conversation:
             "sufficient=false continues after compaction; sufficient=true finishes only with supported facts and no unresolved material gaps. Plain text without submit_research is not completion. "
             "Only if essential user precision is missing, submit sufficient=false with clarification_required as a specific natural question. Never use clarification for tool failures, context pressure or a partial answer. "
             "When a checkpoint is required, consolidate the read evidence without external calls; independent rounds can continue from that validated ledger. Summaries are not evidence. "
-            "Stop once adequate sources cover the actual question; unrelated unknowns do not require exhaustive searching. "
+            "At each required checkpoint, reassess whether the central question is covered; do not invent new gaps or tangents. Stop once adequate sources cover the actual question; unrelated unknowns do not require exhaustive searching. "
             + ("Deep Think: test alternative interpretations, corroborate central volatile claims with independent primary sources, and examine material contradictions; record any unresolved claim individually. " if deep else ""))}
         ledger, last_checkpoint, stalled_requests = None, None, None
+        last_result, stagnant_batches, checkpoint_pages = None, 0, 0
         pages, sources, evidence, seen_requests, seen_ids = {}, {}, [], set(), set()
+        discovery_history, read_signatures = set(), set()
         failed_pages, observations = {}, []
         total_pages = 0
         search_attempted = False
@@ -705,6 +724,7 @@ class Conversation:
         def remember_url(value):
             normalized = source_url(value)
             if normalized is not None:
+                discovery_history.add(normalized)
                 discovered_urls[normalized] = None
                 discovered_urls.move_to_end(normalized)
                 while len(discovered_urls) > 128:
@@ -747,6 +767,13 @@ class Conversation:
                 "complete": bool(assessment and assessment["sufficient"]), "pages_read": total_pages,
                 "diagnostics": {"pages_read": total_pages, "search_attempts": quick_counts["search_web"],
                     "read_attempts": quick_counts["read_webpage"], "stop_reason": reason, "observations": observations}}, final_allowance)
+
+        def incomplete_result(reason):
+            result = copy.deepcopy(last_result)
+            result["complete"] = False
+            result["assessment"]["sufficient"] = False
+            result["diagnostics"].update(complete=False, stop_reason=reason)
+            return bound_research(result, final_allowance)
 
         web_cfg = self.budget_config(job, "web")
         tools = [*WEB_TOOLS, RESEARCH_REPORT_TOOL]
@@ -791,21 +818,21 @@ class Conversation:
                             for url, source in support.items()],
                             "public_brief": brief, "assessment": assessment, "verified_source_urls": list(support),
                             "search_result_urls": [url for url, source in sources.items() if source["kind"] == "search_snippet"],
-                            "complete": True, "pages_read": total_pages, "limits_reached": False,
-                            "diagnostics": {"complete": True, "pages_read": total_pages, "observations": observations}}
+                            "complete": bool(assessment["sufficient"] or clarification), "pages_read": total_pages, "limits_reached": False,
+                            "diagnostics": {"complete": bool(assessment["sufficient"] or clarification), "pages_read": total_pages, "observations": observations}}
                         if clarification and not assessment["sufficient"]:
                             result["clarification_required"] = clarification
                         if assessment["sufficient"] or clarification:
                             bounded = bound_research(result, final_allowance)
                             if (assessment["sufficient"] and bounded["assessment"]["sufficient"]
                                     or clarification and bounded.get("clarification_required") == clarification):
+                                await self.save_research(job, bound_research(result, min(final_allowance, 60000)))
                                 return bounded
-                        material = {"facts": [{**fact, "support": [{"url": source["url"], "quote": source["quote"]}
-                            for source in fact["support"]]} for fact in assessment["facts"]],
-                            "gaps": assessment["gaps"], "clarification_required": clarification}
-                        checkpoint = json.dumps([material, sorted(seen_requests)], sort_keys=True, ensure_ascii=False)
+                        checkpoint = (len(discovery_history), len(read_signatures))
                         if checkpoint == last_checkpoint:
                             raise ValueError("research_no_progress")
+                        last_result = result
+                        await self.save_research(job, bound_research(result, min(final_allowance, 60000)))
                         logger.debug("Research checkpoint guild=%s message=%s facts=%s gaps=%s pages_read=%s",
                             job["message"].guild.id, job["message"].id, len(assessment["facts"]), len(assessment["gaps"]), total_pages)
                         ledger, last_checkpoint = assessment, checkpoint
@@ -815,6 +842,8 @@ class Conversation:
                         seen_requests.clear()
                         seen_ids.clear()
                         stalled_requests = None
+                        stagnant_batches = 0
+                        checkpoint_pages = total_pages
                         messages = frame()
                         remaining_bytes = min(final_allowance, max(0, (capacity - len(json.dumps(messages + tools).encode("utf-8")) - 1024) // 2))
                         checkpoint_required = remaining_bytes < 512
@@ -822,6 +851,7 @@ class Conversation:
                     if checkpoint_required:
                         raise ValueError("research_checkpoint_required")
                     messages.append(response)
+                    prior_material = (len(discovery_history), len(read_signatures))
                     fresh = False
                     batch = []
                     for call in calls:
@@ -878,6 +908,7 @@ class Conversation:
                                 if isinstance(result.get("url"), str) and result["text"].strip():
                                     pages[result["url"]] = {field: result.get(field) for field in
                                         ("url", "text", "retrieved_at_utc", "published_at_untrusted", "modified_at_untrusted")}
+                                    read_signatures.add((result["url"], hashlib.sha256(result["text"].encode("utf-8")).digest()))
                                     total_pages += 1
                             elif name == "read_webpage" and (result.get("error") or result.get("status") == "error"):
                                 failed_pages[argument] = dict(result)
@@ -908,6 +939,11 @@ class Conversation:
                                 if isinstance(link, dict):
                                     remember_url(link.get("url"))
                         messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)})
+                    if deep:
+                        progressed = (len(discovery_history), len(read_signatures)) != prior_material
+                        stagnant_batches = 0 if progressed else stagnant_batches + 1
+                        # Rephrasing queries with identical results must consolidate before more research.
+                        checkpoint_required |= stagnant_batches >= 3 or total_pages - checkpoint_pages >= 3
                     if not fresh and deep:
                         signature = tuple(sorted(batch))
                         if signature == stalled_requests:
@@ -916,10 +952,14 @@ class Conversation:
                     else:
                         stalled_requests = None
 
-        except TimeoutError:
-            if deep:
-                raise
-            return quick_result(reason="timeout")
+        except (TimeoutError, ValueError) as exc:
+            if not deep and isinstance(exc, TimeoutError):
+                return quick_result(reason="timeout")
+            reason = ("provider_timeout" if isinstance(exc, TimeoutError) else
+                      "endpoint_output_limit" if isinstance(exc, EndpointIncompleteResponse) and exc.reason in {"length", "max_output_tokens"} else str(exc))
+            if deep and last_result is not None and reason in {"provider_timeout", "endpoint_output_limit", "research_no_progress", "research_missing_report"}:
+                return incomplete_result(reason)
+            raise
 
     def moderation_context(self, message, *, target_id=None, administrator=False):
         target_id = message.author.id if target_id is None else target_id

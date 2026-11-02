@@ -17,6 +17,7 @@ Los roles internos del bot nunca sustituyen los permisos efectivos de Discord.
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -25,6 +26,48 @@ from discord import app_commands
 from discord.ext import commands
 
 logger = logging.getLogger("Channels")
+
+# Una secuencia emoji Unicode (incluye familias, tonos, banderas y keycaps).
+_EMOJI_BASE = r"[\u00a9\u00ae\u203c\u2049\u2122\u2139\u2194-\u21ff\u2300-\u23ff\u24c2\u25aa-\u27bf\u2934\u2935\u2b05-\u2b55\u3030\u303d\u3297\u3299\U0001f170\U0001f171\U0001f17e\U0001f17f\U0001f18e\U0001f191-\U0001f19a\U0001f201-\U0001f251\U0001f300-\U0001faff]"
+_EMOJI_PART = _EMOJI_BASE + r"\ufe0f?[\U0001f3fb-\U0001f3ff]?"
+_UNICODE_EMOJI = re.compile(
+    r"(?:[\U0001f1e6-\U0001f1ff]{2}|[0-9#*]\ufe0f?\u20e3|"
+    + _EMOJI_PART + r"(?:\u200d" + _EMOJI_PART + r")*(?:[\U000e0020-\U000e007e]+\U000e007f)?)"
+)
+_CUSTOM_EMOJI = re.compile(r"<a?:[A-Za-z0-9_]{2,32}:([0-9]{1,20})>")
+
+
+async def validate_auto_reactions(bot, guild, channel, emojis, *, enabled=True):
+    """Valida la entrada compartida por dashboard y /channelsetup."""
+    if not isinstance(emojis, list) or len(emojis) > 20:
+        raise ValueError("Elige un máximo de 20 emojis.")
+    application_emojis = None
+    for value in emojis:
+        if not isinstance(value, str) or len(value) > 100:
+            raise ValueError("Cada reacción debe ser un emoji válido.")
+        custom = _CUSTOM_EMOJI.fullmatch(value)
+        if custom is None:
+            if not _UNICODE_EMOJI.fullmatch(value):
+                raise ValueError("Cada reacción debe ser un único emoji Unicode o personalizado.")
+            continue
+        if not enabled:
+            continue
+        emoji_id = int(custom.group(1))
+        emoji = bot.get_emoji(emoji_id) or discord.utils.get(guild.emojis, id=emoji_id)
+        if emoji is not None:
+            if not emoji.is_usable():
+                raise ValueError("El bot no puede usar ese emoji.")
+            if emoji.guild.id != guild.id and (guild.me is None or not channel.permissions_for(guild.me).use_external_emojis):
+                raise ValueError("El bot necesita Usar emojis externos en este canal.")
+        else:
+            if application_emojis is None:
+                application_emojis = await bot.fetch_application_emojis()
+            if not discord.utils.get(application_emojis, id=emoji_id):
+                raise ValueError("El emoji no pertenece a este servidor ni a la aplicación del bot.")
+    if emojis and enabled:
+        perms = channel.permissions_for(guild.me) if guild.me is not None else None
+        if perms is None or not all(getattr(perms, name, False) for name in ("view_channel", "read_message_history", "add_reactions")):
+            raise ValueError("El bot necesita Ver canal, Leer historial y Añadir reacciones en este canal.")
 
 
 # ── Helpers de autorización efectiva ─────────────────────────────────────────
@@ -422,7 +465,7 @@ class Channels(commands.Cog):
         embed.add_field(
             name="😀 Autorreacción",
             value=(
-                f"**{'✅ Activado' if react_list else '❌ Desactivado'}**\n"
+                f"**{'✅ Activado' if react_list and cfg.get('auto_react_enabled', 1) else '❌ Desactivado'}**\n"
                 f"Emojis: {' '.join(react_list) if react_list else '—'}"
             ),
             inline=False,
@@ -436,10 +479,12 @@ class Channels(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild:
+        if message.author.bot or not message.guild or message.webhook_id is not None:
             return
 
         cfg = self.db.get_channel_config(message.channel.id)
+        if cfg.get("guild_id") not in (None, message.guild.id):
+            return
 
         # ── Solo multimedia ───────────────────────────────────────────────
         if cfg.get("media_only", 0):
@@ -479,7 +524,7 @@ class Channels(commands.Cog):
                     return
 
         # ── Autorreacción ─────────────────────────────────────────────────
-        if cfg.get("auto_react"):
+        if cfg.get("auto_react") and cfg.get("auto_react_enabled", 1):
             try:
                 emojis = json.loads(cfg["auto_react"])
                 if not isinstance(emojis, list):
@@ -488,9 +533,11 @@ class Channels(commands.Cog):
                 logger.warning("auto_react inválido en canal %s", message.channel.id)
                 emojis = []
             for emoji in emojis:
+                if not isinstance(emoji, str) or not emoji.strip():
+                    continue
                 try:
                     await message.add_reaction(emoji)
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.NotFound):
                     logger.debug("Sin permisos para autorreaccionar en canal %s", message.channel.id)
                     break
                 except discord.HTTPException as exc:
@@ -545,6 +592,7 @@ class ClearAllConfirmView(discord.ui.View):
                     media_only=old_cfg.get("media_only", 0),
                     media_config=old_cfg.get("media_config"),
                     auto_react=old_cfg.get("auto_react"),
+                    auto_react_enabled=old_cfg.get("auto_react_enabled", 1),
                     slowmode=old_cfg.get("slowmode", 0),
                 )
                 db.delete_channel_config(channel.id)
@@ -703,9 +751,15 @@ class AutoReactModal(discord.ui.Modal, title="Configurar autorreacción"):
         emojis = self.emojis_input.value.strip().split()
         if not emojis:
             return await interaction.response.send_message("❌ Ingresa al menos un emoji.", ephemeral=True)
+        try:
+            await validate_auto_reactions(self.parent.cog.bot, interaction.guild, interaction.channel, emojis)
+        except ValueError as exc:
+            return await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+        except discord.HTTPException:
+            return await interaction.response.send_message("❌ No pude comprobar los emojis con Discord. Inténtalo de nuevo.", ephemeral=True)
         self.parent.cog.db.set_channel_config(
             self.parent.channel_id, interaction.guild_id,
-            auto_react=json.dumps(emojis),
+            auto_react=json.dumps(emojis), auto_react_enabled=1,
         )
         await self.parent._refresh(interaction)
 
