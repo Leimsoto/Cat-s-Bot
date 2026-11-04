@@ -9,6 +9,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import chat_exporter
+from cogs._role_safety import ticket_category_role_ids
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +243,19 @@ class Tickets(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = bot.db # type: ignore
+        self._staff_config_locks = {}
+
+    def _staff_config_lock(self, guild_id):
+        return self._staff_config_locks.setdefault(guild_id, asyncio.Lock())
+
+    async def apply_staff_configuration(self, guild, previous_config, next_config, previous_categories, next_categories, save):
+        async with self._staff_config_lock(guild.id):
+            if (self.db.get_ticket_config(guild.id) != previous_config
+                    or self.db.get_ticket_categories(guild.id) != previous_categories):
+                raise RuntimeError("La configuración cambió durante el guardado; vuelve a intentarlo")
+            await self.sync_staff_permissions(guild, previous_config, next_config, previous_categories, next_categories, grant=False)
+            save()
+            await self.sync_staff_permissions(guild, previous_config, next_config, previous_categories, next_categories, grant=True)
 
     def _category_for_ticket(self, guild_id: int, ticket: dict) -> dict | None:
         return next(
@@ -255,19 +269,65 @@ class Tickets(commands.Cog):
 
     def _ticket_staff_role_ids(self, guild_id: int, category: dict | None = None) -> set[int]:
         config = self.db.get_ticket_config(guild_id)
+        return self._staff_role_ids(guild_id, config, category)
+
+    @staticmethod
+    def _staff_role_ids(guild_id: int, config: dict, category: dict | None = None) -> set[int]:
         raw_ids = [
             *json.loads(config.get("allowed_roles") or "[]"),
             *json.loads(config.get("immune_roles") or "[]"),
         ]
-        if category and category.get("staff_role_id"):
-            raw_ids.append(category["staff_role_id"])
+        raw_ids.extend(ticket_category_role_ids(category))
         role_ids: set[int] = set()
         for role_id in raw_ids:
             try:
-                role_ids.add(int(role_id))
+                if int(role_id) > 0 and int(role_id) != guild_id:
+                    role_ids.add(int(role_id))
             except (TypeError, ValueError):
                 continue
         return role_ids
+
+    async def sync_staff_permissions(self, guild, previous_config, next_config, previous_categories, next_categories, *, grant=True):
+        """Revoke before committing delegated roles; grant only after they are protected."""
+        previous_by_name = {category["name"]: category for category in previous_categories}
+        next_by_id = {category["id"]: category for category in next_categories}
+        next_by_name = {category["name"]: category for category in next_categories}
+        # Freeze OPEN tickets before Discord awaits; closes must not shift later pages.
+        tickets = self.db.get_all_tickets(
+            guild.id, status="OPEN", limit=self.db.count_open_tickets_by_guild(guild.id)
+        )
+        for ticket in tickets:
+            category = previous_by_name.get(ticket.get("category_name"))
+            next_category = next_by_name.get(ticket.get("category_name")) if grant else (next_by_id.get(category["id"]) if category else None)
+            old_ids = self._staff_role_ids(guild.id, previous_config, category)
+            new_ids = self._staff_role_ids(guild.id, next_config, next_category)
+            changed_ids = new_ids if grant else old_ids - new_ids
+            if not changed_ids:
+                continue
+            channel = guild.get_channel(ticket["channel_id"])
+            if channel is None:
+                try:
+                    channel = await guild.fetch_channel(ticket["channel_id"])
+                except discord.NotFound:
+                    continue
+            if channel.guild.id != guild.id:
+                raise ValueError("El canal del ticket no pertenece al servidor")
+            overwrites = channel.overwrites
+            changed = False
+            for role_id in changed_ids:
+                role = guild.get_role(role_id)
+                if role is None:
+                    continue
+                overwrite = channel.overwrites_for(role)
+                if overwrite.view_channel is grant and overwrite.send_messages is grant:
+                    continue
+                overwrite.view_channel = grant
+                overwrite.send_messages = grant
+                overwrites[role] = overwrite
+                changed = True
+            if changed:
+                await channel.edit(overwrites=overwrites, reason="Actualizar roles de soporte de tickets")
+
 
     def _is_ticket_staff(self, member: discord.Member, ticket: dict) -> bool:
         if member.id == member.guild.owner_id or member.guild_permissions.administrator:
@@ -307,6 +367,18 @@ class Tickets(commands.Cog):
         return s[:max_len]
 
     async def create_ticket_channel(
+        self, interaction: discord.Interaction, category: dict, answers: list,
+        *, questions: list[str] | None = None,
+    ) -> discord.TextChannel | None:
+        async with self._staff_config_lock(interaction.guild.id):
+            current_category = next((current for current in self.db.get_ticket_categories(interaction.guild.id)
+                                     if int(current["id"]) == int(category["id"])), None)
+            if current_category is None:
+                await interaction.followup.send("❌ Esta categoría ya no existe. Abre el panel de nuevo.", ephemeral=True)
+                return None
+            return await self._create_ticket_channel(interaction, current_category, answers, questions=questions)
+
+    async def _create_ticket_channel(
         self, interaction: discord.Interaction, category: dict, answers: list,
         *, questions: list[str] | None = None,
     ) -> discord.TextChannel | None:

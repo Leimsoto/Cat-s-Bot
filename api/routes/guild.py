@@ -59,6 +59,7 @@ from cogs._moderation_history import IdentityResolver, moderation_details, recor
 from cogs._role_safety import (
     delegated_moderation_role_ids,
     safe_for_automatic_assignment,
+    ticket_category_role_ids,
 )
 
 logger = logging.getLogger("API.guild")
@@ -1345,6 +1346,60 @@ async def delete_level_reward(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _ticket_category_payload(category: dict) -> dict:
+    return {
+        **stringify_fields(category, ("guild_id", "staff_role_id")),
+        "staff_role_ids": [str(role_id) for role_id in sorted(ticket_category_role_ids(category))],
+    }
+
+
+def _ticket_config_payload(config: dict) -> dict:
+    payload = stringify_fields(config, ("guild_id", "panel_channel_id", "category_id", "log_channel_id"))
+    for field in ("allowed_roles", "immune_roles"):
+        payload[field] = json.dumps([str(role_id) for role_id in _normalize_role_id_list(config.get(field), field)])
+    return payload
+
+
+async def _ticket_category_role_updates(request, guild_id, body, current, bot, user):
+    if "staff_role_ids" not in body and "staff_role_id" not in body:
+        return {}
+    if "staff_role_ids" in body:
+        role_ids = _normalize_role_id_list(body["staff_role_ids"], "staff_role_ids")
+    else:
+        role_id = _coerce_optional_snowflake(body["staff_role_id"], "staff_role_id")
+        role_ids = [role_id] if role_id is not None else []
+    role_ids = sorted(set(role_ids))
+    if set(role_ids) == ticket_category_role_ids(current):
+        return {}
+    await _authorize_delegated_role_updates(request, guild_id, {"staff_role_ids": role_ids}, bot, user)
+    return {"staff_role_ids": json.dumps([str(role_id) for role_id in role_ids]), "staff_role_id": None}
+
+
+async def _sync_ticket_staff_permissions(guild_id, db, bot, previous_config, next_config, previous_categories, next_categories, save):
+    guild = bot.get_guild(guild_id) if bot is not None else None
+    cog = bot.get_cog("Tickets") if bot is not None else None
+    if guild is None or cog is None:
+        raise HTTPException(503, "No se guardaron los roles: el módulo de tickets no está disponible para actualizar los canales abiertos.")
+    saved = False
+    def persist():
+        nonlocal saved
+        save()
+        saved = True
+    try:
+        await run_on_bot_loop(
+            bot,
+            lambda: cog.apply_staff_configuration(guild, previous_config, next_config, previous_categories, next_categories, persist),
+            timeout=30,
+        )
+    except DiscordBridgeTimeout as exc:
+        raise HTTPException(409, "La actualización de permisos tardó demasiado. Comprueba la configuración y vuelve a guardar los roles para completar la aplicación.") from exc
+    except Exception as exc:
+        logger.warning("Sincronización de permisos de tickets incompleta en guild %s: %s", guild_id, exc)
+        detail = ("La configuración se guardó, pero faltan permisos por aplicar en algunos tickets."
+                  if saved else "No se guardaron los cambios; algunos canales pueden tener revocaciones parciales.")
+        raise HTTPException(409, detail + " Revisa los permisos del bot y vuelve a guardar los roles para completar la aplicación.") from exc
+
+
 @router.get("/{guild_id}/tickets")
 async def get_tickets_config(
     guild_id: int, db=Depends(get_db), _user=Depends(require_guild_admin)
@@ -1352,8 +1407,8 @@ async def get_tickets_config(
     cfg = db.get_ticket_config(guild_id) or {}
     categories = db.get_ticket_categories(guild_id) or []
     return {
-        "config": stringify_fields(cfg, ("guild_id", "panel_channel_id", "category_id", "log_channel_id")),
-        "categories": stringify_rows(categories, ("guild_id", "staff_role_id")),
+        "config": _ticket_config_payload(cfg),
+        "categories": [_ticket_category_payload(category) for category in categories],
     }
 
 
@@ -1409,7 +1464,7 @@ async def patch_tickets_config(
                 filtered.pop(field)
             else:
                 delegated_roles[field] = role_ids
-                filtered[field] = json.dumps(role_ids)
+                filtered[field] = json.dumps([str(role_id) for role_id in role_ids])
     await _authorize_delegated_role_updates(
         request,
         guild_id,
@@ -1417,12 +1472,18 @@ async def patch_tickets_config(
         bot,
         user,
     )
-    if filtered:
+    if any(field in body for field in ("allowed_roles", "immune_roles")):
+        categories = db.get_ticket_categories(guild_id)
+        await _sync_ticket_staff_permissions(
+            guild_id, db, bot, current_ticket_config, {**current_ticket_config, **filtered}, categories, categories,
+            lambda: db.set_ticket_config(guild_id, **filtered) if filtered else None,
+        )
+    elif filtered:
         db.set_ticket_config(guild_id, **filtered)
     return {
         "status": "ok",
         "updated": list(filtered.keys()),
-        "config": stringify_fields(db.get_ticket_config(guild_id), ("guild_id", "panel_channel_id", "category_id", "log_channel_id")),
+        "config": _ticket_config_payload(db.get_ticket_config(guild_id)),
     }
 
 
@@ -1507,19 +1568,7 @@ async def add_ticket_category(
     if isinstance(welcome_data, dict):
         welcome_data = json.dumps(welcome_data, ensure_ascii=False)
 
-    staff_role_id = _coerce_optional_snowflake(
-        body.get("staff_role_id"),
-        "staff_role_id",
-    )
-    if staff_role_id is not None:
-        normalized_roles = await _validate_privileged_role_updates(
-            request,
-            guild_id,
-            {"staff_role_id": staff_role_id},
-            bot,
-            user,
-        )
-        staff_role_id = normalized_roles["staff_role_id"]
+    role_updates = await _ticket_category_role_updates(request, guild_id, body, {}, bot, user)
 
     db.add_ticket_category(
         guild_id,
@@ -1534,7 +1583,7 @@ async def add_ticket_category(
         welcome_data,
         description=body.get("description"),
         welcome_embed_template_key=body.get("welcome_embed_template_key"),
-        staff_role_id=staff_role_id,
+        **role_updates,
     )
     return {"status": "ok"}
 
@@ -1545,10 +1594,20 @@ async def delete_ticket_category(
     cat_id: int,
     db=Depends(get_db),
     _user=Depends(require_guild_admin),
+    bot=Depends(get_bot),
 ):
     """Elimina una categoría únicamente dentro del guild de la ruta."""
     if hasattr(db, "delete_ticket_category"):
-        db.delete_ticket_category(cat_id, guild_id)
+        categories = db.get_ticket_categories(guild_id)
+        if any(int(category["id"]) == cat_id and ticket_category_role_ids(category) for category in categories):
+            config = db.get_ticket_config(guild_id)
+            await _sync_ticket_staff_permissions(
+                guild_id, db, bot, config, config, categories,
+                [category for category in categories if int(category["id"]) != cat_id],
+                lambda: db.delete_ticket_category(cat_id, guild_id),
+            )
+        else:
+            db.delete_ticket_category(cat_id, guild_id)
     return {"status": "ok"}
 
 

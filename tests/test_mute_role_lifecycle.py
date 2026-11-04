@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from api.routes.moderation import update_appeal
 from cogs._mute_roles import fresh_members, plan_role_mute, restore_roles
+from cogs.automod import AutoMod
 from cogs.moderation import Moderation
 from tests.test_managed_messages import make_db
 
@@ -104,6 +105,37 @@ class MuteRoleLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def unmute(self):
         await Moderation.unmute.callback(self.cog, self.interaction, self.current_member(20), "Synthetic reason")
+
+    async def test_automod_warn_mutes_for_dashboard_duration_and_does_not_extend_existing_mute(self):
+        self.server_roles[20] = [200, 210]
+        self.cog.bot.get_cog = lambda name: self.cog if name == "Moderation" else None
+        self.db.set_config(100, warn_mute_enabled=1, warn_mute_threshold=3,
+            warn_mute_duration=3600, warn_kick_enabled=1, warn_kick_threshold=5,
+            warn_ban_enabled=1, warn_ban_threshold=8)
+        self.db.set_automod_config(100, enabled=1, rules={"banned_words": {
+            "enabled": True, "words": ["prohibido"], "action": "warn"}})
+        self.db._upsert_user(20, 100, warns=2)
+        automod = AutoMod(self.cog.bot)
+        automod._log_to_modlog = AsyncMock()
+        message = SimpleNamespace(id=1000, guild=self.guild, author=self.current_member(20),
+            channel=self.guild.get_channel(500), content="prohibido", delete=AsyncMock(),
+            jump_url="https://discord.com/channels/100/500/1000")
+        await automod._execute_action(message, "banned_words", "warn", {})
+        cases = self.db.list_cases(100)
+        self.assertEqual([(row["action_type"], row["status"]) for row in cases],
+            [("AUTO_MUTE", "active"), ("AUTO_WARN", "active")])
+        self.assertEqual(cases[0]["parent_case_id"], cases[1]["id"])
+        self.assertEqual(cases[0]["duration_seconds"], 3600)
+        self.assertEqual(json.loads(cases[0]["extra_data"])["source"], "automod")
+        pending = self.db.get_pending_moderation_actions(100)
+        self.assertEqual([row["action_type"] for row in pending], ["MUTE_EXPIRE"])
+        self.assertEqual(pending[0]["execute_at"], cases[0]["expires_at"])
+        self.assertEqual(self.server_roles[20], [200, 300])
+        message.id += 1
+        await automod._execute_action(message, "banned_words", "warn", {})
+        self.state.http.add_role.assert_awaited_once()
+        self.assertEqual(self.db.get_pending_moderation_actions(100), pending)
+        self.assertEqual(self.db.get_user(20, 100)["warns"], 4)
 
     async def test_admin_and_conflicting_staff_roles_are_restored_exactly_on_unmute(self):
         case = await self.mute()

@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { Fragment, useState, useEffect, useCallback, useRef } from 'react';
 import { apiGet, apiPatch } from '../lib/api';
 import { SearchableSelect } from './ui';
 import { Icon } from '../lib/icons';
 import Toast from './Toast';
 import IdentityBadge from './IdentityBadge';
 import ModerationReason from './ModerationReason';
+import CaseEvidence from './CaseEvidence';
 import { useSaveBar } from '../lib/SaveBarContext';
 
 const ACTION_META = {
@@ -58,6 +59,8 @@ export default function Logs({ selectedGuild }) {
 
   // Cases state
   const [cases, setCases]       = useState([]);
+  const [casesGuild, setCasesGuild] = useState(null);
+  const casesRequest = useRef(0);
   const [loading, setLoading]   = useState(true);
   const [filter, setFilter]     = useState('all');
   const [search, setSearch]     = useState('');
@@ -77,17 +80,20 @@ export default function Logs({ selectedGuild }) {
 
   const load = useCallback(async () => {
     if (!guildId) return;
+    const request = ++casesRequest.current;
     setLoading(true);
     try {
-      const data = await apiGet(`/api/moderation/${guildId}/cases?limit=200`);
+      const data = await apiGet(`/api/moderation/${guildId}/cases?limit=200`, { cache: false });
       const raw = Array.isArray(data) ? data : (data.cases || []);
+      if (request !== casesRequest.current) return;
       setCases(raw.sort((a, b) => {
         const ta = typeof a.created_at === 'number' ? a.created_at : new Date(a.created_at).getTime() / 1000;
         const tb = typeof b.created_at === 'number' ? b.created_at : new Date(b.created_at).getTime() / 1000;
         return tb - ta;
       }));
-    } catch { setCases([]); }
-    finally { setLoading(false); }
+      setCasesGuild(guildId);
+    } catch { if (request === casesRequest.current) setCases([]); }
+    finally { if (request === casesRequest.current) setLoading(false); }
   }, [guildId]);
 
   const loadConfig = useCallback(async () => {
@@ -163,7 +169,8 @@ export default function Logs({ selectedGuild }) {
 
   useSaveBar({ dirty, saving, onSave: saveConfig, onRevert: loadConfig });
 
-  const filtered = cases.filter(c => {
+  const visibleCases = casesGuild === guildId ? cases : [];
+  const filtered = visibleCases.filter(c => {
     if (filter !== 'all' && c.action !== filter) return false;
     if (search) {
       const q = search.toLowerCase();
@@ -181,7 +188,7 @@ export default function Logs({ selectedGuild }) {
 
   const totalPages = Math.ceil(filtered.length / PER_PAGE);
   const paged = filtered.slice(page * PER_PAGE, (page + 1) * PER_PAGE);
-  const counts = cases.reduce((acc, c) => { acc[c.action] = (acc[c.action] || 0) + 1; return acc; }, {});
+  const counts = visibleCases.reduce((acc, c) => { acc[c.action] = (acc[c.action] || 0) + 1; return acc; }, {});
 
   const renderChannelOption = (opt) => (
     <><Icon name="channel" /> <span className="ss-option-label">{opt.name}</span>{opt.category ? <span className="ss-option-sub">{opt.category}</span> : null}</>
@@ -266,7 +273,7 @@ export default function Logs({ selectedGuild }) {
       {tab === 'cases' && (
         <>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
-            <p style={{ color: 'var(--muted)', margin: 0, fontSize: '0.88rem' }}>{cases.length} acción(es) registradas</p>
+            <p style={{ color: 'var(--muted)', margin: 0, fontSize: '0.88rem' }}>{visibleCases.length} acción(es) registradas</p>
             <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.82rem', color: 'var(--muted)', cursor: 'pointer' }}>
                 <span className="toggle-switch" style={{ transform: 'scale(0.8)' }}>
@@ -281,7 +288,7 @@ export default function Logs({ selectedGuild }) {
             </div>
           </div>
 
-          {cases.length > 0 && (
+          {visibleCases.length > 0 && (
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 20 }}>
               {Object.entries(counts).map(([action, count]) => {
                 const meta = ACTION_META[action] || { label: action, color: '#7a9bb5', icon: '📋' };
@@ -331,10 +338,11 @@ export default function Logs({ selectedGuild }) {
                     {paged.map((c, i) => {
                       const meta = ACTION_META[c.action] || { label: c.action, color: '#7a9bb5', icon: '📋' };
                       return (
-                        <tr key={c.id || i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', transition: 'background 0.15s' }}
+                        <Fragment key={`${guildId}:${c.id || i}`}>
+                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', transition: 'background 0.15s' }}
                           onMouseEnter={e => e.currentTarget.style.background = 'rgba(139,92,246,0.06)'}
                           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                          <td style={{ padding: '10px 16px', color: 'var(--muted)', fontFamily: 'monospace', fontSize: '0.78rem' }}>#{c.id || page * PER_PAGE + i + 1}</td>
+                          <td style={{ padding: '10px 16px', color: 'var(--muted)', fontFamily: 'monospace', fontSize: '0.78rem' }}>#{c.case_number || c.id || page * PER_PAGE + i + 1}</td>
                           <td style={{ padding: '10px 16px' }}>
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 99, fontSize: '0.74rem', fontWeight: 700, background: meta.color + '18', color: meta.color, border: `1px solid ${meta.color}30` }}>
                               {meta.icon} {c.action_label || meta.label}
@@ -348,9 +356,20 @@ export default function Logs({ selectedGuild }) {
                           </td>
                           <td style={{ padding: '10px 16px', maxWidth: 220 }}>
                             <ModerationReason entry={c} />
+                            {/^https?:\/\//i.test(c.evidence_url || '') && <a href={c.evidence_url} target="_blank" rel="noreferrer">Evidencia enlazada</a>}
                           </td>
                           <td style={{ padding: '10px 16px', color: 'var(--muted)', fontSize: '0.76rem', whiteSpace: 'nowrap' }}>{relativeTime(c.created_at)}</td>
                         </tr>
+                        <tr><td colSpan={6} style={{ padding: '0 16px 8px' }}>
+                          <CaseEvidence guildId={guildId} entry={c} onUpdated={(result) => {
+                            setCases((previous) => previous.map((item) => item.id === c.id ? {
+                              ...item,
+                              evidence_count: result.items.filter((evidence) => evidence.status === 'available').length,
+                              evidence_status: result.items.some((evidence) => evidence.status === 'failed') ? 'partial' : 'available',
+                            } : item));
+                          }} />
+                        </td></tr>
+                        </Fragment>
                       );
                     })}
                   </tbody>

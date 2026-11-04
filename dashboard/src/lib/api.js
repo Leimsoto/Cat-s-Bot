@@ -174,6 +174,19 @@ export async function apiPost(path, body) {
   return data;
 }
 
+export async function apiUpload(path, file) {
+  const data = await requestJson(path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-Filename': encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  invalidateRelated(path);
+  return data;
+}
+
 export async function apiPatch(path, body) {
   const data = await requestJson(path, {
     method: 'PATCH',

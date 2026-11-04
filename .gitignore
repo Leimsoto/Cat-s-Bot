@@ -49,3 +49,6 @@ dist/
 /SECURITY_FIX_REPORT.md
 /TRIGGER_REVIEW.md
 /TRIGGER_INVENTORY.json
+
+# Private conversation attachments
+/.codex-remote-attachments/

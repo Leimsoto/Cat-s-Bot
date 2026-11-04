@@ -30,6 +30,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from cogs._moderation_history import interaction_metadata
+from cogs._moderation_evidence import capture_manual
 from cogs._mute_roles import confirm_mute_receipts, fresh_members, plan_role_mute, role_permissions, restore_roles
 
 from cogs._role_safety import (
@@ -607,6 +608,7 @@ class Moderation(commands.Cog):
         target_id: Optional[int] = None,
         allow_absent_target: bool = False,
         action_type: str = "",
+        require_bot_permission: bool = False,
     ) -> tuple[Optional[discord.Member], Optional[discord.Member], Optional[str]]:
         """Re-fetch actor/target and authorize immediately before a sensitive sink."""
         guild = interaction.guild
@@ -670,6 +672,10 @@ class Moderation(commands.Cog):
         actor_permissions, actor_top_role, actor_role_ids = actor_state
         bot_permissions, bot_top_role, _bot_role_ids = bot_state
         owner_id = int(live_guild.owner_id)
+        if require_bot_permission and not (
+            bot_permissions.administrator or getattr(bot_permissions, perm_name, False)
+        ):
+            return None, None, "El bot no tiene el permiso necesario para esta consecuencia."
         delegated_ids = delegated_moderation_role_ids(self.db, guild.id)
         if delegated_ids is None:
             return None, None, "No pude verificar los roles delegados actuales."
@@ -1648,7 +1654,7 @@ class Moderation(commands.Cog):
 
     async def _apply_role_mute(
         self, interaction, target_id, role_id, action_type, reason, duration,
-        *, moderator_id=None, parent_case_id=None, job_action="MUTE_EXPIRE",
+        *, moderator_id=None, parent_case_id=None, job_action="MUTE_EXPIRE", metadata=None, evidence=None, evidence_url=None,
     ):
         guild = interaction.guild
         member, bot_member, actor = await fresh_members(
@@ -1667,8 +1673,8 @@ class Moderation(commands.Cog):
         token = new_mute_effect_token()
         expiry, case_id = self._prepare_mute_record(
             guild.id, target_id, moderator_id or actor.id, action_type, reason,
-            duration, role_id, job_action=job_action, parent_case_id=parent_case_id,
-            extra={**interaction_metadata(interaction, target_id, actor),
+            duration, role_id, job_action=job_action, parent_case_id=parent_case_id, evidence=evidence, evidence_url=evidence_url,
+            extra={**(metadata if metadata is not None else interaction_metadata(interaction, target_id, actor)),
                 "mute_effect_token": token,
                 "suppressed_roles": [role_permissions(value) for value in suppressed],
                 "mute_member_joined_at": str(member.joined_at)},
@@ -1723,6 +1729,7 @@ class Moderation(commands.Cog):
         job_action: str = "MUTE_EXPIRE",
         parent_case_id: Optional[int] = None,
         extra: Optional[Dict] = None,
+        evidence=None, evidence_url=None,
     ) -> tuple[Optional[datetime], int]:
         """Persiste una intención recuperable antes de tocar el rol Discord."""
         configured_role_id = int(
@@ -1760,7 +1767,7 @@ class Moderation(commands.Cog):
             status="applying",
             duration_seconds=duration_secs,
             expires_at=expiry.isoformat() if expiry else None,
-            parent_case_id=parent_case_id,
+            parent_case_id=parent_case_id, evidence=evidence, evidence_url=evidence_url,
         )
         if not case_id:
             raise RuntimeError("mute_intent_not_persisted")
@@ -2501,6 +2508,8 @@ class Moderation(commands.Cog):
         duracion: Optional[str] = None,
         eliminar_mensajes: app_commands.Range[int, 0, 7] = 0,
         evidencia_url: Optional[str] = None,
+        mensaje_url: Optional[str] = None,
+        archivo: Optional[discord.Attachment] = None,
     ):
         if not self._has_mod_perms(interaction, "ban_members"):
             return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
@@ -2594,6 +2603,12 @@ class Moderation(commands.Cog):
             )
             if auth_error or current_actor is None:
                 raise PermissionError(auth_error or "autorización no verificable")
+            evidence = await capture_manual(self.bot, interaction, mensaje_url, archivo, evidencia_url)
+            current_actor, current_member, auth_error = await self._fresh_moderation_context(
+                interaction, "ban_members", target_id=target_id, allow_absent_target=True,
+            )
+            if auth_error or current_actor is None:
+                raise PermissionError(auth_error or "autorización no verificable")
             ban_target = current_member or discord.Object(id=target_id)
             effect_token = new_ban_effect_token()
             current_case_id = self.db.log_action(
@@ -2609,7 +2624,7 @@ class Moderation(commands.Cog):
                     "ban_effect_token": effect_token,
                 }},
                 status="applying",
-                evidence_url=evidencia_url,
+                evidence_url=evidencia_url, evidence=evidence,
                 duration_seconds=duration_secs,
             )
             if not current_case_id:
@@ -2715,6 +2730,7 @@ class Moderation(commands.Cog):
             embed.add_field(name="Evidencia", value=evidencia_url, inline=False)
         embed.add_field(name="Razón", value=razon, inline=False)
 
+        self._add_evidence_status(embed, interaction.guild_id, case_id)
         await interaction.followup.send(embed=embed)
         await self._send_log(interaction.guild, embed)
 
@@ -3232,6 +3248,9 @@ class Moderation(commands.Cog):
         interaction: discord.Interaction,
         usuario: discord.Member,
         razon: str,
+        mensaje_url: Optional[str] = None,
+        archivo: Optional[discord.Attachment] = None,
+        evidencia_url: Optional[str] = None,
     ):
         if not self._has_mod_perms(interaction, "kick_members"):
             return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
@@ -3256,6 +3275,12 @@ class Moderation(commands.Cog):
             return await interaction.followup.send(
                 _voice(self).line("error", auth_error), ephemeral=True
             )
+        evidence = await capture_manual(self.bot, interaction, mensaje_url, archivo, evidencia_url)
+        current_actor, current_target, auth_error = await self._fresh_moderation_context(
+            interaction, "kick_members", target_id=usuario.id,
+        )
+        if auth_error or current_target is None:
+            return await interaction.followup.send(auth_error or "No pude verificar la operación.", ephemeral=True)
         usuario = current_target
         try:
             await usuario.kick(reason=f"{razon} | Mod: {current_actor}")
@@ -3273,7 +3298,8 @@ class Moderation(commands.Cog):
             )
 
         case_id = self.db.log_action(
-            interaction.guild_id, usuario.id, interaction.user.id, "KICK", razon, extra=interaction_metadata(interaction, usuario, interaction.user)
+            interaction.guild_id, usuario.id, interaction.user.id, "KICK", razon, extra=interaction_metadata(interaction, usuario, interaction.user),
+            evidence_url=evidencia_url, evidence=evidence,
         )
 
         if case_id:
@@ -3302,6 +3328,7 @@ class Moderation(commands.Cog):
         embed.add_field(name="Moderador", value=interaction.user.mention, inline=True)
         embed.add_field(name="Razón", value=razon, inline=False)
 
+        self._add_evidence_status(embed, interaction.guild_id, case_id)
         await interaction.followup.send(embed=embed)
         await self._send_log(interaction.guild, embed)
 
@@ -3325,6 +3352,9 @@ class Moderation(commands.Cog):
         usuario: discord.Member,
         duracion: Optional[str] = None,
         razon: str = "Sin razón especificada",
+        mensaje_url: Optional[str] = None,
+        archivo: Optional[discord.Attachment] = None,
+        evidencia_url: Optional[str] = None,
     ):
         await interaction.response.defer(thinking=True)
         guild = interaction.guild
@@ -3389,8 +3419,9 @@ class Moderation(commands.Cog):
                 int(value) for value in getattr(current_target, "_roles", ())
             }:
                 raise LookupError("already_muted")
+            evidence = await capture_manual(self.bot, interaction, mensaje_url, archivo, evidencia_url)
             current_actor, confirmed_member, current_expiry, current_case_id = await self._apply_role_mute(
-                interaction, target_id, mute_role_id, "MUTE", razon, secs
+                interaction, target_id, mute_role_id, "MUTE", razon, secs, evidence=evidence, evidence_url=evidencia_url
             )
             return current_actor, confirmed_member, current_role, current_expiry, current_case_id
 
@@ -3447,6 +3478,7 @@ class Moderation(commands.Cog):
             embed.add_field(name="Expira", value=f"<t:{int(expiry.timestamp())}:R>", inline=True)
         embed.add_field(name="Razón", value=razon, inline=False)
 
+        self._add_evidence_status(embed, interaction.guild_id, case_id)
         await interaction.followup.send(embed=embed)
         await self._send_log(interaction.guild, embed)
 
@@ -3894,84 +3926,27 @@ class Moderation(commands.Cog):
     # /warn
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="warn", description="Advierte a un usuario (con consecuencias configurables)")
-    @app_commands.describe(
-        usuario="Usuario a advertir",
-        razon="Razón de la advertencia",
-        evidencia_url="URL opcional con evidencia",
-    )
-    async def warn(
-        self,
-        interaction: discord.Interaction,
-        usuario: discord.Member,
-        razon: str,
-        evidencia_url: Optional[str] = None,
-    ):
-        if not self._has_mod_perms(interaction, "moderate_members"):
-            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
-        razon = razon.strip()
-        if not razon:
-            return await interaction.response.send_message(
-                "❌ Escribe el motivo en la opción `razon`. No se ha aplicado ninguna sanción.",
-                ephemeral=True,
-            )
-        err = self._can_moderate(interaction.user, usuario, action_type="WARN")  # type: ignore
-        if err:
-            return await interaction.response.send_message(_voice(self).line("error", err), ephemeral=True)
+    def _add_evidence_status(self, embed, guild_id, case_id):
+        summary = self.db.case_evidence_summary(guild_id, case_id)
+        note = f"{summary['evidence_count']} archivos conservados en el registro privado."
+        if summary["evidence_errors"]:
+            note += " Captura incompleta; el motivo figura en el registro."
+        embed.add_field(name="Evidencia", value=note, inline=False)
 
-        await interaction.response.defer()
-
+    async def apply_warn_consequence(
+        self, interaction, usuario, warn_case_id, *, policy_check=None, metadata=None,
+    ) -> tuple[Optional[discord.Embed], Optional[str]]:
+        """Apply dashboard warn thresholds for both manual and AutoMod warnings."""
         target_id = usuario.id
+        consequence_metadata = {
+            **(metadata if metadata is not None else
+               interaction_metadata(interaction, usuario, self.bot.user)),
+            "trigger": "warn_threshold",
+        }
 
-        async def apply_warn_record():
-            current_actor, current_target, auth_error = await self._fresh_moderation_context(
-                interaction,
-                "moderate_members",
-                target_id=target_id,
-                action_type="WARN",
-            )
-            if auth_error or current_actor is None or current_target is None:
-                raise PermissionError(auth_error or "No pude verificar la operación.")
-            current_warns, current_case_id = self.db.add_warn_with_action(
-                target_id,
-                interaction.guild_id,
-                current_actor.id,
-                "WARN",
-                razon, extra=interaction_metadata(interaction, target_id, current_actor),
-                evidence_url=evidencia_url,
-            )
-            return current_actor, current_target, current_warns, current_case_id
-
-        try:
-            current_actor, usuario, warns, warn_case_id = await run_sanction_locked(
-                self.bot,
-                interaction.guild_id,
-                target_id,
-                "WARN",
-                apply_warn_record,
-            )
-        except PermissionError as exc:
-            return await interaction.followup.send(
-                _voice(self).line("error", str(exc)),
-                ephemeral=True,
-            )
-
-        cfg = self.db.get_config(interaction.guild_id)
-
-        # Embed de warn (configurable)
-        warn_embed = build_warn_embed(cfg, usuario, current_actor, razon, warns)
-        if evidencia_url:
-            warn_embed.add_field(name="Evidencia", value=evidencia_url, inline=False)
-        await interaction.followup.send(embed=warn_embed)
-        log_ok = await self._send_log(interaction.guild, warn_embed)
-        if not log_ok:
-            await self._notify_modlog_issue(interaction)
-
-        if warn_case_id:
-            view = AppealUserView(
-                self.bot, interaction.guild_id, "WARN", razon, warn_case_id
-            )
-            await self._dm(usuario, warn_embed, view=view)
+        async def check_policy():
+            if policy_check is not None and not await policy_check():
+                raise LookupError("warn_policy_changed")
 
         # ── Consecuencias automáticas (de mayor a menor severidad) ────────────
 
@@ -3990,11 +3965,13 @@ class Moderation(commands.Cog):
                     "ban_members",
                     target_id=usuario.id,
                     action_type="AUTO_BAN",
+                    require_bot_permission=True,
                 )
                 if ban_auth_error or ban_target is None:
                     raise PermissionError(
                         ban_auth_error or "no pude verificar el usuario objetivo."
                     )
+                await check_policy()
                 live_action, live_warns, _ = self._current_warn_consequence(
                     interaction.guild_id, ban_target.id
                 )
@@ -4007,21 +3984,24 @@ class Moderation(commands.Cog):
                     self.bot.user.id,
                     "AUTO_BAN",
                     f"Alcanzó {live_warns} warns",
-                    {**interaction_metadata(interaction, ban_target, self.bot.user), **{
+                    {**consequence_metadata, **{
                         "ban_effect_token": effect_token,
-                        "source": "warn_threshold",
                     }},
                     status="applying",
                     parent_case_id=warn_case_id,
                 )
                 if not current_case_id:
                     raise RuntimeError("ban_intent_not_persisted")
-                await ban_target.ban(
-                    reason=reason_with_ban_effect(
-                        f"Auto-ban: alcanzó {live_warns} warns",
-                        effect_token,
+                try:
+                    await ban_target.ban(
+                        reason=reason_with_ban_effect(
+                            f"Auto-ban: alcanzó {live_warns} warns",
+                            effect_token,
+                        )
                     )
-                )
+                except discord.Forbidden:
+                    self.db.update_case_by_id(interaction.guild_id, current_case_id, status="failed")
+                    raise
                 await self._confirm_ban_effect(
                     interaction.guild, ban_target.id, effect_token
                 )
@@ -4074,6 +4054,8 @@ class Moderation(commands.Cog):
                     "⚠️ Auto-ban falló: el bot no tiene permiso `Banear miembros`"
                     " o su rol está debajo del usuario."
                 )
+            except discord.HTTPException:
+                consequence_warning = "⚠️ Auto-ban sin confirmar: no se pudo completar la operación con Discord."
 
         # Kick automático (solo si no se baneó)
         elif consequence_action == "KICK":
@@ -4083,11 +4065,13 @@ class Moderation(commands.Cog):
                     "kick_members",
                     target_id=usuario.id,
                     action_type="AUTO_KICK",
+                    require_bot_permission=True,
                 )
                 if kick_auth_error or kick_target is None:
                     raise PermissionError(
                         kick_auth_error or "no pude verificar el usuario objetivo."
                     )
+                await check_policy()
                 live_action, live_warns, _ = self._current_warn_consequence(
                     interaction.guild_id, kick_target.id
                 )
@@ -4101,7 +4085,7 @@ class Moderation(commands.Cog):
                     kick_target.id,
                     self.bot.user.id,
                     "AUTO_KICK",
-                    f"Alcanzó {live_warns} warns", extra=interaction_metadata(interaction, kick_target, self.bot.user),
+                    f"Alcanzó {live_warns} warns", extra=consequence_metadata,
                     parent_case_id=warn_case_id,
                 )
                 return kick_target, live_warns
@@ -4132,6 +4116,8 @@ class Moderation(commands.Cog):
                     "⚠️ Auto-kick falló: el bot no tiene permiso `Expulsar miembros`"
                     " o su rol está debajo del usuario."
                 )
+            except discord.HTTPException:
+                consequence_warning = "⚠️ Auto-kick sin confirmar: no se pudo completar la operación con Discord."
 
         # Mute automático (solo si no se baneó ni kickeó)
         elif consequence_action == "MUTE":
@@ -4173,6 +4159,7 @@ class Moderation(commands.Cog):
                     int(value) for value in getattr(current_target, "_roles", ())
                 }:
                     raise LookupError("already_muted")
+                await check_policy()
                 live_action, live_warns, live_duration = (
                     self._current_warn_consequence(
                         interaction.guild_id, current_target.id
@@ -4184,6 +4171,7 @@ class Moderation(commands.Cog):
                     interaction, target_id, mute_role_id, "AUTO_MUTE",
                     f"Alcanzó {live_warns} warns", live_duration,
                     moderator_id=self.bot.user.id, parent_case_id=warn_case_id,
+                    metadata=consequence_metadata,
                 )
                 return confirmed_member, live_warns, live_duration
 
@@ -4229,6 +4217,102 @@ class Moderation(commands.Cog):
                     "⚠️ Auto-mute falló: el rol del bot está debajo del rol de mute"
                     " o falta permiso `Gestionar roles`."
                 )
+            except discord.HTTPException:
+                consequence_warning = "⚠️ Auto-mute sin confirmar: no se pudo completar la operación con Discord."
+
+        return consequence_embed, consequence_warning
+
+    @app_commands.command(name="warn", description="Advierte a un usuario (con consecuencias configurables)")
+    @app_commands.describe(
+        usuario="Usuario a advertir",
+        razon="Razón de la advertencia",
+        evidencia_url="URL opcional con evidencia",
+    )
+    async def warn(
+        self,
+        interaction: discord.Interaction,
+        usuario: discord.Member,
+        razon: str,
+        evidencia_url: Optional[str] = None,
+        mensaje_url: Optional[str] = None,
+        archivo: Optional[discord.Attachment] = None,
+    ):
+        if not self._has_mod_perms(interaction, "moderate_members"):
+            return await interaction.response.send_message(_voice(self).line("error", "Este comando es solo para mods. El gato te miró feo."), ephemeral=True)
+        razon = razon.strip()
+        if not razon:
+            return await interaction.response.send_message(
+                "❌ Escribe el motivo en la opción `razon`. No se ha aplicado ninguna sanción.",
+                ephemeral=True,
+            )
+        err = self._can_moderate(interaction.user, usuario, action_type="WARN")  # type: ignore
+        if err:
+            return await interaction.response.send_message(_voice(self).line("error", err), ephemeral=True)
+
+        await interaction.response.defer()
+
+        target_id = usuario.id
+
+        async def apply_warn_record():
+            current_actor, current_target, auth_error = await self._fresh_moderation_context(
+                interaction,
+                "moderate_members",
+                target_id=target_id,
+                action_type="WARN",
+            )
+            if auth_error or current_actor is None or current_target is None:
+                raise PermissionError(auth_error or "No pude verificar la operación.")
+            evidence = await capture_manual(self.bot, interaction, mensaje_url, archivo, evidencia_url)
+            current_actor, current_target, auth_error = await self._fresh_moderation_context(
+                interaction, "moderate_members", target_id=target_id, action_type="WARN",
+            )
+            if auth_error or current_actor is None or current_target is None:
+                raise PermissionError(auth_error or "No pude verificar la operación.")
+            current_warns, current_case_id = self.db.add_warn_with_action(
+                target_id,
+                interaction.guild_id,
+                current_actor.id,
+                "WARN",
+                razon, extra=interaction_metadata(interaction, target_id, current_actor),
+                evidence_url=evidencia_url, evidence=evidence,
+            )
+            return current_actor, current_target, current_warns, current_case_id
+
+        try:
+            current_actor, usuario, warns, warn_case_id = await run_sanction_locked(
+                self.bot,
+                interaction.guild_id,
+                target_id,
+                "WARN",
+                apply_warn_record,
+            )
+        except PermissionError as exc:
+            return await interaction.followup.send(
+                _voice(self).line("error", str(exc)),
+                ephemeral=True,
+            )
+
+        cfg = self.db.get_config(interaction.guild_id)
+
+        # Embed de warn (configurable)
+        warn_embed = build_warn_embed(cfg, usuario, current_actor, razon, warns)
+        if evidencia_url:
+            warn_embed.add_field(name="Evidencia", value=evidencia_url, inline=False)
+        self._add_evidence_status(warn_embed, interaction.guild_id, warn_case_id)
+        await interaction.followup.send(embed=warn_embed)
+        log_ok = await self._send_log(interaction.guild, warn_embed)
+        if not log_ok:
+            await self._notify_modlog_issue(interaction)
+
+        if warn_case_id:
+            view = AppealUserView(
+                self.bot, interaction.guild_id, "WARN", razon, warn_case_id
+            )
+            await self._dm(usuario, warn_embed, view=view)
+
+        consequence_embed, consequence_warning = await self.apply_warn_consequence(
+            interaction, usuario, warn_case_id
+        )
 
         if consequence_embed:
             await interaction.followup.send(embed=consequence_embed)
@@ -4499,6 +4583,31 @@ class Moderation(commands.Cog):
         return embed
 
     case_group = app_commands.Group(name="case", description="Gestión de casos de moderación")
+
+    @case_group.command(name="evidence", description="Añade archivos o contexto de Discord a un caso, de forma privada")
+    async def case_evidence(
+        self, interaction: discord.Interaction, case_id: int,
+        archivo: Optional[discord.Attachment] = None, mensaje_url: Optional[str] = None,
+    ):
+        await interaction.response.defer(ephemeral=True)
+        case = self.db.get_case(interaction.guild_id, case_id)
+        if not case:
+            return await interaction.followup.send("Caso no encontrado.", ephemeral=True)
+        action = str(case.get("action_type") or "").removeprefix("AUTO_")
+        permission = "ban_members" if "BAN" in action else "kick_members" if action == "KICK" else "manage_roles" if "MUTE" in action else "moderate_members"
+        actor, _, error = await self._fresh_moderation_context(interaction, permission)
+        if error or actor is None:
+            return await interaction.followup.send(error or "No pude verificar tus permisos.", ephemeral=True)
+        evidence = await capture_manual(self.bot, interaction, mensaje_url, archivo)
+        actor, _, error = await self._fresh_moderation_context(interaction, permission)
+        if error or actor is None:
+            return await interaction.followup.send(error or "Tus permisos cambiaron.", ephemeral=True)
+        try:
+            self.db.add_case_evidence(interaction.guild_id, int(case["id"]), evidence)
+        except ValueError:
+            return await interaction.followup.send("La evidencia supera el límite del caso o ya no está disponible.", ephemeral=True)
+        summary = self.db.case_evidence_summary(interaction.guild_id, int(case["id"]))
+        await interaction.followup.send(f"Evidencia añadida: {summary['evidence_count']} archivos disponibles. Estado: {summary['evidence_status']}. " + ", ".join(summary["evidence_errors"]), ephemeral=True)
 
     @case_group.command(name="update", description="Actualiza razón/evidencia/estado de un caso")
     @app_commands.describe(

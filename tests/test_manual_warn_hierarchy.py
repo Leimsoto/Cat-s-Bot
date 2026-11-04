@@ -109,7 +109,7 @@ class ManualWarnHierarchyTests(unittest.IsolatedAsyncioTestCase):
         cases = self.db.list_cases(100)
         self.assertEqual([(case["action_type"], case["target_id"]) for case in cases], [("WARN", 20)])
         self.assertEqual(self.db.get_user(20, 100)["warns"], 1)
-        self.guild.fetch_roles.assert_awaited_once()
+        self.assertEqual(self.guild.fetch_roles.await_count, 2)
         self.guild.ban.assert_not_awaited()
 
     async def test_equal_higher_owner_self_and_bot_still_cannot_be_warned(self):

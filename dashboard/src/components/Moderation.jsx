@@ -1,16 +1,19 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { apiGet, apiPatch, apiPost } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
 import IdentityBadge from "./IdentityBadge";
 import ModerationReason from "./ModerationReason";
+import CaseEvidence from "./CaseEvidence";
 import { useSaveBar } from "../lib/SaveBarContext";
 
 export default function Moderation({ selectedGuild: guildId }) {
   const [tab, setTab] = useState("config");
   const [cfg, setCfg] = useState(null);
   const [cases, setCases] = useState([]);
+  const [casesGuild, setCasesGuild] = useState(null);
+  const casesRequest = useRef(0);
   const [activeModerations, setActiveModerations] = useState({ cases: [], pending: [] });
   const [appeals, setAppeals] = useState([]);
   const [appealFilter, setAppealFilter] = useState("PENDING");
@@ -40,12 +43,15 @@ export default function Moderation({ selectedGuild: guildId }) {
 
   const loadCases = useCallback(async () => {
     if (!guildId) return;
+    const request = ++casesRequest.current;
     try {
       const data = await apiGet(`/api/moderation/${guildId}/cases?limit=100`, {
         cache: false});
+      if (request !== casesRequest.current) return;
       setCases(Array.isArray(data) ? data : data.cases || []);
+      setCasesGuild(guildId);
     } catch {
-      setCases([]);
+      if (request === casesRequest.current) setCases([]);
     }
   }, [guildId]);
 
@@ -158,7 +164,7 @@ export default function Moderation({ selectedGuild: guildId }) {
     }
   };
 
-  const filteredCases = cases.filter((c) => {
+  const filteredCases = (casesGuild === guildId ? cases : []).filter((c) => {
     if (filter !== "all" && c.action_type !== filter) return false;
     if (
       search &&
@@ -547,7 +553,7 @@ export default function Moderation({ selectedGuild: guildId }) {
             {filteredCases.map((c, i) => {
               return (
               <div
-                key={c.id || i}
+                key={`${guildId}:${c.id || i}`}
                 className="case-row"
                 style={{
                   padding: 16,
@@ -578,7 +584,7 @@ export default function Moderation({ selectedGuild: guildId }) {
                   <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
                     <ModerationReason entry={c} />
                   </div>
-                  {c.evidence_url && (
+                  {/^https?:\/\//i.test(c.evidence_url || "") && (
                     <a href={c.evidence_url} target="_blank" rel="noreferrer" style={{ fontSize: "0.78rem" }}>
                       Evidencia
                     </a>
@@ -613,6 +619,13 @@ export default function Moderation({ selectedGuild: guildId }) {
                     ? new Date(c.created_at).toLocaleDateString()
                     : "—"}
                 </div>
+                <CaseEvidence guildId={guildId} entry={c} onUpdated={(result) => {
+                  setCases((previous) => previous.map((item) => item.id === c.id ? {
+                    ...item,
+                    evidence_count: result.items.filter((evidence) => evidence.status === "available").length,
+                    evidence_status: result.items.some((evidence) => evidence.status === "failed") ? "partial" : "available",
+                  } : item));
+                }} />
               </div>
             );})}
           </div>

@@ -1835,11 +1835,81 @@ class DatabaseManager:
         self._migrate_tickets()
         self._run_migrations()
         self._ensure_moderation_mvp_tables()
+        self._ensure_case_evidence_table()
         self._ensure_functional_runtime_tables()
         self._ensure_ai_memory_tables()
         self._ensure_ai_deep_think_tables()
         self.ensure_column("server_config", "ai_message_categories", "TEXT DEFAULT '{}'")
         self.ensure_column("automod_log", "extra_data", "TEXT")
+
+    def _ensure_case_evidence_table(self):
+        if self.db_type != "sqlite":
+            return
+        self._execute("""CREATE TABLE IF NOT EXISTS case_evidence (
+            id TEXT PRIMARY KEY, guild_id BIGINT NOT NULL, case_id BIGINT NOT NULL,
+            metadata TEXT NOT NULL, content BLOB,
+            FOREIGN KEY(case_id) REFERENCES mod_actions(id) ON DELETE CASCADE)""")
+        self._execute("CREATE INDEX IF NOT EXISTS idx_case_evidence_case ON case_evidence(guild_id, case_id)")
+
+    def add_case_evidence(self, guild_id, case_id, records):
+        """Append immutable bytes; serialize quota enforcement with the SQLite write."""
+        import uuid
+        from cogs._moderation_evidence import MAX_CASE_BYTES
+        if self.db_type != "sqlite":
+            raise ValueError("evidence_storage_unavailable")
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not conn.execute("SELECT id FROM mod_actions WHERE guild_id=? AND id=?", (guild_id, case_id)).fetchone():
+                raise ValueError("case_not_found")
+            used = conn.execute("SELECT COALESCE(SUM(LENGTH(content)),0), COUNT(*) FROM case_evidence WHERE guild_id=? AND case_id=?", (guild_id, case_id)).fetchone()
+            total, count = int(used[0]), int(used[1])
+            if count + len(records) > 128:
+                raise ValueError("case_evidence_limit")
+            for record in records:
+                content = record.get("content")
+                total += len(content) if content is not None else 0
+                if total > MAX_CASE_BYTES:
+                    raise ValueError("case_evidence_limit")
+                metadata = {key: value for key, value in record.items() if key != "content"}
+                conn.execute("INSERT INTO case_evidence(id,guild_id,case_id,metadata,content) VALUES(?,?,?,?,?)",
+                    (uuid.uuid4().hex, guild_id, case_id, json.dumps(metadata, ensure_ascii=False), content))
+
+    def _store_case_evidence(self, guild_id, case_id, evidence):
+        if not evidence:
+            return
+        try:
+            self.add_case_evidence(guild_id, case_id, evidence)
+        except Exception:
+            logger.warning("Evidence persistence failed guild=%s case=%s", guild_id, case_id)
+            try:
+                from cogs._moderation_evidence import artifact
+                self.add_case_evidence(guild_id, case_id, [artifact("evidence", error="evidence_storage_failed")])
+            except Exception:
+                logger.error("Evidence failure record unavailable guild=%s case=%s", guild_id, case_id)
+
+    def list_case_evidence(self, guild_id, case_id):
+        case = self.get_case_by_id(guild_id, case_id)
+        if not case:
+            return []
+        parent = self.get_case_by_id(guild_id, case.get("parent_case_id") or 0)
+        parent_id = int(parent["id"]) if parent and parent["target_id"] == case["target_id"] else 0
+        rows = self._fetchall("SELECT id,case_id,metadata FROM case_evidence WHERE guild_id=? AND case_id IN (?,?) ORDER BY rowid", (guild_id, case_id, parent_id))
+        return [{**json.loads(row["metadata"]), "id": row["id"], "case_id": str(row["case_id"]),
+                 "inherited": int(row["case_id"]) != int(case_id)} for row in rows]
+
+    def get_case_evidence(self, guild_id, case_id, evidence_id):
+        if not any(item["id"] == evidence_id for item in self.list_case_evidence(guild_id, case_id)):
+            return None
+        row = self._fetchone("SELECT content,metadata FROM case_evidence WHERE guild_id=? AND id=?", (guild_id, evidence_id))
+        return {**json.loads(row["metadata"]), "content": bytes(row["content"]) if row["content"] is not None else None} if row else None
+
+    def case_evidence_summary(self, guild_id, case_id):
+        items = self.list_case_evidence(guild_id, case_id)
+        available = sum(item["status"] == "available" for item in items)
+        errors = [item["error"] for item in items if item.get("error")]
+        return {"evidence_count": available,
+            "evidence_status": "partial" if available and errors else "available" if available else "failed" if errors else "none",
+            "evidence_errors": errors}
 
     def _ensure_ai_deep_think_tables(self) -> None:
         self._executemany([(sql, ()) for sql in (
@@ -2209,6 +2279,7 @@ class DatabaseManager:
             ("description", "TEXT"),
             ("welcome_embed_template_key", "TEXT"),
             ("staff_role_id", "INTEGER"),
+            ("staff_role_ids", "TEXT"),
         ]
         for col, col_def in cat_cols:
             try:
@@ -2902,6 +2973,7 @@ class DatabaseManager:
         evidence_url: Optional[str] = None,
         parent_case_id: Optional[int] = None,
         extra: Optional[Dict] = None,
+        evidence: Optional[List[Dict]] = None,
     ) -> tuple[int, int]:
         """Incrementa el warn y crea su caso exacto en una transacción."""
         normalized_action = str(action_type or "").upper()
@@ -2984,7 +3056,8 @@ class DatabaseManager:
             case_id = int(
                 case_row["id"] if hasattr(case_row, "keys") else case_row[0]
             )
-            return warns, case_id
+        self._store_case_evidence(guild_id, case_id, evidence)
+        return warns, case_id
 
     def clear_warns(self, user_id: int, guild_id: int) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -3055,6 +3128,7 @@ class DatabaseManager:
         duration_seconds: Optional[int] = None,
         expires_at: Optional[str] = None,
         parent_case_id: Optional[int] = None,
+        evidence: Optional[List[Dict]] = None,
     ) -> int:
         """Registra una acción de moderación y retorna el ID/case interno.
 
@@ -3110,7 +3184,9 @@ class DatabaseManager:
             row = cur.fetchone()
             if not row:
                 return 0
-            return int(row["id"] if hasattr(row, "keys") else row[0])
+            case_id = int(row["id"] if hasattr(row, "keys") else row[0])
+        self._store_case_evidence(guild_id, case_id, evidence)
+        return case_id
 
     def get_applying_ban_cases(self) -> List[Dict]:
         """Intenciones de ban cuyo efecto Discord aún debe reconciliarse."""
@@ -5175,15 +5251,16 @@ class DatabaseManager:
         description: Optional[str] = None,
         welcome_embed_template_key: Optional[str] = None,
         staff_role_id: Optional[int] = None,
+        staff_role_ids: Optional[str] = None,
     ) -> None:
         self._execute(
             "INSERT INTO ticket_categories (guild_id, name, emoji, description, "
             "questions, close_reasons, welcome_embed_data, welcome_embed_template_key, "
-            "staff_role_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "staff_role_id, staff_role_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 guild_id, name, emoji, description,
                 questions, close_reasons, welcome_embed_data,
-                welcome_embed_template_key, staff_role_id,
+                welcome_embed_template_key, staff_role_id, staff_role_ids,
             ),
         )
 
@@ -5193,7 +5270,7 @@ class DatabaseManager:
         """Actualiza campos de una categoría. Allowlist por seguridad."""
         allowed = {
             "name", "emoji", "description", "questions", "close_reasons",
-            "welcome_embed_data", "welcome_embed_template_key", "staff_role_id",
+            "welcome_embed_data", "welcome_embed_template_key", "staff_role_id", "staff_role_ids",
         }
         invalid = set(kwargs) - allowed
         if invalid:
@@ -5207,6 +5284,12 @@ class DatabaseManager:
             )
             for col, val in kwargs.items()
         ]
+        if "name" in kwargs:
+            ops.insert(0, (
+                "UPDATE tickets SET category_name = ? WHERE guild_id = ? AND category_name = "
+                "(SELECT name FROM ticket_categories WHERE id = ? AND guild_id = ?)",
+                (kwargs["name"], guild_id, category_id, guild_id),
+            ))
         self._executemany(ops)
 
     def delete_ticket_category(self, category_id: int, guild_id: int) -> None:

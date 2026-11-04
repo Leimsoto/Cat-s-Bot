@@ -230,6 +230,19 @@ def delegated_moderation_role_ids(db, guild_id: int) -> set[int] | None:
     return role_ids
 
 
+def ticket_category_role_ids(category: dict | None) -> set[int]:
+    if not category:
+        return set()
+    values = category.get("staff_role_ids")
+    if values is None:
+        values = [category.get("staff_role_id")]
+    elif isinstance(values, str):
+        values = json.loads(values)
+    if not isinstance(values, list):
+        raise ValueError("staff_role_ids debe ser una lista")
+    return {int(value) for value in values if value}
+
+
 def delegated_bot_role_ids(db, guild_id: int) -> set[int] | None:
     """Return roles that delegate access to privileged bot capabilities."""
     if db is None:
@@ -249,11 +262,8 @@ def delegated_bot_role_ids(db, guild_id: int) -> set[int] | None:
         # El rol de chat IA permite conversar; no delega administración del bot.
         get_ticket_categories = getattr(db, "get_ticket_categories", None)
         if callable(get_ticket_categories):
-            configured_ids.extend(
-                category.get("staff_role_id")
-                for category in (get_ticket_categories(guild_id) or [])
-                if isinstance(category, dict)
-            )
+            for category in (get_ticket_categories(guild_id) or []):
+                configured_ids.extend(ticket_category_role_ids(category))
 
         get_ticket_config = getattr(db, "get_ticket_config", None)
         if callable(get_ticket_config):

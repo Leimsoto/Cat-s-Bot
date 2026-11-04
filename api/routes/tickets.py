@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api.deps import get_bot, get_db, require_guild_admin
-from api.routes.guild import _validate_privileged_role_updates
+from api.routes.guild import _ticket_category_payload, _ticket_category_role_updates, _sync_ticket_staff_permissions
 from api.snowflakes import stringify_fields, stringify_rows
 
 router = APIRouter(prefix="/api/guilds/{guild_id}/tickets", tags=["tickets"])
@@ -45,6 +45,7 @@ class TicketCategoryPatch(BaseModel):
     welcome_embed_data: Optional[dict | str] = None
     welcome_embed_template_key: Optional[str] = Field(default=None, max_length=100)
     staff_role_id: Optional[int | str] = None
+    staff_role_ids: Optional[list[int | str]] = None
 
 
 TICKET_ID_FIELDS = (
@@ -59,7 +60,7 @@ TICKET_ID_FIELDS = (
 
 
 def _category_payload(row: dict) -> dict:
-    return stringify_fields(row, ("guild_id", "staff_role_id"))
+    return _ticket_category_payload(row)
 
 
 # ── Tickets list (legacy plural) ─────────────────────────────────────────────
@@ -200,32 +201,29 @@ async def patch_category(
         )
     if body.welcome_embed_template_key is not None:
         payload["welcome_embed_template_key"] = body.welcome_embed_template_key
-    if body.staff_role_id is not None:
-        current_category = next(
-            (
-                category
-                for category in db.get_ticket_categories(guild_id)
-                if int(category.get("id", 0)) == cat_id
-            ),
-            {},
-        )
-        role_payload = {"staff_role_id": body.staff_role_id}
-        normalized_roles = await _validate_privileged_role_updates(
-            request,
-            guild_id,
-            role_payload,
-            bot,
-            user,
-            current_category,
-        )
-        if "staff_role_id" in normalized_roles:
-            payload["staff_role_id"] = normalized_roles["staff_role_id"]
+    categories = db.get_ticket_categories(guild_id)
+    current_category = next((category for category in categories if int(category["id"]) == cat_id), None)
+    if current_category is None:
+        raise HTTPException(404, "Categoría no encontrada en este servidor")
+    role_updates = await _ticket_category_role_updates(
+        request, guild_id, body.model_dump(exclude_unset=True), current_category, bot, user,
+    )
+    payload.update(role_updates)
+    role_fields_present = bool({"staff_role_id", "staff_role_ids"} & body.model_fields_set)
 
-    if not payload:
+    if not payload and not role_fields_present:
         return {"status": "ok", "updated": []}
 
     try:
-        db.update_ticket_category(cat_id, guild_id, **payload)
+        if role_fields_present or "name" in payload:
+            config = db.get_ticket_config(guild_id)
+            await _sync_ticket_staff_permissions(
+                guild_id, db, bot, config, config, categories,
+                [{**category, **payload} if int(category["id"]) == cat_id else category for category in categories],
+                lambda: db.update_ticket_category(cat_id, guild_id, **payload),
+            )
+        else:
+            db.update_ticket_category(cat_id, guild_id, **payload)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

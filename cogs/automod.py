@@ -39,6 +39,8 @@ La configuración detallada vive en el dashboard.
 """
 
 import asyncio
+from cogs._moderation_evidence import capture_context
+from types import SimpleNamespace
 import logging
 import re
 import time
@@ -508,13 +510,15 @@ class AutoMod(commands.Cog):
         message: discord.Message,
         rule_name: str,
         expected_action: str,
+        *,
+        message_deleted: bool = False,
     ) -> bool:
         """Obtiene miembro, roles y propietario actuales antes de borrar."""
         guild = message.guild
         if guild is None:
             return False
         try:
-            if rule_name == "llm":
+            if rule_name == "llm" and not message_deleted:
                 current_message = await message.channel.fetch_message(message.id)
                 if fingerprint(current_message) != fingerprint(message):
                     return False
@@ -601,6 +605,11 @@ class AutoMod(commands.Cog):
                 guild.name,
             )
             return
+        evidence = (await capture_context(self.bot, guild, message=message)
+            if action != AutoModActions.DELETE or rule_name == "llm" else [])
+        case_kwargs["evidence"] = evidence
+        if not await self._fresh_policy_allows_action(message, rule_name, action):
+            return
         delete_case_id = None
         if rule_name == "llm" and action == AutoModActions.DELETE:
             delete_case_id = self.db.log_action(
@@ -628,11 +637,21 @@ class AutoMod(commands.Cog):
             elif action != AutoModActions.DELETE:
                 self.llm.log(guild.id, member.id, message.id, "delete_failed", decision["reason"])
 
+        def update_evidence_status(case_id):
+            if not case_id:
+                return
+            summary = self.db.case_evidence_summary(guild.id, case_id)
+            audit_extra["Evidencia"] = f"{summary['evidence_count']} archivos conservados en el registro privado" + (
+                "; captura incompleta" if summary["evidence_errors"] else
+                "; no se pudo conservar evidencia" if evidence and summary["evidence_status"] == "none" else ""
+            )
+
         if action == AutoModActions.DELETE:
             if delete_case_id is not None:
                 self.db.update_case_by_id(
                     guild.id, delete_case_id, status="active" if message_deleted else "failed",
                 )
+                update_evidence_status(delete_case_id)
             persist_action_outcome(
                 AutoModActions.DELETE if message_deleted else "delete_failed"
             )
@@ -642,6 +661,8 @@ class AutoMod(commands.Cog):
 
         if action == AutoModActions.WARN:
             async def persist_auto_warn():
+                if rule_name == "llm" and self.db.has_llm_message_action(guild.id, message.id):
+                    return None
                 try:
                     live_member, live_roles, live_guild = await asyncio.gather(
                         guild.fetch_member(member.id),
@@ -669,7 +690,7 @@ class AutoMod(commands.Cog):
                     )
                     return None
 
-                warns, _case_id = self.db.add_warn_with_action(
+                warns, warn_case_id = self.db.add_warn_with_action(
                     live_member.id,
                     guild.id,
                     self.bot.user.id,
@@ -677,7 +698,7 @@ class AutoMod(commands.Cog):
                     reason,
                     **case_kwargs,
                 )
-                return warns, live_member
+                return warns, live_member, warn_case_id
 
             warn_result = await run_sanction_locked(
                 self.bot,
@@ -688,7 +709,8 @@ class AutoMod(commands.Cog):
             )
             if warn_result is None:
                 return
-            warns, warned_member = warn_result
+            warns, warned_member, warn_case_id = warn_result
+            update_evidence_status(warn_case_id)
             persist_action_outcome(AutoModActions.WARN)
             embed = self._build_embed(
                 rule_name,
@@ -697,6 +719,24 @@ class AutoMod(commands.Cog):
                 message.content or "",
                 extra={**audit_extra, "Warns totales": str(warns)},
             )
+            # The bot is the authority for dashboard consequences of an automatic warn.
+            moderation = getattr(self.bot, "get_cog", lambda _: None)("Moderation")
+            if moderation is None:
+                logger.error("Escalado de warns no disponible en %s: falta Moderation", guild.id)
+            else:
+                context = SimpleNamespace(guild=guild, guild_id=guild.id, user=self.bot.user,
+                    channel=message.channel, channel_id=message.channel.id)
+                consequence_embed, consequence_warning = await moderation.apply_warn_consequence(
+                    context, warned_member, warn_case_id, metadata=metadata,
+                    policy_check=lambda: self._fresh_policy_allows_action(
+                        message, rule_name, AutoModActions.WARN, message_deleted=message_deleted,
+                    ),
+                )
+                if consequence_embed is not None:
+                    await self._log_to_modlog(guild, consequence_embed)
+                if consequence_warning:
+                    logger.warning("Escalado de warns guild=%s user=%s: %s", guild.id, member.id, consequence_warning)
+                    embed.add_field(name="Consecuencia automática", value=consequence_warning, inline=False)
             await self._log_to_modlog(guild, embed)
             return
 
@@ -837,6 +877,7 @@ class AutoMod(commands.Cog):
                     reason,
                     live_dur,
                     live_mute_role.id,
+                    evidence=evidence,
                     extra={
                         "source": "automod",
                         "rule": rule_name,
@@ -844,6 +885,7 @@ class AutoMod(commands.Cog):
                         **({"decision": rule_cfg["llm_decision"], "evidence_url": message.jump_url} if rule_name == "llm" else {}),
                     },
                 )
+                update_evidence_status(case_id)
                 await live_member.add_roles(
                     live_mute_role,
                     reason=reason_with_mute_effect(reason, effect_token),
@@ -961,7 +1003,7 @@ class AutoMod(commands.Cog):
                 ) is None:
                     return None
                 await live_member.kick(reason=reason[:512] if rule_name == "llm" else reason)
-                self.db.log_action(
+                case_id = self.db.log_action(
                     guild.id,
                     live_member.id,
                     self.bot.user.id,
@@ -969,6 +1011,7 @@ class AutoMod(commands.Cog):
                     reason,
                     **case_kwargs,
                 )
+                update_evidence_status(case_id)
                 return live_member
 
             try:
@@ -1069,8 +1112,9 @@ class AutoMod(commands.Cog):
                         "rule": rule_name,
                         **({"decision": rule_cfg["llm_decision"], "evidence_url": message.jump_url} if rule_name == "llm" else {}),
                     },
-                    status="applying",
+                    status="applying", evidence=evidence,
                 )
+                update_evidence_status(case_id)
                 if not case_id:
                     raise RuntimeError("ban_intent_not_persisted")
                 await guild.ban(

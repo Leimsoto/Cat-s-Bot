@@ -97,6 +97,13 @@ const DEFAULT_CAT = {
   description: "",
   questions: "¿En qué podemos ayudarte?"};
 
+function roleIds(value) {
+  try {
+    const ids = typeof value === "string" ? JSON.parse(value) : value;
+    return Array.isArray(ids) ? ids.map(String) : [];
+  } catch { return []; }
+}
+
 export default function Tickets({ selectedGuild }) {
   return <TicketSettings key={selectedGuild} guildId={selectedGuild} />;
 }
@@ -501,6 +508,21 @@ function TicketSettings({ guildId }) {
                   )}
                 />
               </div>
+              <div className="config-item" style={{ marginBottom: 0 }}>
+                <label>Roles de soporte para todos los tickets</label>
+                <SearchableSelect
+                  multiple
+                  ariaLabel="Roles de soporte para todos los tickets"
+                  value={roleIds(cfg.allowed_roles)}
+                  onChange={(values) => set("allowed_roles", JSON.stringify(values))}
+                  endpoint={`/api/guilds/${guildId}/roles`}
+                  itemsKey="roles"
+                  placeholder="Selecciona uno o varios roles…"
+                  renderOption={renderRole}
+                  renderSelected={renderRole}
+                />
+                <p className="cr-hint">Cualquiera de estos roles puede ver, tomar y cerrar tickets. Los administradores conservan el acceso. Al guardar se actualizan también los tickets abiertos.</p>
+              </div>
             </div>
 
             <div
@@ -890,13 +912,13 @@ function CategoryRow({ category, pendingDraft, templates, guildId, onSave, onDel
       }
     })(),
     welcome_embed_template_key: category.welcome_embed_template_key || "",
-    staff_role_id: category.staff_role_id || ""};
-  const [draft, setRawDraft] = useState(() => pendingDraft ? { ...pendingDraft, questions: pendingDraft.questions.join("\n"), welcome_embed_template_key: pendingDraft.welcome_embed_template_key || "", staff_role_id: pendingDraft.staff_role_id || "" } : baseline);
+    staff_role_ids: roleIds(category.staff_role_ids ?? (category.staff_role_id ? [category.staff_role_id] : []))};
+  const [draft, setRawDraft] = useState(() => pendingDraft ? { ...pendingDraft, questions: pendingDraft.questions.join("\n"), welcome_embed_template_key: pendingDraft.welcome_embed_template_key || "", staff_role_ids: pendingDraft.staff_role_ids || [] } : baseline);
 
   const [rowSaving, setRowSaving] = useState(false);
   useSaveBar({ dirty: false, saving: rowSaving });
   const initialDraft = useRef(baseline);
-  const payloadFor = (value) => ({ ...value, questions: value.questions.split("\n").map((question) => question.trim()).filter(Boolean), welcome_embed_template_key: value.welcome_embed_template_key || null, staff_role_id: value.staff_role_id ? String(value.staff_role_id) : null });
+  const payloadFor = (value) => ({ ...value, questions: value.questions.split("\n").map((question) => question.trim()).filter(Boolean), welcome_embed_template_key: value.welcome_embed_template_key || null, staff_role_ids: value.staff_role_ids });
   const setDraft = (next) => { setRawDraft(next); onDraftChange(JSON.stringify(next) === JSON.stringify(initialDraft.current) ? null : payloadFor(next)); };
   const cancel = () => { setRawDraft(initialDraft.current); onDraftChange(null); setOpen(false); };
   const handleSave = async () => {
@@ -909,7 +931,7 @@ function CategoryRow({ category, pendingDraft, templates, guildId, onSave, onDel
         .map((q) => q.trim())
         .filter(Boolean),
       welcome_embed_template_key: draft.welcome_embed_template_key || null,
-      staff_role_id: draft.staff_role_id ? String(draft.staff_role_id) : null};
+      staff_role_ids: draft.staff_role_ids};
     if (!draft.name.trim()) return;
     setRowSaving(true);
     try { if (await onSave(payload)) setOpen(false); } finally { setRowSaving(false); }
@@ -1036,13 +1058,15 @@ function CategoryRow({ category, pendingDraft, templates, guildId, onSave, onDel
               />
             </div>
             <div className="config-item" style={{ marginBottom: 0 }}>
-              <label>Rol de staff específico</label>
+              <label>Roles de soporte adicionales de esta categoría</label>
               <SearchableSelect
-                value={draft.staff_role_id || ""}
-                onChange={(v) => setDraft({ ...draft, staff_role_id: v || "" })}
+                multiple
+                ariaLabel="Roles de soporte adicionales de esta categoría"
+                value={draft.staff_role_ids}
+                onChange={(values) => setDraft({ ...draft, staff_role_ids: values })}
                 endpoint={`/api/guilds/${guildId}/roles`}
                 itemsKey="roles"
-                placeholder="(Hereda del global)"
+                placeholder="Selecciona roles adicionales…"
                 renderOption={renderRole}
                 renderSelected={(opt) => (
                   <>
@@ -1055,6 +1079,7 @@ function CategoryRow({ category, pendingDraft, templates, guildId, onSave, onDel
                   </>
                 )}
               />
+              <p className="cr-hint">Se suman a los roles globales. Si los quitas, esos roles pierden el acceso que otorgaba esta categoría al guardar, también en tickets abiertos.</p>
             </div>
           </div>
 

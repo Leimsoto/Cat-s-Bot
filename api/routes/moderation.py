@@ -15,9 +15,12 @@ import asyncio
 import json
 import logging
 from typing import Any, Optional
+from urllib.parse import quote, unquote
 
 import discord
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
+from cogs._moderation_evidence import LIMITS, MAX_CASE_BYTES, MAX_FILE_BYTES, artifact
 from api.deps import get_bot, get_db, require_guild_admin
 from api.discord_bridge import DiscordBridgeTimeout, DiscordBridgeUnavailable, run_on_bot_loop
 from api.snowflakes import stringify_fields, stringify_rows
@@ -54,8 +57,9 @@ def _pending_payload(row: dict) -> dict:
     return stringify_fields(row, ("guild_id", "user_id", "case_id"))
 
 
-async def _enrich_case_payload(row: dict, resolver: _IdentityResolver) -> dict:
+async def _enrich_case_payload(row: dict, resolver: _IdentityResolver, db=None) -> dict:
     item = _case_payload(row)
+    item.update(db.case_evidence_summary(int(row["guild_id"]), int(row["id"])) if db is not None and hasattr(db, "case_evidence_summary") else {"evidence_count": 0, "evidence_status": "none", "evidence_errors": []})
     item.update(moderation_details(row))
     extra = record_extra(row)
     target = await resolver.resolve(item.get("target_id") or item.get("user_id"), extra.get("target_user"))
@@ -116,7 +120,7 @@ async def get_mod_cases(
     else:
         rows = db.get_mod_actions(guild_id, limit=limit, offset=offset) or []
     resolver = _IdentityResolver(bot, guild_id)
-    return [await _enrich_case_payload(row, resolver) for row in rows]
+    return [await _enrich_case_payload(row, resolver, db) for row in rows]
 
 
 @cases_router.get("/{guild_id}/cases/{case_ref}")
@@ -130,7 +134,7 @@ async def get_mod_case_detail(
     case = db.get_case(guild_id, case_ref) if hasattr(db, "get_case") else None
     if not case:
         raise HTTPException(404, "Caso no encontrado")
-    return await _enrich_case_payload(case, _IdentityResolver(bot, guild_id))
+    return await _enrich_case_payload(case, _IdentityResolver(bot, guild_id), db)
 
 
 @cases_router.patch("/{guild_id}/cases/{case_ref}")
@@ -152,7 +156,79 @@ async def update_mod_case(
     case = db.update_case(guild_id, case_ref, **payload) if hasattr(db, "update_case") else None
     if not case:
         raise HTTPException(404, "Caso no encontrado")
-    return await _enrich_case_payload(case, _IdentityResolver(bot, guild_id))
+    return await _enrich_case_payload(case, _IdentityResolver(bot, guild_id), db)
+
+
+def _require_evidence_admin(user):
+    status = user.get("_live_guild_admin_status") or {}
+    if not (user.get("is_master_admin") or status.get("is_owner") or status.get("administrator")):
+        raise HTTPException(403, "Necesitas Administrador para consultar o añadir evidencia")
+
+
+def _evidence_case(db, guild_id, case_ref):
+    case = db.get_case(guild_id, case_ref)
+    if not case:
+        raise HTTPException(404, "Caso no encontrado")
+    return case
+
+
+def _evidence_payload(db, guild_id, case_ref, case):
+    items = db.list_case_evidence(guild_id, int(case["id"]))
+    for item in items:
+        item["download_url"] = (f"/api/moderation/{guild_id}/cases/{case_ref}/evidence/{item['id']}"
+            if item["status"] == "available" else None)
+    return {"items": items, "limits": {**LIMITS, "max_case_bytes": MAX_CASE_BYTES},
+        **db.case_evidence_summary(guild_id, int(case["id"]))}
+
+
+@cases_router.get("/{guild_id}/cases/{case_ref}/evidence")
+async def get_case_evidence_list(guild_id: int, case_ref: int,
+    db=Depends(get_db), _user=Depends(require_guild_admin)):
+    _require_evidence_admin(_user)
+    case = _evidence_case(db, guild_id, case_ref)
+    return _evidence_payload(db, guild_id, case_ref, case)
+
+
+@cases_router.post("/{guild_id}/cases/{case_ref}/evidence")
+async def upload_case_evidence(guild_id: int, case_ref: int, request: Request,
+    db=Depends(get_db), _user=Depends(require_guild_admin)):
+    _require_evidence_admin(_user)
+    case = _evidence_case(db, guild_id, case_ref)
+    filename = request.headers.get("X-Filename")
+    content_type = request.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if not filename or not (content_type.startswith(("image/", "audio/", "video/")) or content_type == "application/octet-stream"):
+        raise HTTPException(400, "Envía un archivo binario con Content-Type y X-Filename")
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > MAX_FILE_BYTES:
+            raise HTTPException(413, "El archivo supera 8 MiB")
+        data.extend(chunk)
+    try:
+        record = artifact(unquote(filename, errors="strict"), bytes(data), source="upload", uploader_id=_user.get("user_id"))
+    except (ValueError, UnicodeError):
+        raise HTTPException(400, "Archivo multimedia inválido o formato no admitido") from None
+    await require_guild_admin(guild_id, request, _user)
+    _require_evidence_admin(_user)
+    try:
+        db.add_case_evidence(guild_id, int(case["id"]), [record])
+    except ValueError:
+        raise HTTPException(413, "El caso alcanzó su límite de evidencia") from None
+    return _evidence_payload(db, guild_id, case_ref, case)
+
+
+@cases_router.get("/{guild_id}/cases/{case_ref}/evidence/{evidence_id}")
+async def download_case_evidence(guild_id: int, case_ref: int, evidence_id: str,
+    db=Depends(get_db), _user=Depends(require_guild_admin)):
+    _require_evidence_admin(_user)
+    case = _evidence_case(db, guild_id, case_ref)
+    record = db.get_case_evidence(guild_id, int(case["id"]), evidence_id)
+    if not record or record["status"] != "available" or record["content"] is None:
+        raise HTTPException(404, "Evidencia no encontrada")
+    return Response(record["content"], media_type=record["content_type"], headers={
+        "Content-Disposition": "attachment; filename=evidence; filename*=UTF-8''" + quote(record["filename"]),
+        "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+    })
 
 
 @cases_router.get("/{guild_id}/moderations")
@@ -167,7 +243,7 @@ async def get_active_moderations(
     pending = db.get_pending_moderation_actions(guild_id, limit=limit) if hasattr(db, "get_pending_moderation_actions") else []
     resolver = _IdentityResolver(bot, guild_id)
     return {
-        "cases": [await _enrich_case_payload(row, resolver) for row in (cases or [])],
+        "cases": [await _enrich_case_payload(row, resolver, db) for row in (cases or [])],
         "pending": [await _enrich_pending_payload(row, resolver) for row in (pending or [])],
     }
 
@@ -184,7 +260,7 @@ async def get_mod_actions(
     """Lista de acciones de moderación del servidor (paginado)."""
     actions = db.get_mod_actions(guild_id, limit=limit, offset=offset)
     resolver = _IdentityResolver(bot, guild_id)
-    return {"guild_id": str(guild_id), "actions": [await _enrich_case_payload(row, resolver) for row in actions], "limit": limit, "offset": offset}
+    return {"guild_id": str(guild_id), "actions": [await _enrich_case_payload(row, resolver, db) for row in actions], "limit": limit, "offset": offset}
 
 
 @router.get("/user/{user_id}")
@@ -208,7 +284,7 @@ async def get_user_mod_history(
         "user": await resolver.resolve(user_id),
         "user_record": stringify_fields(user_record, ("guild_id", "user_id")) if user_record else None,
         "summary": summary,
-        "history": [await _enrich_case_payload(row, resolver) for row in history],
+        "history": [await _enrich_case_payload(row, resolver, db) for row in history],
     }
 
 
