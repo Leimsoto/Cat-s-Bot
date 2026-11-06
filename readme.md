@@ -68,7 +68,10 @@ Cat's Bot se desarrolla para la comunidad Las Tortuguitas de Ezku.
 
 <div align="center">
 
-**Leimsoto** &nbsp; · &nbsp; **DarkAnubis0100** &nbsp; · &nbsp; **Codex**
+**Leimsoto** <br/>
+**Arielteen** <br/>
+**Claude AI** <br/>
+**DarkAnubis0100**
 
 </div>
 
