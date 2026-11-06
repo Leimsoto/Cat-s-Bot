@@ -1,3 +1,4 @@
+import { useSaveBar } from "../lib/SaveBarContext";
 import { useEffect, useState, useCallback } from "react";
 import { apiGet, apiPost, apiDelete } from "../lib/api";
 import Toast from "./Toast";
@@ -63,6 +64,8 @@ export default function Tags({ selectedGuild }) {
       showToast(e.message || "Error al eliminar", "error");
     }
   };
+
+  useSaveBar({ dirty: showCreate && JSON.stringify(form) !== JSON.stringify(EMPTY_FORM), saving: creating, onSave: createTag, onRevert: () => { setForm(EMPTY_FORM); setShowCreate(false); } });
 
   if (loading)
     return (
@@ -291,7 +294,7 @@ export default function Tags({ selectedGuild }) {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))",
+            gridTemplateColumns: "repeat(auto-fill,minmax(min(100%,280px),1fr))",
             gap: 14}}
         >
           {filtered.map((tag) => (

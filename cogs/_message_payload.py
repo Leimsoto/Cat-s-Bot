@@ -82,6 +82,7 @@ def parse_message_data(raw: Any) -> Optional[Dict[str, Any]]:
     if "embed" in data and isinstance(data["embed"], dict):
         return {
             "content": data.get("content") or "",
+            "ai_managed": data.get("ai_managed") is True,
             "enabled": bool(data.get("enabled", True)),
             "embed": data["embed"],
         }
@@ -89,6 +90,7 @@ def parse_message_data(raw: Any) -> Optional[Dict[str, Any]]:
     # Formato legacy: campos en el top-level. Mapear a la forma nueva.
     return {
         "content": data.get("content") or "",
+        "ai_managed": data.get("ai_managed") is True,
         "enabled": True,
         "embed": {
             "title": data.get("title") or "",
@@ -98,9 +100,10 @@ def parse_message_data(raw: Any) -> Optional[Dict[str, Any]]:
             "footer_icon": data.get("footer_icon") or "",
             "image": data.get("image_url") or data.get("image") or "",
             "thumbnail": data.get("thumbnail_url") or data.get("thumbnail") or "",
-            "author": data.get("author") or "",
+            "author": data.get("author_name") or data.get("author") or "",
             "author_icon": data.get("author_icon") or "",
             "author_url": data.get("author_url") or "",
+            "fields": data.get("fields") or [],
         },
     }
 
@@ -138,7 +141,9 @@ def render_message_payload(
     title = _sub(emb.get("title"), variables) or None
     description = _sub(emb.get("description"), variables) or None
 
-    if not title and not description and not emb.get("image"):
+    if not title and not description and not any(
+        emb.get(key) for key in ("image", "thumbnail", "author", "footer", "fields")
+    ):
         # Embed vacío: no enviar.
         return {"content": content, "embed": None}
 
@@ -169,5 +174,12 @@ def render_message_payload(
     footer_icon = emb.get("footer_icon") or None
     if footer_text or footer_icon:
         embed.set_footer(text=footer_text or None, icon_url=footer_icon)
+
+    for field in emb.get("fields") or []:
+        embed.add_field(
+            name=_sub(field.get("name"), variables),
+            value=_sub(field.get("value"), variables),
+            inline=bool(field.get("inline", False)),
+        )
 
     return {"content": content, "embed": embed}

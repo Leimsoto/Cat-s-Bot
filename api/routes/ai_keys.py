@@ -10,10 +10,10 @@ Endpoints globales (master admin):
   DELETE /api/ai/keys/{key_id}                     → elimina key (cascade asignaciones)
   GET    /api/ai/keys/health                       → reporte rápido del pool
 
-Endpoints por guild (admin del guild):
+Endpoints por guild:
   GET    /api/guilds/{guild_id}/ia/key             → key asignada al guild (enmascarada)
-  POST   /api/guilds/{guild_id}/ia/key             → asigna {"key_id": <id>}
-  DELETE /api/guilds/{guild_id}/ia/key             → desasigna
+  POST   /api/guilds/{guild_id}/ia/key             → asigna {"key_id": <id>} (master)
+  DELETE /api/guilds/{guild_id}/ia/key             → desasigna (master)
 
 Reglas de negocio (impuestas en DatabaseManager):
   • Cada guild tiene como máximo una key (PRIMARY KEY).
@@ -173,7 +173,7 @@ async def assign_guild_key(
     guild_id: int,
     body: AssignKeyBody,
     db=Depends(get_db),
-    _user: dict = Depends(require_guild_admin),
+    _user: dict = Depends(require_master_admin),
 ):
     """
     Asigna una key existente al guild. Reglas:
@@ -193,7 +193,7 @@ async def assign_guild_key(
 async def unassign_guild_key(
     guild_id: int,
     db=Depends(get_db),
-    _user: dict = Depends(require_guild_admin),
+    _user: dict = Depends(require_master_admin),
 ):
     db.unassign_ai_key_from_guild(guild_id)
     return {"status": "ok"}

@@ -1,8 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { Fragment, useState, useEffect, useCallback, useRef } from 'react';
 import { apiGet, apiPatch } from '../lib/api';
 import { SearchableSelect } from './ui';
 import { Icon } from '../lib/icons';
 import Toast from './Toast';
+import IdentityBadge from './IdentityBadge';
+import ModerationReason from './ModerationReason';
+import CaseEvidence from './CaseEvidence';
 import { useSaveBar } from '../lib/SaveBarContext';
 
 const ACTION_META = {
@@ -25,8 +28,16 @@ const LOG_EVENTS = [
   { key: 'voice_leave', label: 'Voz: desconectar', icon: 'fa-phone-slash' },
   { key: 'channel_create', label: 'Canal creado', icon: 'fa-plus' },
   { key: 'channel_delete', label: 'Canal eliminado', icon: 'fa-minus' },
-  { key: 'role_change', label: 'Cambios de roles', icon: 'fa-user-gear' },
+  { key: 'channel_update', label: 'Cambios de canales y categorías (incluye permisos)', icon: 'fa-sliders' },
+  { key: 'role_change', label: 'Roles: asignación, retirada y definición', icon: 'fa-user-gear' },
+  { key: 'nickname_changes', label: 'Cambios de apodo', icon: 'fa-user-pen' },
+  { key: 'audit_events', label: 'Auditoría administrativa adicional', icon: 'fa-clipboard-list' },
 ];
+
+const EVENT_ALIASES = {
+  channel_update: ['channel_updates'], role_change: ['role_changes', 'member_update'],
+  nickname_changes: ['member_update'],
+};
 
 function relativeTime(ts) {
   if (!ts) return '—';
@@ -48,6 +59,8 @@ export default function Logs({ selectedGuild }) {
 
   // Cases state
   const [cases, setCases]       = useState([]);
+  const [casesGuild, setCasesGuild] = useState(null);
+  const casesRequest = useRef(0);
   const [loading, setLoading]   = useState(true);
   const [filter, setFilter]     = useState('all');
   const [search, setSearch]     = useState('');
@@ -67,17 +80,20 @@ export default function Logs({ selectedGuild }) {
 
   const load = useCallback(async () => {
     if (!guildId) return;
+    const request = ++casesRequest.current;
     setLoading(true);
     try {
-      const data = await apiGet(`/api/moderation/${guildId}/cases?limit=200`);
+      const data = await apiGet(`/api/moderation/${guildId}/cases?limit=200`, { cache: false });
       const raw = Array.isArray(data) ? data : (data.cases || []);
+      if (request !== casesRequest.current) return;
       setCases(raw.sort((a, b) => {
         const ta = typeof a.created_at === 'number' ? a.created_at : new Date(a.created_at).getTime() / 1000;
         const tb = typeof b.created_at === 'number' ? b.created_at : new Date(b.created_at).getTime() / 1000;
         return tb - ta;
       }));
-    } catch { setCases([]); }
-    finally { setLoading(false); }
+      setCasesGuild(guildId);
+    } catch { if (request === casesRequest.current) setCases([]); }
+    finally { if (request === casesRequest.current) setLoading(false); }
   }, [guildId]);
 
   const loadConfig = useCallback(async () => {
@@ -87,9 +103,25 @@ export default function Logs({ selectedGuild }) {
     try {
       const data = await apiGet(`/api/guilds/${guildId}/logging`);
       // Parse log_events from JSON string or default to all enabled
-      let events = {};
+      let events = Object.fromEntries(LOG_EVENTS.map((ev) => [ev.key, true]));
       if (data.log_events) {
-        try { events = JSON.parse(data.log_events); } catch { events = {}; }
+        try {
+          const raw = JSON.parse(data.log_events);
+          if (Array.isArray(raw)) {
+            events = { ...Object.fromEntries(raw.filter((key) => typeof key === 'string').map((key) => [key, true])),
+              ...Object.fromEntries(LOG_EVENTS.map((event) => [event.key, raw.includes(event.key)])) };
+            for (const [key, aliases] of Object.entries(EVENT_ALIASES)) {
+              events[key] = [key, ...aliases].some((alias) => raw.includes(alias));
+            }
+          } else if (raw && typeof raw === 'object') {
+            const defaultEnabled = Object.keys(raw).length === 0;
+            events = { ...Object.fromEntries(LOG_EVENTS.map((event) => [event.key, defaultEnabled])), ...raw };
+            for (const [key, aliases] of Object.entries(EVENT_ALIASES)) {
+              events[key] = Object.prototype.hasOwnProperty.call(raw, key)
+                ? Boolean(raw[key]) : defaultEnabled || aliases.some((alias) => Boolean(raw[alias]));
+            }
+          }
+        } catch { /* keep defaults */ }
       }
       setLogCfg({ ...data, log_events_parsed: events });
     } catch { showToast('Error cargando config de logging', 'error'); }
@@ -118,10 +150,17 @@ export default function Logs({ selectedGuild }) {
   const saveConfig = async () => {
     setSaving(true);
     try {
-      await apiPatch(`/api/guilds/${guildId}/logging`, {
+      const res = await apiPatch(`/api/guilds/${guildId}/logging`, {
         serverlog_channel: logCfg.serverlog_channel,
         serverlog_enabled: logCfg.serverlog_enabled,
         log_events: JSON.stringify(logCfg.log_events_parsed || {})});
+      if (res?.config) {
+        setLogCfg((prev) => ({
+          ...prev,
+          ...res.config,
+          log_events_parsed: prev?.log_events_parsed || {},
+        }));
+      }
       setDirty(false);
       showToast('Configuración guardada');
     } catch (e) { showToast(e.message, 'error'); }
@@ -130,7 +169,8 @@ export default function Logs({ selectedGuild }) {
 
   useSaveBar({ dirty, saving, onSave: saveConfig, onRevert: loadConfig });
 
-  const filtered = cases.filter(c => {
+  const visibleCases = casesGuild === guildId ? cases : [];
+  const filtered = visibleCases.filter(c => {
     if (filter !== 'all' && c.action !== filter) return false;
     if (search) {
       const q = search.toLowerCase();
@@ -138,7 +178,9 @@ export default function Logs({ selectedGuild }) {
         String(c.target_id).includes(q) ||
         String(c.moderator_id).includes(q) ||
         (c.reason || '').toLowerCase().includes(q) ||
-        (c.target_tag || '').toLowerCase().includes(q)
+        (c.target_tag || '').toLowerCase().includes(q) ||
+        (c.target_display || '').toLowerCase().includes(q) ||
+        (c.moderator_display || '').toLowerCase().includes(q)
       );
     }
     return true;
@@ -146,7 +188,7 @@ export default function Logs({ selectedGuild }) {
 
   const totalPages = Math.ceil(filtered.length / PER_PAGE);
   const paged = filtered.slice(page * PER_PAGE, (page + 1) * PER_PAGE);
-  const counts = cases.reduce((acc, c) => { acc[c.action] = (acc[c.action] || 0) + 1; return acc; }, {});
+  const counts = visibleCases.reduce((acc, c) => { acc[c.action] = (acc[c.action] || 0) + 1; return acc; }, {});
 
   const renderChannelOption = (opt) => (
     <><Icon name="channel" /> <span className="ss-option-label">{opt.name}</span>{opt.category ? <span className="ss-option-sub">{opt.category}</span> : null}</>
@@ -193,7 +235,7 @@ export default function Logs({ selectedGuild }) {
                 <label>Canal de Server Logs</label>
                 <SearchableSelect
                   value={logCfg.serverlog_channel || ''}
-                  onChange={v => setCfgField('serverlog_channel', v ? parseInt(v, 10) : null)}
+                  onChange={v => setCfgField('serverlog_channel', v ? String(v) : null)}
                   endpoint={`/api/guilds/${guildId}/channels`}
                   itemsKey="channels"
                   placeholder="Selecciona un canal…"
@@ -205,17 +247,18 @@ export default function Logs({ selectedGuild }) {
 
             <div className="glass-panel" style={{ padding: 24, borderRadius: 22 }}>
               <h3 style={{ margin: '0 0 16px' }}>Eventos a registrar</h3>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 10 }}>
+              <p className="text-muted" style={{ marginTop: 0 }}>La auditoría adicional registra cambios administrativos del servidor, emojis, hilos, invitaciones, webhooks y otros eventos que Discord comunica. Requiere Ver registro de auditoría. Los roles y apodos tienen controles propios. No recupera cambios mientras el bot estuvo desconectado; en mensajes sin caché el contenido anterior no está disponible.</p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,220px),1fr))', gap: 10 }}>
                 {LOG_EVENTS.map(ev => {
                   const on = !!(logCfg.log_events_parsed || {})[ev.key];
                   return (
                     <div key={ev.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderRadius: 12, background: on ? 'rgba(139,92,246,0.08)' : 'rgba(255,255,255,0.02)', border: `1px solid ${on ? 'rgba(139,92,246,0.25)' : 'rgba(255,255,255,0.06)'}`, transition: 'all 0.15s' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <i className={`fa-solid ${ev.icon}`} style={{ color: on ? '#c4b5fd' : 'var(--muted)', fontSize: '0.9rem' }} />
+                        <i className={`fa-solid ${ev.icon}`} style={{ color: on ? 'var(--accent)' : 'var(--muted)', fontSize: '0.9rem' }} />
                         <span style={{ fontSize: '0.84rem', fontWeight: 600 }}>{ev.label}</span>
                       </div>
                       <label className="toggle-switch" style={{ transform: 'scale(0.8)' }}>
-                        <input type="checkbox" checked={on} onChange={() => toggleEvent(ev.key)} />
+                        <input type="checkbox" aria-label={ev.label} checked={on} onChange={() => toggleEvent(ev.key)} />
                         <span className="slider" />
                       </label>
                     </div>
@@ -230,7 +273,7 @@ export default function Logs({ selectedGuild }) {
       {tab === 'cases' && (
         <>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
-            <p style={{ color: 'var(--muted)', margin: 0, fontSize: '0.88rem' }}>{cases.length} acción(es) registradas</p>
+            <p style={{ color: 'var(--muted)', margin: 0, fontSize: '0.88rem' }}>{visibleCases.length} acción(es) registradas</p>
             <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.82rem', color: 'var(--muted)', cursor: 'pointer' }}>
                 <span className="toggle-switch" style={{ transform: 'scale(0.8)' }}>
@@ -239,13 +282,13 @@ export default function Logs({ selectedGuild }) {
                 </span>
                 Auto-refresh
               </label>
-              <button onClick={load} style={{ padding: '8px 16px', borderRadius: 10, border: '1px solid rgba(139,92,246,0.25)', background: 'rgba(139,92,246,0.1)', color: '#c4b5fd', cursor: 'pointer', fontSize: '0.82rem', fontWeight: 700 }}>
+              <button onClick={load} style={{ padding: '8px 16px', borderRadius: 10, border: '1px solid rgba(139,92,246,0.25)', background: 'rgba(139,92,246,0.1)', color: 'var(--accent)', cursor: 'pointer', fontSize: '0.82rem', fontWeight: 700 }}>
                 ↻ Actualizar
               </button>
             </div>
           </div>
 
-          {cases.length > 0 && (
+          {visibleCases.length > 0 && (
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 20 }}>
               {Object.entries(counts).map(([action, count]) => {
                 const meta = ACTION_META[action] || { label: action, color: '#7a9bb5', icon: '📋' };
@@ -282,7 +325,7 @@ export default function Logs({ selectedGuild }) {
             </div>
           ) : (
             <>
-              <div className="glass-panel" style={{ overflow: 'hidden', marginBottom: 16 }}>
+              <div className="glass-panel" style={{ overflowX: 'auto', marginBottom: 16 }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
                   <thead>
                     <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
@@ -295,22 +338,38 @@ export default function Logs({ selectedGuild }) {
                     {paged.map((c, i) => {
                       const meta = ACTION_META[c.action] || { label: c.action, color: '#7a9bb5', icon: '📋' };
                       return (
-                        <tr key={c.id || i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', transition: 'background 0.15s' }}
+                        <Fragment key={`${guildId}:${c.id || i}`}>
+                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', transition: 'background 0.15s' }}
                           onMouseEnter={e => e.currentTarget.style.background = 'rgba(139,92,246,0.06)'}
                           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                          <td style={{ padding: '10px 16px', color: 'var(--muted)', fontFamily: 'monospace', fontSize: '0.78rem' }}>#{c.id || page * PER_PAGE + i + 1}</td>
+                          <td style={{ padding: '10px 16px', color: 'var(--muted)', fontFamily: 'monospace', fontSize: '0.78rem' }}>#{c.case_number || c.id || page * PER_PAGE + i + 1}</td>
                           <td style={{ padding: '10px 16px' }}>
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 99, fontSize: '0.74rem', fontWeight: 700, background: meta.color + '18', color: meta.color, border: `1px solid ${meta.color}30` }}>
-                              {meta.icon} {meta.label}
+                              {meta.icon} {c.action_label || meta.label}
                             </span>
                           </td>
-                          <td style={{ padding: '10px 16px', fontFamily: 'monospace', fontSize: '0.78rem' }}>{c.target_tag || c.target_id || '—'}</td>
-                          <td style={{ padding: '10px 16px', color: 'var(--muted)', fontFamily: 'monospace', fontSize: '0.78rem' }}>{c.moderator_tag || c.moderator_id || '—'}</td>
+                          <td style={{ padding: '10px 16px' }}>
+                            <IdentityBadge item={c} />
+                          </td>
+                          <td style={{ padding: '10px 16px' }}>
+                            <IdentityBadge item={c} prefix="moderator" />
+                          </td>
                           <td style={{ padding: '10px 16px', maxWidth: 220 }}>
-                            <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: c.reason ? 'var(--text)' : 'var(--muted)', fontSize: '0.82rem' }}>{c.reason || 'Sin razón'}</span>
+                            <ModerationReason entry={c} />
+                            {/^https?:\/\//i.test(c.evidence_url || '') && <a href={c.evidence_url} target="_blank" rel="noreferrer">Evidencia enlazada</a>}
                           </td>
                           <td style={{ padding: '10px 16px', color: 'var(--muted)', fontSize: '0.76rem', whiteSpace: 'nowrap' }}>{relativeTime(c.created_at)}</td>
                         </tr>
+                        <tr><td colSpan={6} style={{ padding: '0 16px 8px' }}>
+                          <CaseEvidence guildId={guildId} entry={c} onUpdated={(result) => {
+                            setCases((previous) => previous.map((item) => item.id === c.id ? {
+                              ...item,
+                              evidence_count: result.items.filter((evidence) => evidence.status === 'available').length,
+                              evidence_status: result.items.some((evidence) => evidence.status === 'failed') ? 'partial' : 'available',
+                            } : item));
+                          }} />
+                        </td></tr>
+                        </Fragment>
                       );
                     })}
                   </tbody>

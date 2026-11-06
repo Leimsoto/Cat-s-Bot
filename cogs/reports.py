@@ -35,8 +35,29 @@ class ReportActionView(discord.ui.View):
     (formato `ID: <n>`) — una sola instancia sirve para todos los reportes.
     """
 
-    def __init__(self):
+    def __init__(self, *, disabled: bool = False):
         super().__init__(timeout=None)
+        if disabled:
+            for child in self.children:
+                child.disabled = True
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        member = interaction.user
+        guild = interaction.guild
+        if guild is None or not isinstance(member, discord.Member):
+            return False
+        if member.id == guild.owner_id or member.guild_permissions.administrator:
+            return True
+        cfg = interaction.client.db.get_server_config(guild.id)
+        allowed_ids = {
+            int(role_id)
+            for role_id in (cfg.get("mod_role_id"), cfg.get("staff_role_id"))
+            if role_id
+        }
+        if any(role.id in allowed_ids for role in member.roles):
+            return True
+        await interaction.response.send_message("❌ Solo el staff puede gestionar reportes.", ephemeral=True)
+        return False
 
     @discord.ui.button(label="Resolver", style=discord.ButtonStyle.success, emoji="✅",
                        custom_id="report_resolve")
@@ -44,7 +65,10 @@ class ReportActionView(discord.ui.View):
         report_id = self._get_report_id(interaction)
         if report_id is None:
             return await interaction.response.send_message("❌ No se pudo determinar el ID del reporte.", ephemeral=True)
-        interaction.client.db.update_report(report_id, status="RESOLVED")
+        if not interaction.client.db.resolve_report(report_id, interaction.guild_id, "RESOLVED"):
+            return await interaction.response.send_message(
+                "ℹ️ Este reporte ya fue procesado o no pertenece al servidor.", ephemeral=True
+            )
         await self._mark_done(interaction, "RESUELTO", discord.Color.green())
 
     @discord.ui.button(label="Desestimar", style=discord.ButtonStyle.secondary, emoji="🚫",
@@ -53,7 +77,10 @@ class ReportActionView(discord.ui.View):
         report_id = self._get_report_id(interaction)
         if report_id is None:
             return await interaction.response.send_message("❌ No se pudo determinar el ID del reporte.", ephemeral=True)
-        interaction.client.db.update_report(report_id, status="DISMISSED")
+        if not interaction.client.db.resolve_report(report_id, interaction.guild_id, "DISMISSED"):
+            return await interaction.response.send_message(
+                "ℹ️ Este reporte ya fue procesado o no pertenece al servidor.", ephemeral=True
+            )
         await self._mark_done(interaction, "DESESTIMADO", discord.Color.greyple())
 
     def _get_report_id(self, interaction: discord.Interaction) -> int | None:
@@ -68,15 +95,18 @@ class ReportActionView(discord.ui.View):
 
     async def _mark_done(self, interaction: discord.Interaction, label: str, color: discord.Color):
         if interaction.message and interaction.message.embeds:
-            embed = interaction.message.embeds[0]
+            embed = discord.Embed.from_dict(interaction.message.embeds[0].to_dict())
             embed.color = color
-            embed.set_footer(text=f"Estado: {label} · {embed.footer.text}")
-            for child in self.children:
-                child.disabled = True
-            await interaction.response.edit_message(embed=embed, view=self)
+            report_id = self._get_report_id(interaction)
+            embed.set_footer(text=f"Estado: {label} · ID: {report_id}")
+            # No mutar/detener la instancia persistente global: Discord.py la
+            # reutiliza para mensajes anteriores a un reinicio.
+            await interaction.response.edit_message(
+                embed=embed,
+                view=ReportActionView(disabled=True),
+            )
         else:
             await interaction.response.send_message(f"✅ Reporte marcado como {label}.", ephemeral=True)
-        self.stop()
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -99,18 +129,21 @@ class Reports(commands.Cog):
             return False
         return any(r.id in check_ids for r in member.roles)
 
-    async def _send_to_modlog(self, guild: discord.Guild, embed: discord.Embed, report_id: int) -> None:
+    async def _send_to_modlog(self, guild: discord.Guild, embed: discord.Embed, report_id: int) -> bool:
         """Envía el embed al canal de modlog si está configurado."""
         srv_cfg = self.db.get_server_config(guild.id)
         modlog_id = srv_cfg.get("modlog_channel")
         if not modlog_id:
-            return
+            return False
         channel = guild.get_channel(int(modlog_id))
         if channel and isinstance(channel, discord.TextChannel):
             try:
-                await channel.send(embed=embed, view=ReportActionView())
-            except discord.Forbidden:
+                from cogs._managed_messages import send_managed
+                await send_managed(self.bot, guild.id, "reports", channel.send, embed=embed, view=ReportActionView())
+                return True
+            except discord.HTTPException:
                 logger.warning(f"Sin permisos para enviar reporte al modlog en {guild.name}")
+        return False
 
     async def _create_ticket_for_report(self, interaction: discord.Interaction,
                                          reported: discord.Member, reason: str, report_id: int) -> bool:
@@ -130,12 +163,20 @@ class Reports(commands.Cog):
 
         cat = categories[0]  # primera categoría disponible
         answers = [
-            f"Usuario reportado: {reported.mention} (`{reported.id}`)",
-            f"Motivo: {reason}",
-            f"ID del reporte: #{report_id}",
+            f"{reported.mention} (`{reported.id}`)",
+            reason,
+            f"#{report_id}",
         ]
         try:
-            await tickets_cog.create_ticket_channel(interaction, cat, answers)
+            channel = await tickets_cog.create_ticket_channel(
+                interaction, cat, answers,
+                questions=["Usuario reportado", "Motivo", "ID del reporte"],
+            )
+            if channel is None:
+                return False
+            ticket = self.db.get_ticket_by_channel(channel.id)
+            if ticket:
+                self.db.update_report(report_id, ticket_id=ticket["id"])
             return True
         except Exception as e:
             logger.warning(f"Error creando ticket para reporte: {e}")
@@ -149,7 +190,10 @@ class Reports(commands.Cog):
         razon="Motivo del reporte (sé específico)",
     )
     async def report_user(self, interaction: discord.Interaction,
-                          usuario: discord.Member, razon: str):
+                          usuario: discord.Member, razon: app_commands.Range[str, 1, 1000]):
+        razon = razon.strip()
+        if not razon:
+            return await interaction.response.send_message("❌ Escribe el motivo del reporte.", ephemeral=True)
         if usuario.id == interaction.user.id:
             return await interaction.response.send_message(
                 "❌ No puedes reportarte a ti mismo.", ephemeral=True
@@ -189,9 +233,17 @@ class Reports(commands.Cog):
         # Intentar crear ticket primero
         ticket_created = await self._create_ticket_for_report(interaction, usuario, razon, report_id)
 
-        if not ticket_created:
+        notified = ticket_created
+        if not notified:
             # Fallback: enviar al modlog
-            await self._send_to_modlog(interaction.guild, embed, report_id)
+            notified = await self._send_to_modlog(interaction.guild, embed, report_id)
+
+        if not notified:
+            return await interaction.followup.send(
+                f"⚠️ Tu reporte #{report_id} quedó guardado, pero no pude entregarlo "
+                "al staff. Contacta con un moderador e indica ese número.",
+                ephemeral=True,
+            )
 
         await interaction.followup.send(
             f"✅ Tu reporte contra **{usuario.display_name}** ha sido enviado al staff (Reporte #{report_id}).\n"

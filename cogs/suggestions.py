@@ -96,6 +96,8 @@ class DenyReasonModal(discord.ui.Modal, title="Razón de denegación"):
         self.suggestion_id = suggestion_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await self.cog._authorize_review(interaction, self.suggestion_id):
+            return
         text = (self.reason.value or "").strip() or None
         self.cog.db.update_suggestion(self.suggestion_id, status="DENIED", denial_reason=text)
         old_embed = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed()
@@ -124,6 +126,13 @@ class SuggestionReviewView(discord.ui.View):
             pass
         return None
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        suggestion_id = self._get_id(interaction)
+        if suggestion_id is None:
+            await interaction.response.send_message("❌ ID no resuelto.", ephemeral=True)
+            return False
+        return await self.cog._authorize_review(interaction, suggestion_id)
+
     @discord.ui.button(label="Aprobar", style=discord.ButtonStyle.success, custom_id="sugg_approve")
     async def approve_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         sid = self._get_id(interaction)
@@ -148,10 +157,45 @@ class Suggestions(commands.Cog):
         self.bot = bot
         self.db = bot.db  # type: ignore
 
+    async def _authorize_review(
+        self, interaction: discord.Interaction, suggestion_id: int
+    ) -> bool:
+        guild = interaction.guild
+        member = interaction.user
+        allowed = False
+        permissions = getattr(member, "guild_permissions", None)
+        if guild is not None and permissions is not None:
+            if member.id == guild.owner_id or member.guild_permissions.administrator:
+                allowed = True
+            else:
+                cfg = self.db.get_server_config(guild.id)
+                role_ids = {
+                    int(role_id)
+                    for role_id in (cfg.get("mod_role_id"), cfg.get("staff_role_id"))
+                    if role_id
+                }
+                allowed = any(role.id in role_ids for role in member.roles)
+
+        row = self.db.get_suggestion(suggestion_id) if allowed else None
+        if (
+            row
+            and int(row["guild_id"]) == interaction.guild_id
+            and row.get("status") == "PENDING"
+        ):
+            return True
+
+        await interaction.response.send_message(
+            "❌ Solo el staff actual puede gestionar sugerencias pendientes de este servidor.",
+            ephemeral=True,
+        )
+        return False
+
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     async def publish_suggestion(self, interaction: discord.Interaction, suggestion_id: int):
         """Publica una sugerencia en el canal público (desde aprobación o auto-publish)."""
+        if not await self._authorize_review(interaction, suggestion_id):
+            return
         row = self.db.get_suggestion(suggestion_id)
         if not row:
             return await interaction.response.send_message("❌ Sugerencia no encontrada.", ephemeral=True)
@@ -208,12 +252,8 @@ class Suggestions(commands.Cog):
         content = (message.content or "").strip()
         min_len = int(cfg.get("min_length") or 10)
         max_len = int(cfg.get("max_length") or 2000)
-        cooldown = int(cfg.get("cooldown_seconds") or 300)
-
-        try:
-            await message.delete()
-        except discord.HTTPException:
-            pass
+        raw_cooldown = cfg.get("cooldown_seconds")
+        cooldown = int(raw_cooldown if raw_cooldown is not None else 300)
 
         if len(content) < min_len:
             await self._dm_or_reply(
@@ -248,9 +288,27 @@ class Suggestions(commands.Cog):
         sugg_id = self.db.create_suggestion(message.guild.id, message.author.id, content)
 
         if int(cfg.get("auto_publish") or 0):
-            await self._auto_publish_from_listener(message, cfg, sugg_id, content)
+            delivered = await self._auto_publish_from_listener(message, cfg, sugg_id, content)
         else:
-            await self._send_to_review(message, cfg, sugg_id, content)
+            delivered = await self._send_to_review(message, cfg, sugg_id, content)
+
+        if not delivered:
+            self.db.update_suggestion(sugg_id, status="FAILED")
+            await self._dm_or_reply(
+                message,
+                "❌ No pude entregar tu sugerencia al canal configurado. "
+                "Tu mensaje original se conservó para que no pierdas el contenido.",
+            )
+            return
+
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            logger.warning(
+                "Sugerencia %s entregada, pero no se pudo borrar el mensaje fuente en %s",
+                sugg_id,
+                message.guild.name,
+            )
 
     async def _dm_or_reply(self, source: discord.Message, text: str):
         try:
@@ -264,7 +322,8 @@ class Suggestions(commands.Cog):
     async def _auto_publish_from_listener(self, message, cfg, sugg_id, content):
         public_ch = message.guild.get_channel(int(cfg.get("public_channel_id") or 0))
         if not public_ch:
-            return
+            logger.warning("public_channel de sugerencias no encontrado en %s", message.guild.name)
+            return False
         embed = discord.Embed(
             title="Nueva sugerencia",
             description=content,
@@ -280,13 +339,16 @@ class Suggestions(commands.Cog):
         try:
             msg = await public_ch.send(embed=embed, view=SuggestionPublicView(self))
             self.db.update_suggestion(sugg_id, status="ACCEPTED", message_id=msg.id)
-        except discord.Forbidden:
+            return True
+        except (discord.Forbidden, discord.HTTPException):
             logger.warning("Sin permisos para publicar sugerencia en %s", public_ch.name)
+            return False
 
     async def _send_to_review(self, message, cfg, sugg_id, content):
         review_ch = message.guild.get_channel(int(cfg.get("review_channel_id") or 0))
         if not review_ch:
-            return
+            logger.warning("review_channel de sugerencias no encontrado en %s", message.guild.name)
+            return False
         embed = discord.Embed(
             title="Sugerencia PENDIENTE",
             description=content,
@@ -300,8 +362,10 @@ class Suggestions(commands.Cog):
         embed.set_footer(text=f"ID: {sugg_id}")
         try:
             await review_ch.send(embed=embed, view=SuggestionReviewView(self))
-        except discord.Forbidden:
+            return True
+        except (discord.Forbidden, discord.HTTPException):
             logger.warning("Sin permisos en review_channel de %s", message.guild.name)
+            return False
 
 
 async def setup(bot: commands.Bot):

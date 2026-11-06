@@ -11,6 +11,7 @@ Comandos slash:
   /usermessage  – Últimos N mensajes de un usuario (todos los canales)
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -18,6 +19,11 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+from cogs._role_safety import (
+    safe_for_automatic_assignment,
+    self_service_forbidden_role_ids,
+)
 
 logger = logging.getLogger("Users")
 
@@ -29,55 +35,40 @@ class Users(commands.Cog):
         self.bot = bot
         self.db = bot.db  # type: ignore
 
-    def _validate_role_action(
+    def _member_has_user_perms(
         self,
-        interaction: discord.Interaction,
-        usuario: discord.Member,
-        rol: discord.Role,
-    ) -> Optional[str]:
-        guild = interaction.guild
-        actor = interaction.user
-
-        if guild is None or not isinstance(actor, discord.Member):
-            return "Este comando solo puede usarse dentro de un servidor."
-        if rol == guild.default_role:
-            return "No puedes gestionar el rol @everyone."
-        if rol.managed:
-            return "Ese rol es gestionado por una integración y no puede modificarse manualmente."
-
-        bot_member = guild.me or guild.get_member(self.bot.user.id)
-        if bot_member is None:
-            return "No pude verificar mi jerarquía de roles."
-        if rol >= bot_member.top_role:
-            return "No puedo gestionar un rol igual o superior al mío."
-        if bot_member.top_role <= usuario.top_role:
-            return "Mi rol no es suficiente para gestionar a ese usuario."
-
-        if actor.id != guild.owner_id and rol >= actor.top_role:
-            return "No puedes gestionar un rol igual o superior al tuyo."
-        if actor.id != guild.owner_id and actor.top_role <= usuario.top_role:
-            return "Tu rol no es suficientemente alto para gestionar a ese usuario."
-
-        return None
+        guild: discord.Guild,
+        member: discord.Member,
+        *,
+        need_roles: bool = False,
+    ) -> bool:
+        member_guild = getattr(member, "guild", None)
+        if member_guild is not None and getattr(member_guild, "id", None) != guild.id:
+            return False
+        if member.guild_permissions.administrator:
+            return True
+        if need_roles and member.guild_permissions.manage_roles:
+            return True
+        try:
+            role_id = int(
+                (self.db.get_server_config(guild.id) or {}).get("users_role_id")
+                or 0
+            )
+        except Exception:
+            return False
+        return bool(role_id and any(role.id == role_id for role in member.roles))
 
     async def _check_user_perms(self, interaction: discord.Interaction, need_roles: bool = False) -> bool:
         """Verifica permisos del usuario según el módulo."""
         member = interaction.user
-        if interaction.guild is None or not isinstance(member, discord.Member):
+        guild = interaction.guild
+        if guild is None or not isinstance(member, discord.Member):
             await interaction.response.send_message(
                 "❌ Este comando solo puede usarse dentro de un servidor.",
                 ephemeral=True,
             )
             return False
-
-        if member.guild_permissions.administrator:
-            return True
-        if need_roles and member.guild_permissions.manage_roles:
-            return True
-
-        srv_cfg = self.db.get_server_config(interaction.guild_id)
-        role_id = srv_cfg.get("users_role_id")
-        if role_id and any(r.id == role_id for r in member.roles):
+        if self._member_has_user_perms(guild, member, need_roles=need_roles):
             return True
 
         perm = "Gestionar Roles" if need_roles else "el rol de usuarios configurado"
@@ -86,6 +77,133 @@ class Users(commands.Cog):
             ephemeral=True,
         )
         return False
+
+    async def _fresh_user_action_context(
+        self,
+        interaction: discord.Interaction,
+        target_id: int,
+        *,
+        role_id: Optional[int] = None,
+        for_nickname: bool = False,
+    ) -> tuple[
+        Optional[discord.Member],
+        Optional[discord.Member],
+        Optional[discord.Role],
+        Optional[str],
+    ]:
+        """Revalida autorización y jerarquías por REST justo antes del efecto."""
+        guild = interaction.guild
+        if (
+            guild is None
+            or interaction.guild_id != guild.id
+            or self.bot.user is None
+        ):
+            return None, None, None, "No pude verificar el servidor actual."
+
+        try:
+            target, actor, bot_member, live_roles, live_guild = await asyncio.gather(
+                guild.fetch_member(int(target_id)),
+                guild.fetch_member(interaction.user.id),
+                guild.fetch_member(self.bot.user.id),
+                guild.fetch_roles(),
+                self.bot.fetch_guild(guild.id),
+            )
+        except discord.NotFound:
+            return None, None, None, "El usuario o rol ya no está disponible."
+        except (discord.Forbidden, discord.HTTPException):
+            return None, None, None, "No pude verificar permisos y jerarquías actuales."
+        if getattr(live_guild, "id", None) != guild.id:
+            return None, None, None, "La identidad actual del servidor no coincide."
+
+        roles_by_id = {int(role.id): role for role in live_roles}
+
+        def current_role_state(member: discord.Member):
+            role_ids = {guild.id}
+            role_ids.update(int(value) for value in getattr(member, "_roles", ()))
+            if any(value not in roles_by_id for value in role_ids):
+                return None
+            roles = [roles_by_id[value] for value in role_ids]
+            permissions_value = 0
+            for current_role in roles:
+                permissions_value |= int(current_role.permissions.value)
+            return discord.Permissions(permissions_value), max(roles), role_ids
+
+        actor_state = current_role_state(actor)
+        target_state = current_role_state(target)
+        bot_state = current_role_state(bot_member)
+        if actor_state is None or target_state is None or bot_state is None:
+            return None, None, None, "No pude verificar la jerarquía completa de roles."
+
+        actor_permissions, actor_top_role, actor_role_ids = actor_state
+        target_permissions, target_top_role, _target_role_ids = target_state
+        bot_permissions, bot_top_role, _bot_role_ids = bot_state
+        owner_id = int(live_guild.owner_id)
+
+        try:
+            configured_role_id = int(
+                (self.db.get_server_config(guild.id) or {}).get("users_role_id")
+                or 0
+            )
+        except (AttributeError, TypeError, ValueError):
+            return None, None, None, "No pude verificar el rol delegado actual."
+        configured_role = roles_by_id.get(configured_role_id)
+        delegated_access = bool(
+            configured_role_id
+            and configured_role_id in actor_role_ids
+            and configured_role is not None
+            and not configured_role.is_default()
+            and not configured_role.managed
+            and configured_role < bot_top_role
+        )
+        native_role_manager = bool(
+            actor.id == owner_id
+            or actor_permissions.administrator
+            or actor_permissions.manage_roles
+        )
+        if not native_role_manager and not delegated_access:
+            return None, None, None, "Tus permisos cambiaron; la operación fue cancelada."
+
+        if target.id == owner_id:
+            return None, None, None, "No puedes gestionar al dueño del servidor."
+        if target_permissions.administrator and actor.id != owner_id:
+            return None, None, None, "No puedes gestionar a un administrador protegido."
+        if actor.id != owner_id and actor_top_role <= target_top_role:
+            return None, None, None, "Tu rol no es suficientemente alto para gestionar a ese usuario."
+        if bot_top_role <= target_top_role:
+            return None, None, None, "Mi rol no es suficiente para gestionar a ese usuario."
+
+        if for_nickname:
+            if actor.id == target.id:
+                return None, None, None, "No puedes cambiar tu propio apodo con este comando."
+            if not (
+                bot_permissions.administrator
+                or bot_permissions.manage_nicknames
+            ):
+                return None, None, None, "Ya no tengo permiso para gestionar apodos."
+            return actor, target, None, None
+
+        role = roles_by_id.get(int(role_id or 0))
+        if role is None:
+            return None, None, None, "El rol ya no existe."
+        if role.is_default():
+            return None, None, None, "No puedes gestionar el rol @everyone."
+        if role.managed:
+            return None, None, None, "Ese rol es gestionado por una integración."
+        if not (bot_permissions.administrator or bot_permissions.manage_roles):
+            return None, None, None, "Ya no tengo permiso para gestionar roles."
+        if role >= bot_top_role:
+            return None, None, None, "No puedo gestionar un rol igual o superior al mío."
+        if actor.id != owner_id and role >= actor_top_role:
+            return None, None, None, "No puedes gestionar un rol igual o superior al tuyo."
+        if not native_role_manager:
+            forbidden_role_ids = self_service_forbidden_role_ids(self.db, guild.id)
+            if forbidden_role_ids is None or not safe_for_automatic_assignment(
+                role,
+                bot_member,
+                forbidden_role_ids=forbidden_role_ids,
+            ):
+                return None, None, None, "El rol delegado de usuarios no puede gestionar ese rol."
+        return actor, target, role, None
 
     # ─────────────────────────────────────────────────────────────────────────
     # /addrole
@@ -100,36 +218,45 @@ class Users(commands.Cog):
         if not await self._check_user_perms(interaction, need_roles=True):
             return
 
-        if rol in usuario.roles:
+        actor, current_target, current_role, err = await self._fresh_user_action_context(
+            interaction, usuario.id, role_id=rol.id
+        )
+        if err or actor is None or current_target is None or current_role is None:
             return await interaction.response.send_message(
-                f"⚠️ {usuario.mention} ya tiene el rol {rol.mention}.", ephemeral=True
+                f"❌ {err or 'No pude verificar la operación.'}", ephemeral=True
             )
 
-        err = self._validate_role_action(interaction, usuario, rol)
-        if err:
-            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+        current_role_ids = {
+            int(value) for value in getattr(current_target, "_roles", ())
+        }
+        if current_role.id in current_role_ids:
+            return await interaction.response.send_message(
+                f"⚠️ {current_target.mention} ya tiene el rol {current_role.mention}.", ephemeral=True
+            )
 
         try:
-            await usuario.add_roles(rol, reason=f"Añadido por {interaction.user}")
+            await current_target.add_roles(
+                current_role, reason=f"Añadido por {actor}"
+            )
         except discord.Forbidden:
-            logger.warning("Sin permisos para añadir rol %s a %s en %s", rol.id, usuario.id, interaction.guild)
+            logger.warning("Sin permisos para añadir rol %s a %s en %s", current_role.id, current_target.id, interaction.guild)
             return await interaction.response.send_message(
                 "❌ No tengo permisos para añadir ese rol.",
                 ephemeral=True,
             )
         except discord.HTTPException as exc:
-            logger.warning("Error añadiendo rol %s a %s en %s: %s", rol.id, usuario.id, interaction.guild, exc)
+            logger.warning("Error añadiendo rol %s a %s en %s: %s", current_role.id, current_target.id, interaction.guild, exc)
             return await interaction.response.send_message(
                 "❌ No se pudo añadir el rol. Inténtalo de nuevo.",
                 ephemeral=True,
             )
         embed = discord.Embed(
             title="✅ Rol añadido",
-            description=f"Se añadió {rol.mention} a {usuario.mention}.",
-            color=rol.color if rol.color.value else discord.Color.green(),
+            description=f"Se añadió {current_role.mention} a {current_target.mention}.",
+            color=current_role.color if current_role.color.value else discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_footer(text=f"Ejecutado por {interaction.user.display_name}")
+        embed.set_footer(text=f"Ejecutado por {actor.display_name}")
         await interaction.response.send_message(embed=embed)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -145,36 +272,45 @@ class Users(commands.Cog):
         if not await self._check_user_perms(interaction, need_roles=True):
             return
 
-        if rol not in usuario.roles:
+        actor, current_target, current_role, err = await self._fresh_user_action_context(
+            interaction, usuario.id, role_id=rol.id
+        )
+        if err or actor is None or current_target is None or current_role is None:
             return await interaction.response.send_message(
-                f"⚠️ {usuario.mention} no tiene el rol {rol.mention}.", ephemeral=True
+                f"❌ {err or 'No pude verificar la operación.'}", ephemeral=True
             )
 
-        err = self._validate_role_action(interaction, usuario, rol)
-        if err:
-            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+        current_role_ids = {
+            int(value) for value in getattr(current_target, "_roles", ())
+        }
+        if current_role.id not in current_role_ids:
+            return await interaction.response.send_message(
+                f"⚠️ {current_target.mention} no tiene el rol {current_role.mention}.", ephemeral=True
+            )
 
         try:
-            await usuario.remove_roles(rol, reason=f"Removido por {interaction.user}")
+            await current_target.remove_roles(
+                current_role, reason=f"Removido por {actor}"
+            )
         except discord.Forbidden:
-            logger.warning("Sin permisos para quitar rol %s a %s en %s", rol.id, usuario.id, interaction.guild)
+            logger.warning("Sin permisos para quitar rol %s a %s en %s", current_role.id, current_target.id, interaction.guild)
             return await interaction.response.send_message(
                 "❌ No tengo permisos para quitar ese rol.",
                 ephemeral=True,
             )
         except discord.HTTPException as exc:
-            logger.warning("Error quitando rol %s a %s en %s: %s", rol.id, usuario.id, interaction.guild, exc)
+            logger.warning("Error quitando rol %s a %s en %s: %s", current_role.id, current_target.id, interaction.guild, exc)
             return await interaction.response.send_message(
                 "❌ No se pudo quitar el rol. Inténtalo de nuevo.",
                 ephemeral=True,
             )
         embed = discord.Embed(
             title="✅ Rol removido",
-            description=f"Se quitó {rol.mention} de {usuario.mention}.",
+            description=f"Se quitó {current_role.mention} de {current_target.mention}.",
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_footer(text=f"Ejecutado por {interaction.user.display_name}")
+        embed.set_footer(text=f"Ejecutado por {actor.display_name}")
         await interaction.response.send_message(embed=embed)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -373,25 +509,16 @@ class Users(commands.Cog):
         if not await self._check_user_perms(interaction, need_roles=True):
             return
 
-        if not interaction.guild.me.guild_permissions.manage_nicknames:
+        actor, current_target, _role, err = await self._fresh_user_action_context(
+            interaction, usuario.id, for_nickname=True
+        )
+        if err or actor is None or current_target is None:
             return await interaction.response.send_message(
-                "❌ No tengo permisos para gestionar apodos.", ephemeral=True
-            )
-
-        if usuario.top_role >= interaction.guild.me.top_role:
-            return await interaction.response.send_message(
-                "❌ No puedo cambiar el apodo a alguien con un rol igual o superior al mío.",
-                ephemeral=True,
-            )
-
-        if usuario.id != interaction.guild.owner_id and usuario.top_role >= interaction.user.top_role:
-            return await interaction.response.send_message(
-                "❌ No puedes cambiar el apodo a alguien con un rol igual o superior al tuyo.",
-                ephemeral=True,
+                f"❌ {err or 'No pude verificar la operación.'}", ephemeral=True
             )
 
         try:
-            await usuario.edit(nick=nickname, reason=f"Nick cambiado por {interaction.user}")
+            await current_target.edit(nick=nickname, reason=f"Nick cambiado por {actor}")
         except discord.Forbidden:
             return await interaction.response.send_message(
                 "❌ No tengo permisos para cambiar ese apodo.", ephemeral=True
@@ -404,13 +531,13 @@ class Users(commands.Cog):
         if nickname:
             embed = discord.Embed(
                 title="✅ Apodo cambiado",
-                description=f"El apodo de {usuario.mention} ahora es **{nickname}**.",
+                description=f"El apodo de {current_target.mention} ahora es **{nickname}**.",
                 color=discord.Color.green(),
             )
         else:
             embed = discord.Embed(
                 title="✅ Apodo reseteado",
-                description=f"El apodo de {usuario.mention} ha sido reseteado.",
+                description=f"El apodo de {current_target.mention} ha sido reseteado.",
                 color=discord.Color.green(),
             )
         await interaction.response.send_message(embed=embed)
@@ -453,8 +580,14 @@ class Users(commands.Cog):
 
         for channel in guild.text_channels:
             try:
-                perms = channel.permissions_for(bot_member)
-                if not perms.view_channel or not perms.read_message_history:
+                bot_perms = channel.permissions_for(bot_member)
+                actor_perms = channel.permissions_for(interaction.user)
+                if not (
+                    bot_perms.view_channel
+                    and bot_perms.read_message_history
+                    and actor_perms.view_channel
+                    and actor_perms.read_message_history
+                ):
                     continue
 
                 async for msg in channel.history(limit=scan_limit):
@@ -464,6 +597,24 @@ class Users(commands.Cog):
                 logger.debug("Sin permisos para leer historial en canal %s", channel.id)
             except discord.HTTPException as exc:
                 logger.debug("Error leyendo historial en canal %s: %s", channel.id, exc)
+
+        try:
+            current_actor = await guild.fetch_member(interaction.user.id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            current_actor = None
+        if current_actor is None or not self._member_has_user_perms(guild, current_actor):
+            return await interaction.followup.send(
+                "❌ Tus permisos cambiaron mientras se consultaba el historial.",
+                ephemeral=True,
+            )
+        all_messages = [
+            msg
+            for msg in all_messages
+            if (
+                (perms := msg.channel.permissions_for(current_actor)).view_channel
+                and perms.read_message_history
+            )
+        ]
 
         if not all_messages:
             return await interaction.followup.send(
@@ -476,7 +627,9 @@ class Users(commands.Cog):
 
         # Construir páginas
         pages = []
+        page_channel_ids = []
         current_page = []
+        current_channel_ids = set()
         current_len = 0
 
         for msg in messages:
@@ -488,14 +641,18 @@ class Users(commands.Cog):
 
             if current_len + len(line) > 1800:
                 pages.append("\n".join(current_page))
+                page_channel_ids.append(set(current_channel_ids))
                 current_page = [line]
+                current_channel_ids = {msg.channel.id}
                 current_len = len(line)
             else:
                 current_page.append(line)
+                current_channel_ids.add(msg.channel.id)
                 current_len += len(line)
 
         if current_page:
             pages.append("\n".join(current_page))
+            page_channel_ids.append(set(current_channel_ids))
 
         if len(pages) == 1:
             embed = discord.Embed(
@@ -508,7 +665,14 @@ class Users(commands.Cog):
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
             # Paginación
-            view = MessagePaginatorView(pages, usuario, interaction.user.id)
+            view = MessagePaginatorView(
+                pages,
+                usuario,
+                interaction.user.id,
+                cog=self,
+                guild_id=guild.id,
+                page_channel_ids=page_channel_ids,
+            )
             embed = view.build_embed(0)
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
@@ -516,11 +680,23 @@ class Users(commands.Cog):
 class MessagePaginatorView(discord.ui.View):
     """Paginador para /usermessage."""
 
-    def __init__(self, pages: list, target: discord.Member, author_id: int):
+    def __init__(
+        self,
+        pages: list,
+        target: discord.Member,
+        author_id: int,
+        *,
+        cog: Optional[Users] = None,
+        guild_id: Optional[int] = None,
+        page_channel_ids: Optional[list[set[int]]] = None,
+    ):
         super().__init__(timeout=120)
         self.pages = pages
         self.target = target
         self.author_id = author_id
+        self.cog = cog
+        self.guild_id = guild_id
+        self.page_channel_ids = page_channel_ids or [set() for _ in pages]
         self.current = 0
 
     def build_embed(self, page: int) -> discord.Embed:
@@ -537,18 +713,54 @@ class MessagePaginatorView(discord.ui.View):
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("❌ Solo quien ejecutó el comando puede paginar.", ephemeral=True)
             return False
+        if interaction.guild_id != self.guild_id or self.cog is None:
+            await interaction.response.send_message("❌ Este paginador ya no es válido.", ephemeral=True)
+            return False
+        return True
+
+    async def _authorize_page(self, interaction: discord.Interaction, page: int) -> bool:
+        guild = interaction.guild
+        if guild is None or guild.id != self.guild_id or self.cog is None:
+            await interaction.response.send_message("❌ Este paginador ya no es válido.", ephemeral=True)
+            return False
+        try:
+            member = await guild.fetch_member(self.author_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            member = None
+        if member is None or not self.cog._member_has_user_perms(guild, member):
+            await interaction.response.send_message(
+                "❌ Ya no tienes permisos para consultar este historial.", ephemeral=True
+            )
+            return False
+        for channel_id in self.page_channel_ids[page]:
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                await interaction.response.send_message(
+                    "❌ Ya no puedes acceder a uno de los canales de esta página.", ephemeral=True
+                )
+                return False
+            permissions = channel.permissions_for(member)
+            if not (permissions.view_channel and permissions.read_message_history):
+                await interaction.response.send_message(
+                    "❌ Ya no puedes acceder a uno de los canales de esta página.", ephemeral=True
+                )
+                return False
         return True
 
     @discord.ui.button(label="◀️ Anterior", style=discord.ButtonStyle.secondary)
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.current > 0:
-            self.current -= 1
+        page = max(0, self.current - 1)
+        if not await self._authorize_page(interaction, page):
+            return
+        self.current = page
         await interaction.response.edit_message(embed=self.build_embed(self.current), view=self)
 
     @discord.ui.button(label="▶️ Siguiente", style=discord.ButtonStyle.secondary)
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.current < len(self.pages) - 1:
-            self.current += 1
+        page = min(len(self.pages) - 1, self.current + 1)
+        if not await self._authorize_page(interaction, page):
+            return
+        self.current = page
         await interaction.response.edit_message(embed=self.build_embed(self.current), view=self)
 
 

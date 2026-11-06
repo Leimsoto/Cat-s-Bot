@@ -46,20 +46,30 @@ export default function Reports({ selectedGuild, onToast }) {
   const [filter, setFilter] = useState("PENDING");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState(null);
+  const [loadError, setLoadError] = useState("");
 
   const toast = (kind, msg) => onToast?.({ type: kind, message: msg });
 
   const loadReports = useCallback(async () => {
     if (!guildId) return;
     const qs = filter === "ALL" ? "" : `?status=${filter}`;
-    const data = await apiGet(`/api/guilds/${guildId}/reports${qs}`, { cache: false }).catch(() => ({ reports: [] }));
-    setReports(data?.reports || []);
+    try {
+      const data = await apiGet(`/api/guilds/${guildId}/reports${qs}`, { cache: false });
+      setReports(data?.reports || []);
+      setLoadError("");
+    } catch (error) {
+      setLoadError(error?.message || "No se pudieron cargar los reportes");
+    }
   }, [guildId, filter]);
 
   const loadActions = useCallback(async () => {
     if (!guildId) return;
-    const data = await apiGet(`/api/guilds/${guildId}/reports/mod-actions?limit=100`, { cache: false }).catch(() => ({ actions: [] }));
-    setActions(data?.actions || []);
+    try {
+      const data = await apiGet(`/api/guilds/${guildId}/reports/mod-actions?limit=100`, { cache: false });
+      setActions(data?.actions || []);
+    } catch (error) {
+      setLoadError(error?.message || "No se pudo cargar el historial moderativo");
+    }
   }, [guildId]);
 
   const loadAll = useCallback(async () => {
@@ -120,6 +130,12 @@ export default function Reports({ selectedGuild, onToast }) {
           Reportes de usuarios e historial de acciones de moderación.
         </p>
       </div>
+
+      {loadError && (
+        <div className="glass-panel" role="alert" style={{ padding: 14, color: "#fca5a5" }}>
+          <Icon name="error" /> {loadError}
+        </div>
+      )}
 
       <div className="tab-bar">
         <button

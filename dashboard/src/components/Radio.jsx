@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { apiGet, apiPatch } from '../lib/api';
+import { apiGet, apiPatch, apiPost } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { SearchableSelect } from './ui';
 import { useSaveBar } from '../lib/SaveBarContext';
@@ -81,7 +81,7 @@ export default function Radio({ selectedGuild }) {
     try {
       const rData = await apiGet(`/api/guilds/${guildId}/radio/config`);
       setCfg(rData?.radio_config || {});
-    } catch { showToast('Error cargando configuración', 'error'); }
+    } catch (e) { showToast(e?.message || 'Error cargando configuración', 'error'); }
     finally { setLoading(false); }
   }, [guildId]);
 
@@ -92,23 +92,46 @@ export default function Radio({ selectedGuild }) {
   // Deben mantenerse como strings para evitar pérdida de precisión en JS.
   const setId = (k) => (v) => set(k, v ? String(v) : null);
 
+  const payloadFrom = (source) => ({
+    enabled: source?.enabled ? 1 : 0,
+    channel_id: source?.channel_id ? String(source.channel_id) : null,
+    stream_url: source?.stream_url ?? null,
+    station_name: source?.station_name ?? null,
+    volume: source?.volume ?? 50,
+    auto_reconnect: source?.auto_reconnect ? 1 : 0,
+    pause_on_empty: source?.pause_on_empty ? 1 : 0});
+
+  const applySavedRadioResponse = (data) => {
+    if (data?.radio_config) setCfg(data.radio_config);
+    const restart = data?.radio_restart;
+    if (restart?.triggered && restart?.completed) {
+      showToast('Configuración guardada y radio reiniciada');
+    } else if (restart?.triggered) {
+      showToast(`Configuración guardada, reinicio pendiente: ${restart.reason || 'sin confirmación'}`, 'error');
+    } else {
+      showToast(`Configuración guardada, pero no se pudo reiniciar: ${restart?.reason || 'bot no disponible'}`, 'error');
+    }
+  };
+
   const save = async () => {
     setSaving(true);
     try {
       // channel_id se envía como string para preservar precisión de 64 bits;
       // el backend lo convierte a int en Python donde no hay overflow.
-      const payload = {
-        enabled: cfg?.enabled ? 1 : 0,
-        channel_id: cfg?.channel_id ? String(cfg.channel_id) : null,
-        stream_url: cfg?.stream_url ?? null,
-        station_name: cfg?.station_name ?? null,
-        volume: cfg?.volume ?? 50,
-        auto_reconnect: cfg?.auto_reconnect ? 1 : 0,
-        pause_on_empty: cfg?.pause_on_empty ? 1 : 0};
-      await apiPatch(`/api/guilds/${guildId}/radio/config`, payload);
+      const payload = payloadFrom(cfg);
+      const data = await apiPatch(`/api/guilds/${guildId}/radio/config`, payload);
       setDirty(false);
-      showToast('Configuración guardada');
+      applySavedRadioResponse(data);
     } catch (e) { showToast(e.message || 'Error guardando', 'error'); }
+    finally { setSaving(false); }
+  };
+
+  const restartRadio = async () => {
+    setSaving(true);
+    try {
+      const data = await apiPost(`/api/guilds/${guildId}/radio/restart`, {});
+      applySavedRadioResponse(data);
+    } catch (e) { showToast(e.message || 'Error reiniciando radio', 'error'); }
     finally { setSaving(false); }
   };
 
@@ -128,14 +151,24 @@ export default function Radio({ selectedGuild }) {
     }, 400);
   };
 
-  const applyStation = (station) => {
+  const applyStation = async (station) => {
     const url = station.url_resolved || station.url || '';
     const name = station.name || 'Emisora desconocida';
-    set('stream_url', url);
-    set('station_name', name);
+    const nextCfg = { ...(cfg || {}), stream_url: url, station_name: name };
+    setCfg(nextCfg);
     setResults([]);
     setSearchQ('');
-    showToast(`Estación seleccionada: ${name}`);
+    setSaving(true);
+    try {
+      const data = await apiPatch(`/api/guilds/${guildId}/radio/config`, payloadFrom(nextCfg));
+      setDirty(false);
+      applySavedRadioResponse(data);
+    } catch (e) {
+      setDirty(true);
+      showToast(e.message || `No se pudo aplicar la estación: ${name}`, 'error');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const resetToLofi = () => {
@@ -205,13 +238,24 @@ export default function Radio({ selectedGuild }) {
                 border:'1px solid rgba(255,255,255,0.08)'}}>
                 {cfg?.volume ?? 50}% volumen
               </span>
+              <button
+                type="button"
+                onClick={restartRadio}
+                disabled={saving || !cfg?.enabled || !cfg?.channel_id}
+                style={{
+                  padding:'4px 12px',borderRadius:999,fontSize:'0.72rem',fontWeight:800,
+                  background:'rgba(139,92,246,0.14)',color:'var(--accent)',
+                  border:'1px solid rgba(139,92,246,0.28)',cursor:(saving || !cfg?.enabled || !cfg?.channel_id)?'not-allowed':'pointer',
+                  opacity:(saving || !cfg?.enabled || !cfg?.channel_id)?0.55:1}}>
+                Reiniciar ahora
+              </button>
             </div>
           </div>
         </div>
       </div>
 
       {/* ── Grid 2 columnas ── */}
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20,marginBottom:20}}>
+      <div className="secondary-two-column" style={{marginBottom:20}}>
 
         {/* Columna izq: Configuración */}
         <div className="glass-panel" style={{padding:24,display:'flex',flexDirection:'column',gap:18}}>
@@ -287,7 +331,7 @@ export default function Radio({ selectedGuild }) {
           <div className="config-item" style={{marginBottom:0}}>
             <label style={{display:'flex',justifyContent:'space-between'}}>
               <span>Volumen</span>
-              <span style={{color:'#c4b5fd',fontWeight:800}}>{cfg?.volume ?? 50}%</span>
+              <span style={{color:'var(--accent)',fontWeight:800}}>{cfg?.volume ?? 50}%</span>
             </label>
             <input
               type="range" min="0" max="150" step="5"
@@ -382,7 +426,7 @@ export default function Radio({ selectedGuild }) {
                 display:'flex',alignItems:'center',gap:8,
                 padding:'10px 18px',borderRadius:12,border:'1px solid rgba(139,92,246,0.3)',
                 background:'linear-gradient(135deg,rgba(99,102,241,0.15),rgba(139,92,246,0.1))',
-                color:'#c4b5fd',cursor:'pointer',fontWeight:700,fontSize:'0.85rem',
+                color:'var(--accent)',cursor:'pointer',fontWeight:700,fontSize:'0.85rem',
                 transition:'all 0.2s'}}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">

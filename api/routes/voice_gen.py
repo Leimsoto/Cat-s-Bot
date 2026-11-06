@@ -7,7 +7,7 @@ GET   /api/guilds/{guild_id}/voice-gen/config         → obtiene config
 PATCH /api/guilds/{guild_id}/voice-gen/config         → actualiza config (parcial)
 PUT   /api/guilds/{guild_id}/voice-gen/config         → alias compat
 GET   /api/guilds/{guild_id}/voice-gen/channels       → lista VCs activos
-POST  /api/guilds/{guild_id}/voice-gen/resend-panel   → reenvía el panel a un VC
+POST  /api/guilds/{guild_id}/voice-gen/resend-panel   → publica/actualiza el panel permanente
 
 Antes:
   • El frontend usaba apiPut pero la PATCH del nuevo flujo se quedaba sin
@@ -21,6 +21,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api.deps import get_bot, get_db, require_guild_admin
+from api.discord_bridge import DiscordBridgeTimeout, DiscordBridgeUnavailable, run_on_bot_loop
+from api.snowflakes import coerce_optional_snowflake, stringify_fields, stringify_rows
 
 router = APIRouter(
     prefix="/api/guilds/{guild_id}/voice-gen",
@@ -44,9 +46,9 @@ _VG_KEYS = {
 
 class VoiceGenConfigUpdate(BaseModel):
     enabled:              Optional[int]  = None
-    generator_channel_id: Optional[int]  = None
-    category_id:          Optional[int]  = None
-    panel_channel_id:     Optional[int]  = None
+    generator_channel_id: Optional[int | str]  = None
+    category_id:          Optional[int | str]  = None
+    panel_channel_id:     Optional[int | str]  = None
     name_template:        Optional[str]  = None
     default_limit:        Optional[int]  = None
     panel_title:          Optional[str]  = None
@@ -58,7 +60,25 @@ class VoiceGenConfigUpdate(BaseModel):
 
 
 class ResendPanelBody(BaseModel):
-    channel_id: int
+    # Compatibilidad con clientes antiguos; el panel ya no pertenece a un VC.
+    channel_id: Optional[int | str] = None
+
+
+VG_CONFIG_ID_FIELDS = (
+    "guild_id",
+    "generator_channel_id",
+    "category_id",
+    "panel_channel_id",
+    "panel_message_channel_id",
+    "panel_message_id",
+)
+VG_CHANNEL_ID_FIELDS = (
+    "guild_id",
+    "channel_id",
+    "owner_id",
+    "panel_channel_id",
+    "panel_message_id",
+)
 
 
 @router.get("/config")
@@ -68,7 +88,7 @@ async def get_voice_gen_config(
     _user=Depends(require_guild_admin),
 ):
     cfg = db.get_voice_gen_config(guild_id)
-    return {"guild_id": guild_id, "config": cfg}
+    return {"guild_id": str(guild_id), "config": stringify_fields(cfg, VG_CONFIG_ID_FIELDS)}
 
 
 @router.patch("/config")
@@ -81,9 +101,16 @@ async def patch_voice_gen_config(
     payload = {
         k: v for k, v in body.model_dump().items() if v is not None and k in _VG_KEYS
     }
+    for field in ("generator_channel_id", "category_id", "panel_channel_id"):
+        if field in payload:
+            payload[field] = coerce_optional_snowflake(payload[field], field)
     if payload:
         db.set_voice_gen_config(guild_id, **payload)
-    return {"status": "ok", "updated": list(payload.keys())}
+    return {
+        "status": "ok",
+        "updated": list(payload.keys()),
+        "config": stringify_fields(db.get_voice_gen_config(guild_id), VG_CONFIG_ID_FIELDS),
+    }
 
 
 @router.put("/config")
@@ -103,7 +130,7 @@ async def get_voice_gen_channels(
     _user=Depends(require_guild_admin),
 ):
     channels = db.get_voice_gen_channels_by_guild(guild_id)
-    return {"guild_id": guild_id, "active_channels": channels, "total": len(channels)}
+    return {"guild_id": str(guild_id), "active_channels": stringify_rows(channels, VG_CHANNEL_ID_FIELDS), "total": len(channels)}
 
 
 @router.post("/resend-panel")
@@ -115,10 +142,10 @@ async def resend_panel(
     _user=Depends(require_guild_admin),
 ):
     """
-    Reenvía el panel de control de un VC al canal de panel configurado.
+    Publica o actualiza el único panel permanente del servidor.
 
-    El front pasa el `channel_id` del VC dueño. El cog VoiceGen.send_panel
-    construye el embed y los botones a partir de la config del guild.
+    El VC se resuelve cuando el propietario pulsa un botón, no al publicar el
+    mensaje. `channel_id` se acepta únicamente por compatibilidad.
     """
     if bot is None:
         raise HTTPException(503, "Bot no conectado")
@@ -130,17 +157,23 @@ async def resend_panel(
     if cog is None:
         raise HTTPException(503, "Cog VoiceGen no cargado")
 
-    vc = guild.get_channel(body.channel_id)
-    if vc is None:
-        raise HTTPException(404, "Canal no encontrado")
-
-    row = db.get_voice_gen_channel(body.channel_id)
-    if not row:
-        raise HTTPException(404, "Ese canal no es un VC generado")
-
     try:
-        await cog.send_panel(guild, vc, force=True)
+        sent = await run_on_bot_loop(
+            bot,
+            lambda: cog.send_panel(guild, force=True),
+            timeout=30,
+        )
+    except DiscordBridgeUnavailable as e:
+        raise HTTPException(503, str(e))
+    except DiscordBridgeTimeout as e:
+        raise HTTPException(504, str(e))
     except Exception as e:
         raise HTTPException(500, f"No se pudo enviar el panel: {e}")
+
+    if not sent:
+        raise HTTPException(
+            409,
+            "Discord rechazó el panel o el canal configurado no está disponible",
+        )
 
     return {"status": "ok"}

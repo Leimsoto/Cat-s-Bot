@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 
 const Login = lazy(() => import('./pages/Login'));
@@ -12,8 +12,27 @@ function loginPath() {
 }
 
 function ProtectedRoute({ children }) {
-  const token = localStorage.getItem('botES_token');
-  if (!token) return <Navigate to={loginPath()} replace />;
+  const [authenticated, setAuthenticated] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/auth/me', {
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+    })
+      .then((response) => {
+        if (!cancelled) setAuthenticated(response.ok);
+      })
+      .catch(() => {
+        if (!cancelled) setAuthenticated(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (authenticated === null) return <RouteFallback />;
+  if (!authenticated) return <Navigate to={loginPath()} replace />;
   return children;
 }
 
@@ -36,6 +55,10 @@ function RouteFallback() {
 }
 
 export default function App() {
+  useEffect(() => {
+    localStorage.removeItem('botES_token');
+  }, []);
+
   return (
     <BrowserRouter>
       <Suspense fallback={<RouteFallback />}>

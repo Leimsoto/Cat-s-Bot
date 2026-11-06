@@ -18,10 +18,12 @@ no fragmentar las URLs que el frontend ya usa.
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from api.deps import get_db, require_guild_admin
+from api.deps import get_bot, get_db, require_guild_admin
+from api.routes.guild import _ticket_category_payload, _ticket_category_role_updates, _sync_ticket_staff_permissions
+from api.snowflakes import stringify_fields, stringify_rows
 
 router = APIRouter(prefix="/api/guilds/{guild_id}/tickets", tags=["tickets"])
 
@@ -42,7 +44,23 @@ class TicketCategoryPatch(BaseModel):
     close_reasons: Optional[list[str]] = None
     welcome_embed_data: Optional[dict | str] = None
     welcome_embed_template_key: Optional[str] = Field(default=None, max_length=100)
-    staff_role_id: Optional[int] = None
+    staff_role_id: Optional[int | str] = None
+    staff_role_ids: Optional[list[int | str]] = None
+
+
+TICKET_ID_FIELDS = (
+    "guild_id",
+    "channel_id",
+    "owner_id",
+    "user_id",
+    "claimed_by",
+    "closed_by",
+    "staff_role_id",
+)
+
+
+def _category_payload(row: dict) -> dict:
+    return _ticket_category_payload(row)
 
 
 # ── Tickets list (legacy plural) ─────────────────────────────────────────────
@@ -62,8 +80,8 @@ async def list_tickets(
     )
     total_open = db.count_open_tickets_by_guild(guild_id)
     return {
-        "guild_id": guild_id,
-        "tickets": tickets,
+        "guild_id": str(guild_id),
+        "tickets": stringify_rows(tickets, TICKET_ID_FIELDS),
         "open_count": total_open,
         "limit": limit,
         "offset": offset,
@@ -80,7 +98,7 @@ async def get_ticket_detail(
     ticket = db.get_ticket(ticket_id)
     if not ticket or int(ticket.get("guild_id", 0)) != guild_id:
         raise HTTPException(404, f"Ticket #{ticket_id} no encontrado en este servidor")
-    return {"guild_id": guild_id, "ticket": ticket}
+    return {"guild_id": str(guild_id), "ticket": stringify_fields(ticket, TICKET_ID_FIELDS)}
 
 
 # ── Plantillas de embed reutilizables ────────────────────────────────────────
@@ -102,7 +120,7 @@ async def list_templates(
             embed = json.loads(raw) if isinstance(raw, str) else raw
         except Exception:
             embed = {}
-        out.append({**t, "embed_data": embed})
+        out.append({**stringify_fields(t, ("guild_id",)), "embed_data": embed})
     return {"templates": out}
 
 
@@ -154,8 +172,10 @@ async def patch_category(
     guild_id: int,
     cat_id: int,
     body: TicketCategoryPatch,
+    request: Request,
     db=Depends(get_db),
-    _user=Depends(require_guild_admin),
+    bot=Depends(get_bot),
+    user=Depends(require_guild_admin),
 ):
     """
     Edita una categoría existente. Acepta solo los campos enviados.
@@ -181,14 +201,29 @@ async def patch_category(
         )
     if body.welcome_embed_template_key is not None:
         payload["welcome_embed_template_key"] = body.welcome_embed_template_key
-    if body.staff_role_id is not None:
-        payload["staff_role_id"] = body.staff_role_id
+    categories = db.get_ticket_categories(guild_id)
+    current_category = next((category for category in categories if int(category["id"]) == cat_id), None)
+    if current_category is None:
+        raise HTTPException(404, "Categoría no encontrada en este servidor")
+    role_updates = await _ticket_category_role_updates(
+        request, guild_id, body.model_dump(exclude_unset=True), current_category, bot, user,
+    )
+    payload.update(role_updates)
+    role_fields_present = bool({"staff_role_id", "staff_role_ids"} & body.model_fields_set)
 
-    if not payload:
+    if not payload and not role_fields_present:
         return {"status": "ok", "updated": []}
 
     try:
-        db.update_ticket_category(cat_id, **payload)
+        if role_fields_present or "name" in payload:
+            config = db.get_ticket_config(guild_id)
+            await _sync_ticket_staff_permissions(
+                guild_id, db, bot, config, config, categories,
+                [{**category, **payload} if int(category["id"]) == cat_id else category for category in categories],
+                lambda: db.update_ticket_category(cat_id, guild_id, **payload),
+            )
+        else:
+            db.update_ticket_category(cat_id, guild_id, **payload)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

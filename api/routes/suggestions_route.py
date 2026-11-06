@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from api.deps import get_bot, get_db, require_guild_admin
+from api.snowflakes import coerce_optional_snowflake, stringify_fields
 
 router = APIRouter(prefix="/api/guilds", tags=["suggestions"])
 
@@ -24,9 +25,9 @@ VALID_STATUSES = {"PENDING", "ACCEPTED", "DENIED"}
 
 
 class SuggestionsConfigPatch(BaseModel):
-    submit_channel_id: Optional[int] = None
-    review_channel_id: Optional[int] = None
-    public_channel_id: Optional[int] = None
+    submit_channel_id: Optional[int | str] = None
+    review_channel_id: Optional[int | str] = None
+    public_channel_id: Optional[int | str] = None
     enabled:           Optional[int] = None
     auto_publish:      Optional[int] = None
     min_length:        Optional[int] = Field(None, ge=1, le=4000)
@@ -52,7 +53,10 @@ async def get_suggestions_config(
     accepted = sum(1 for s in all_s if s.get("status") == "ACCEPTED")
     denied   = sum(1 for s in all_s if s.get("status") == "DENIED")
     return {
-        "config": cfg,
+        "config": stringify_fields(
+            cfg,
+            ("guild_id", "submit_channel_id", "review_channel_id", "public_channel_id"),
+        ),
         "stats": {
             "total": len(all_s),
             "pending": pending,
@@ -71,6 +75,9 @@ async def patch_suggestions(
 ):
     """Actualiza la config (canales, flags, límites, cooldown)."""
     update = body.model_dump(exclude_none=True)
+    for field in ("submit_channel_id", "review_channel_id", "public_channel_id"):
+        if field in update:
+            update[field] = coerce_optional_snowflake(update[field], field)
     if "enabled" in update:
         update["enabled"] = 1 if int(update["enabled"]) else 0
     if "auto_publish" in update:
@@ -110,7 +117,12 @@ async def list_suggestions(
             if member:
                 out["username"] = member.display_name
                 out["avatar"] = str(member.display_avatar.url)
-        enriched.append(out)
+        enriched.append(
+            stringify_fields(
+                out,
+                ("guild_id", "user_id", "message_id", "channel_id", "thread_id"),
+            )
+        )
     return {"suggestions": enriched, "count": len(enriched)}
 
 

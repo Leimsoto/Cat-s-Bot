@@ -20,8 +20,9 @@ Comandos slash:
 Configuración persistente: panel web → Bienvenidas (tabs Bienvenidas/Boosters/Invitaciones)
 """
 
+import asyncio
 import json
-from cogs._message_payload import render_message_payload
+from cogs._managed_messages import render_managed_message_payload, send_managed
 import logging
 from datetime import datetime, timezone
 
@@ -40,9 +41,19 @@ class Welcomes(commands.Cog):
         self.db = bot.db  # type: ignore
         # guild_id → {code: (uses, inviter, url)}
         self.invites_cache: dict = {}
+        self._invite_cache_task: asyncio.Task | None = None
 
     async def cog_load(self) -> None:
-        self.bot.loop.create_task(self._wait_and_update_invites())
+        self._invite_cache_task = self.bot.loop.create_task(self._wait_and_update_invites())
+
+    async def cog_unload(self) -> None:
+        if self._invite_cache_task is not None:
+            self._invite_cache_task.cancel()
+            try:
+                await self._invite_cache_task
+            except asyncio.CancelledError:
+                pass
+            self._invite_cache_task = None
 
     async def _wait_and_update_invites(self) -> None:
         await self.bot.wait_until_ready()
@@ -145,7 +156,7 @@ class Welcomes(commands.Cog):
             "count": str(guild.member_count or 0),
         }
         try:
-            payload = render_message_payload(embed_data, variables, member)
+            payload = await render_managed_message_payload(self.bot, guild.id, embed_data, variables, member)
         except Exception as exc:
             logger.error("Error parseando welcome embed_data: %s", exc)
             return
@@ -217,7 +228,7 @@ class Welcomes(commands.Cog):
                 )
 
             embed.set_footer(text=f"Miembros totales: {member.guild.member_count}")
-            await channel.send(embed=embed)
+            await send_managed(self.bot, member.guild.id, "welcomes", channel.send, embed=embed)
         except Exception as exc:
             logger.error("Error logueando entrada de miembro: %s", exc)
 
@@ -242,7 +253,7 @@ class Welcomes(commands.Cog):
             embed.add_field(name="Miembro", value=f"{member} ({member.mention})", inline=True)
             embed.add_field(name="ID", value=str(member.id), inline=True)
             embed.set_footer(text=f"Miembros totales: {member.guild.member_count}")
-            await channel.send(embed=embed)
+            await send_managed(self.bot, member.guild.id, "welcomes", channel.send, embed=embed)
         except Exception as exc:
             logger.error("Error logueando salida de miembro: %s", exc)
 
@@ -268,8 +279,8 @@ class Welcomes(commands.Cog):
                     "username": after.display_name,
                     "server": after.guild.name,
                 }
-                payload = render_message_payload(
-                    embed_data, variables, member=after,
+                payload = await render_managed_message_payload(
+                    self.bot, after.guild.id, embed_data, variables, member=after,
                     default_color=int(discord.Color.purple()),
                 )
                 if payload["embed"] is not None and gif_url:

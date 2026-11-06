@@ -4,7 +4,7 @@ import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
 import { useSaveBar } from "../lib/SaveBarContext";
-import MessageEditor, { normalizeMessage, EMPTY_MESSAGE } from "./MessageEditor";
+import MessageEditor, { normalizeMessage } from "./MessageEditor";
 
 export default function VoiceGen({ selectedGuild: guildId }) {
   const [cfg, setCfg] = useState(null);
@@ -12,6 +12,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [publishingPanel, setPublishingPanel] = useState(false);
   const [toast, setToast] = useState(null);
   const [tab, setTab] = useState("config");
 
@@ -29,8 +30,8 @@ export default function VoiceGen({ selectedGuild: guildId }) {
       ]);
       setCfg(cfgData.config || {});
       setActiveVCs(vcData.active_channels || []);
-    } catch {
-      showToast("Error cargando configuración", "error");
+    } catch (e) {
+      showToast(e?.message || "Error cargando configuración", "error");
     } finally {
       setLoading(false);
     }
@@ -44,7 +45,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
     setCfg((p) => ({ ...p, [k]: v }));
     setDirty(true);
   };
-  const setId = (k) => (v) => set(k, v ? parseInt(v, 10) : null);
+  const setId = (k) => (v) => set(k, v ? String(v) : null);
 
   const save = async () => {
     setSaving(true);
@@ -101,13 +102,15 @@ export default function VoiceGen({ selectedGuild: guildId }) {
     set("panel_embed_data", JSON.stringify(next));
   };
 
-  const resendPanel = async (channel_id) => {
+  const publishPanel = async () => {
+    setPublishingPanel(true);
     try {
-      await apiPost(`/api/guilds/${guildId}/voice-gen/resend-panel`, {
-        channel_id});
-      showToast("Panel reenviado");
+      await apiPost(`/api/guilds/${guildId}/voice-gen/resend-panel`, {});
+      showToast("Panel permanente publicado o actualizado");
     } catch (e) {
-      showToast(e.message || "Error reenviando panel", "error");
+      showToast(e.message || "Error publicando el panel", "error");
+    } finally {
+      setPublishingPanel(false);
     }
   };
 
@@ -247,7 +250,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                gridTemplateColumns: "repeat(auto-fit, minmax(min(100%,260px),1fr))",
                 gap: 16}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
@@ -314,7 +317,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+                gridTemplateColumns: "repeat(auto-fit, minmax(min(100%,240px),1fr))",
                 gap: 16}}
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
@@ -379,9 +382,8 @@ export default function VoiceGen({ selectedGuild: guildId }) {
             <div>
               <div style={{ fontWeight: 700 }}>Envío automático</div>
               <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
-                Si está activo, el panel se publica automáticamente al crear un VC.
-                Si está apagado, el dueño debe pedirlo con <code>/vc panel</code> o
-                desde la pestaña "VCs activos".
+                Mantiene un único mensaje permanente en el canal configurado. No
+                crea un panel nuevo por cada VC o usuario.
               </div>
             </div>
             <label className="toggle-switch">
@@ -394,16 +396,46 @@ export default function VoiceGen({ selectedGuild: guildId }) {
             </label>
           </div>
 
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 16,
+              padding: "12px 14px",
+              borderRadius: "var(--radius-md)",
+              background: "rgba(139,92,246,0.08)",
+              border: "1px solid rgba(139,92,246,0.2)",
+            }}
+          >
+            <div>
+              <div style={{ fontWeight: 700 }}>Panel permanente compartido</div>
+              <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                Los botones controlan el VC generado donde esté su propietario.
+                Guarda los cambios antes de actualizar el mensaje.
+              </div>
+            </div>
+            <button
+              className="btn-secondary"
+              onClick={publishPanel}
+              disabled={dirty || publishingPanel || !cfg?.panel_channel_id}
+              title={dirty ? "Guarda los cambios antes de publicar" : undefined}
+              style={{ whiteSpace: "nowrap" }}
+            >
+              <Icon name="send" /> {publishingPanel ? "Publicando…" : "Publicar / actualizar"}
+            </button>
+          </div>
+
           <MessageEditor
             value={panelMessage}
             onChange={handlePanelMessage}
             mode="both"
             tab={panelEditorTab}
             setTab={setPanelEditorTab}
-            variablesHelp={"Variables disponibles: {channel}, {channel_id}, {owner}, {guild}."}
+            variablesHelp={"Variable disponible: {guild}. Las variables antiguas de canal/owner se muestran de forma genérica."}
             placeholders={{
-              title: "Tu canal de voz está listo",
-              description: "**{owner}** — Bienvenido a **{channel}**…",
+              title: "Panel de control de VoiceChat",
+              description: "Entra en tu VC temporal y usa los botones para configurarlo…",
               content: "Mensaje opcional fuera del embed…",
             }}
             showJson
@@ -428,7 +460,7 @@ export default function VoiceGen({ selectedGuild: guildId }) {
             >
               <thead>
                 <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.07)" }}>
-                  {["Canal", "Dueño", "Creado", ""].map((h) => (
+                  {["Canal", "Dueño", "Creado"].map((h) => (
                     <th
                       key={h}
                       style={{
@@ -477,15 +509,6 @@ export default function VoiceGen({ selectedGuild: guildId }) {
                       {vc.created_at
                         ? new Date(vc.created_at * 1000).toLocaleString("es")
                         : "—"}
-                    </td>
-                    <td style={{ padding: "10px 16px" }}>
-                      <button
-                        className="btn-secondary"
-                        onClick={() => resendPanel(vc.channel_id)}
-                        style={{ padding: "6px 12px", fontSize: "0.78rem" }}
-                      >
-                        <Icon name="send" /> Reenviar panel
-                      </button>
                     </td>
                   </tr>
                 ))}

@@ -1,11 +1,15 @@
 """
 cogs/ia.py — Módulo de IA
 ─────────────────────────
+Strata usa el endpoint compartido de AI-Mod y memorias persistentes por ámbito
+(cogs/_conversation.py). Gemini se conserva como proveedor legado explícito o
+fallback automático para servidores sin endpoint propio configurado.
+
 Sistema de IA conversacional con multi-API-key y selección de modelo por guild.
 
 Funcionalidad:
   • Chat con historial por usuario/guild
-  • Lectura multimodal (imágenes, PDFs, audio, vídeo)
+  • Lectura multimodal (imágenes, stickers, PDFs, audio, vídeo)
   • System prompt configurable por guild (DB o .env como fallback)
   • Rate limiting (1 slot por REQUEST, no por token LLM)
   • Workers limpios con cog_load/cog_unload
@@ -13,9 +17,9 @@ Funcionalidad:
   • Métricas en memoria + /ia_estado
 
 Modelos: solo Gemma 4 vía API de Gemini. Cualquier valor distinto en DB
-(legados de Gemini 2.5/3, etc.) se migra al default ``gemma-4-26b-it`` en
+(legados de Gemini 2.5/3, etc.) se migra al default ``gemma-4-26b-a4b-it`` en
 ``_resolve_client``.
-  • gemma-4-26b-it           — default · 15 RPM · TPM ilimitado · 1.5K RPD
+  • gemma-4-26b-a4b-it       — default · 15 RPM · TPM ilimitado · 1.5K RPD
   • gemma-4-31b-it           — XL razonamiento · 15 RPM · TPM ilimitado · 1.5K RPD
 
 Multimodal y grounding:
@@ -53,6 +57,9 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
+from cogs._conversation import Conversation, current_channel_members, provider_for, public_channel
+from cogs._ai_mentions import format_ai_mentions, mention_context, split_ai_text
+from ai_chat_config import chat_actor_blocked
 
 try:
     from google import genai
@@ -65,6 +72,74 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+_LATEX_ARROW_SYMBOLS = {
+    "longleftrightarrow": "↔",
+    "Longleftrightarrow": "⇔",
+    "longrightarrow": "→",
+    "Longrightarrow": "⇒",
+    "longleftarrow": "←",
+    "Longleftarrow": "⇐",
+    "leftrightarrow": "↔",
+    "Leftrightarrow": "⇔",
+    "rightarrow": "→",
+    "Rightarrow": "⇒",
+    "leftarrow": "←",
+    "Leftarrow": "⇐",
+    "mapsto": "↦",
+    "implies": "⇒",
+    "iff": "⇔",
+    "to": "→",
+}
+_LATEX_ARROW_NAMES = "|".join(
+    re.escape(name) for name in sorted(_LATEX_ARROW_SYMBOLS, key=len, reverse=True)
+)
+_LATEX_ARROW_RE = re.compile(
+    rf"\$\s*\\+(?P<math>{_LATEX_ARROW_NAMES})\s*\$"
+    rf"|\\+(?P<bare>{_LATEX_ARROW_NAMES})\b"
+)
+_DISCORD_CODE_SPAN_RE = re.compile(r"(```.*?```|`[^`\r\n]*`)", re.DOTALL)
+
+
+def _normalize_discord_ai_text(text: str) -> str:
+    """Convierte flechas LaTeX fuera de código a caracteres visibles en Discord."""
+    if not text:
+        return text
+
+    def replace_arrow(match: re.Match) -> str:
+        command = match.group("math") or match.group("bare")
+        return _LATEX_ARROW_SYMBOLS[command]
+
+    segments = _DISCORD_CODE_SPAN_RE.split(text)
+    return "".join(
+        segment if index % 2 else _LATEX_ARROW_RE.sub(replace_arrow, segment)
+        for index, segment in enumerate(segments)
+    )
+
+
+def _api_error_status_code(error: BaseException) -> Optional[int]:
+    """Obtiene el HTTP status de google-genai sin depender de una versión concreta."""
+    for candidate in (
+        getattr(error, "status_code", None),
+        getattr(error, "code", None),
+        getattr(getattr(error, "response", None), "status_code", None),
+    ):
+        try:
+            code = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if 100 <= code <= 599:
+            return code
+    match = re.search(r"\b(401|403|429|500|502|503|504)\b", str(error))
+    return int(match.group(1)) if match else None
+
+
+def _is_leaked_api_key_error(error: BaseException) -> bool:
+    text = str(error).lower()
+    return _api_error_status_code(error) == 403 and (
+        "reported as leaked" in text or "api key" in text and "leak" in text
+    )
+
 # ── Modelos ──────────────────────────────────────────────────────────────────
 # UNICAMENTE Gemma 4 vía Google AI Studio. La API de Gemini sirve ambos modelos
 # de Gemma con soporte multimodal (imágenes, audio, video, PDF) y grounding de
@@ -72,10 +147,10 @@ logger = logging.getLogger(__name__)
 # el flujo del bot va sobre Gemma 4.
 #
 # Cuotas del free tier (RPM / TPM / RPD):
-#   gemma-4-26b-it    15 / ilimitado / 1.5K   (default)
+#   gemma-4-26b-a4b-it 15 / ilimitado / 1.5K  (default)
 #   gemma-4-31b-it    15 / ilimitado / 1.5K   (mejor razonamiento)
 CHAT_MODELS = [
-    "gemma-4-26b-it",             # default — Gemma 4 grande, TPM ilimitado
+    "gemma-4-26b-a4b-it",         # default — Gemma 4 MoE, TPM ilimitado
     "gemma-4-31b-it",             # Gemma 4 XL, TPM ilimitado
 ]
 
@@ -83,12 +158,12 @@ DEFAULT_MODEL = CHAT_MODELS[0]
 
 # Etiquetas legibles para la UI.
 _MODEL_LABELS = {
-    "gemma-4-26b-it":         "Gemma 4 (26B)",
+    "gemma-4-26b-a4b-it":     "Gemma 4 (26B A4B)",
     "gemma-4-31b-it":         "Gemma 4 (31B)",
 }
 
 # ── MIME types aceptados como adjunto ────────────────────────────────────────
-_MIME_IMAGE = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+_MIME_IMAGE = {"image/jpeg", "image/png", "image/webp"}
 _MIME_DOC   = {"application/pdf"}
 _MIME_AUDIO = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/ogg",
                "audio/flac", "audio/x-flac"}
@@ -96,10 +171,17 @@ _MIME_VIDEO = {"video/mp4", "video/mpeg", "video/mov",
                "video/quicktime", "video/avi", "video/webm"}
 _MIME_ALL   = _MIME_IMAGE | _MIME_DOC | _MIME_AUDIO | _MIME_VIDEO
 
+# APNG conserva el MIME de PNG y es compatible con decodificadores PNG estáticos.
+# GIF y Lottie requieren rasterización; no deben enviarse con un MIME no admitido.
+_STICKER_MIME = {
+    discord.StickerFormatType.png:  "image/png",
+    discord.StickerFormatType.apng: "image/png",
+}
+
 _EXT_MIME: Dict[str, str] = {
     ".jpg":  "image/jpeg",    ".jpeg": "image/jpeg",
-    ".png":  "image/png",     ".gif":  "image/gif",
-    ".webp": "image/webp",    ".pdf":  "application/pdf",
+    ".png":  "image/png",     ".webp": "image/webp",
+    ".pdf":  "application/pdf",
     ".mp3":  "audio/mpeg",    ".wav":  "audio/wav",
     ".ogg":  "audio/ogg",     ".flac": "audio/flac",
     ".mp4":  "video/mp4",     ".mov":  "video/quicktime",
@@ -226,15 +308,47 @@ class IAConfigView(discord.ui.View):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Cog principal
 # ─────────────────────────────────────────────────────────────────────────────
+class ChannelJobQueue(asyncio.Queue):
+    """Queue a busy speaker's next turns while workers serve other speakers."""
+    def __init__(self, maxsize):
+        super().__init__(maxsize=maxsize)
+        self.active_channels = set()
+
+    @staticmethod
+    def channel_key(job):
+        if job.get("conversation"):
+            message = job["message"]
+            return message.guild.id, message.channel.id, message.author.id
+        return None
+
+    def empty(self):
+        return not any(self.channel_key(job) not in self.active_channels for job in self._queue)
+
+    def _get(self):
+        for index, job in enumerate(self._queue):
+            key = self.channel_key(job)
+            if key not in self.active_channels:
+                del self._queue[index]
+                if key is not None:
+                    self.active_channels.add(key)
+                return job
+        raise asyncio.QueueEmpty
+
+    def release(self, job):
+        self.active_channels.discard(self.channel_key(job))
+        self._wakeup_next(self._getters)
+
+
 class IA(commands.Cog):
     """Módulo de Inteligencia Artificial – Gemini multimodal"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db  = bot.db  # type: ignore
+        self.conversation = Conversation(self)
 
         self._server_contexts: Dict[int, str]  = {}   # guild_id → contexto sincronizado
-        self._chat_histories:  Dict[str, List] = {}   # "guild_user" → List[Content]
+        self._chat_histories:  Dict[str, List] = {}   # "guild_channel_user" → List[Content]
 
         # ── Pool de clientes ──────────────────────────────────────────────────
         # Cada API key tiene su propio Client. Se cachean por valor de la key
@@ -266,11 +380,18 @@ class IA(commands.Cog):
         self._rate_tokens = float(self._rate_cap)
         self._rate_last   = monotonic()
         self._rate_lock   = asyncio.Lock()
+        # Custom endpoints have no inherited Gemini quota unless the operator sets one.
+        strata_capacity = os.getenv("AI_STRATA_RATE_CAPACITY", os.getenv("AI_RATE_CAPACITY", "0"))
+        self._strata_rate_cap = max(0, int(strata_capacity))
+        self._strata_rate_period = float(os.getenv("AI_STRATA_RATE_PERIOD", os.getenv("AI_RATE_PERIOD", "60")))
+        self._strata_rate_tokens = float(self._strata_rate_cap)
+        self._strata_rate_last = monotonic()
+        self._strata_rate_lock = asyncio.Lock()
 
         # ── Concurrencia / cola ───────────────────────────────────────────────
         self._concurrency = int(os.getenv("AI_CONCURRENCY", "2"))
         self._semaphore   = asyncio.Semaphore(self._concurrency)
-        self._queue: asyncio.Queue = asyncio.Queue(
+        self._queue: asyncio.Queue = ChannelJobQueue(
             maxsize=int(os.getenv("AI_QUEUE_SIZE", "64"))
         )
         self._workers: List[asyncio.Task] = []
@@ -286,7 +407,7 @@ class IA(commands.Cog):
         # ── Métricas ──────────────────────────────────────────────────────────
         self._metrics: Dict[str, float] = {
             "requests": 0, "success": 0, "retries": 0,
-            "errors_429": 0, "errors_503": 0,
+            "errors_403": 0, "errors_429": 0, "errors_503": 0,
             "multimodal": 0,
             "queue_max": 0, "total_latency": 0.0, "latency_count": 0,
         }
@@ -332,22 +453,14 @@ class IA(commands.Cog):
 
     async def cog_load(self):
         self._http = aiohttp.ClientSession()
+        await self.conversation.start()
         for i in range(self._concurrency):
             task = asyncio.create_task(
                 self._worker_loop(i), name=f"ia_worker_{i}"
             )
             self._workers.append(task)
 
-        # Migración: cualquier guild con un ai_model fuera del catálogo actual
-        # (e.g. "gemini-3.1-flash" antiguo) se reasigna al default. Logs lo
-        # reportan para auditoría. No bloquea el arranque si la query falla.
-        try:
-            self._migrate_invalid_models()
-        except Exception as e:
-            logger.warning(f"Migración de modelos IA omitida: {e}")
-
-        logger.info(f"IA cog cargado – {self._concurrency} workers. "
-                    f"Modelo primario: {DEFAULT_MODEL}")
+        logger.info("IA cog cargado – %s workers; proveedor configurado por servidor.", self._concurrency)
 
     def _migrate_invalid_models(self) -> None:
         """Resetea ai_config.ai_model al default si el actual no está en CHAT_MODELS."""
@@ -373,8 +486,17 @@ class IA(commands.Cog):
             task.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
+        while True:
+            try:
+                pending = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self.conversation.refund_deepthink(pending)
+            self._queue.release(pending)
+            self._queue.task_done()
         if self._http and not self._http.closed:
             await self._http.close()
+        await self.conversation.close()
         logger.info("IA cog descargado limpiamente.")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -413,7 +535,7 @@ class IA(commands.Cog):
                    else (f"_{sys_prompt}_" if sys_prompt else "_Global (.env)_")),
             inline=False,
         )
-        embed.set_footer(text="Multimedia: img/pdf/audio/video")
+        embed.set_footer(text="Multimedia: img/stickers/pdf/audio/video")
         return embed
 
     def _get_system_prompt(self, guild: discord.Guild) -> str:
@@ -432,13 +554,16 @@ class IA(commands.Cog):
                 "Si necesitas información actual usa Google Search.",
             )
         
-        ctx = self._server_contexts.get(guild.id)
-        if not ctx:
-            ctx = self._generate_server_context(guild)
-            self._server_contexts[guild.id] = ctx
+        # Channel visibility can change at any time; never reuse stale privacy metadata.
+        ctx = self._generate_server_context(guild)
             
         if ctx:
             base += f"\n\n{ctx}"
+        base += (
+            "\n\n=== FORMATO DE RESPUESTA ===\n"
+            "Usa Markdown compatible con Discord. No uses LaTeX/MathJax ni "
+            "delimitadores `$...$`; para flechas usa símbolos Unicode como →, ← y ⇒."
+        )
         return base
 
     def _generate_server_context(self, g: discord.Guild) -> str:
@@ -491,23 +616,72 @@ class IA(commands.Cog):
 
     # ── Rate limiter (1 slot por request) ─────────────────────────────────────
 
-    async def _acquire_slot(self, max_wait: float = 30.0) -> bool:
+    async def _acquire_slot(self, max_wait: float = 30.0, *, provider="gemini") -> bool:
+        if provider == "strata":
+            if not self._strata_rate_cap:
+                return True
+            prefix = "_strata_rate_"
+        else:
+            prefix = "_rate_"
         start = monotonic()
         while True:
-            async with self._rate_lock:
+            async with getattr(self, prefix + "lock"):
                 now     = monotonic()
-                elapsed = now - self._rate_last
-                refill  = (elapsed / self._rate_period) * self._rate_cap
-                self._rate_tokens = min(float(self._rate_cap), self._rate_tokens + refill)
-                self._rate_last   = now
-                if self._rate_tokens >= 1.0:
-                    self._rate_tokens -= 1.0
+                capacity = getattr(self, prefix + "cap")
+                elapsed = now - getattr(self, prefix + "last")
+                refill = elapsed / getattr(self, prefix + "period") * capacity
+                tokens = min(float(capacity), getattr(self, prefix + "tokens") + refill)
+                setattr(self, prefix + "last", now)
+                setattr(self, prefix + "tokens", tokens)
+                if tokens >= 1.0:
+                    setattr(self, prefix + "tokens", tokens - 1.0)
                     return True
             if monotonic() - start > max_wait:
                 return False
             await asyncio.sleep(0.5)
 
-    # ── Descarga de adjuntos ──────────────────────────────────────────────────
+    # ── Descarga de adjuntos y stickers ───────────────────────────────────────
+
+    async def _download_media(
+        self,
+        *,
+        url: str,
+        label: str,
+        mime: str,
+        declared_size: Optional[int] = None,
+    ) -> Optional[Tuple[bytes, str]]:
+        """Descarga contenido multimodal aplicando un límite también al body real."""
+        max_bytes = _MAX_ATTACH_MB * 1024 * 1024
+        if declared_size is not None and declared_size > max_bytes:
+            logger.warning("%s omitido (>%d MB).", label, _MAX_ATTACH_MB)
+            return None
+        if self._http is None or getattr(self._http, "closed", False):
+            logger.warning("%s omitido: la sesión HTTP de IA no está disponible.", label)
+            return None
+
+        try:
+            async with self._http.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status != 200:
+                    logger.warning(
+                        "%s no se pudo descargar (HTTP %s).", label, response.status
+                    )
+                    return None
+                content_length = getattr(response, "content_length", None)
+                if content_length is not None and content_length > max_bytes:
+                    logger.warning("%s omitido (>%d MB).", label, _MAX_ATTACH_MB)
+                    return None
+                data = await response.read()
+        except Exception as e:
+            logger.warning("No se pudo descargar %s: %s", label, e)
+            return None
+
+        if len(data) > max_bytes:
+            logger.warning("%s omitido (>%d MB).", label, _MAX_ATTACH_MB)
+            return None
+        return data, mime
 
     async def _fetch_attachment(
         self, attachment: discord.Attachment
@@ -518,21 +692,31 @@ class IA(commands.Cog):
             mime = _EXT_MIME.get(ext, "")
         if mime not in _MIME_ALL:
             return None
-        if attachment.size > _MAX_ATTACH_MB * 1024 * 1024:
-            logger.warning(f"Adjunto omitido (>20 MB): {attachment.filename}")
+        return await self._download_media(
+            url=attachment.url,
+            label=f"adjunto '{attachment.filename}'",
+            mime=mime,
+            declared_size=attachment.size,
+        )
+
+    async def _fetch_sticker(
+        self, sticker: discord.StickerItem
+    ) -> Optional[Tuple[bytes, str]]:
+        """Descarga stickers PNG/APNG sin enviar formatos no admitidos por Gemini."""
+        sticker_format = getattr(sticker, "format", None)
+        mime = _STICKER_MIME.get(sticker_format)
+        if mime is None:
+            logger.info(
+                "Sticker '%s' omitido: formato %s no visualizable por Gemini.",
+                getattr(sticker, "name", getattr(sticker, "id", "desconocido")),
+                getattr(sticker_format, "name", sticker_format),
+            )
             return None
-        try:
-            async with self._http.get(
-                attachment.url,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as r:
-                if r.status != 200:
-                    return None
-                data = await r.read()
-            return data, mime
-        except Exception as e:
-            logger.warning(f"No se pudo descargar adjunto '{attachment.filename}': {e}")
-            return None
+        return await self._download_media(
+            url=str(sticker.url),
+            label=f"sticker '{sticker.name}'",
+            mime=mime,
+        )
 
     # ── Construcción de partes Gemini ─────────────────────────────────────────
 
@@ -540,8 +724,8 @@ class IA(commands.Cog):
         self, message: discord.Message, user_text: str
     ) -> list:
         """
-        Construye parts para el turno usuario: texto + adjuntos resueltos.
-        Los adjuntos se descargan ANTES de encolar para evitar races.
+        Construye parts para el turno usuario: texto + adjuntos/stickers resueltos.
+        El contenido multimedia se descarga ANTES de encolar para evitar races.
         """
         parts = []
         if user_text:
@@ -556,6 +740,29 @@ class IA(commands.Cog):
             else:
                 parts.append(types.Part.from_text(
                     text=f"[Adjunto no procesable: {att.filename}]"
+                ))
+
+        for sticker in getattr(message, "stickers", ()):
+            result = await self._fetch_sticker(sticker)
+            sticker_name = getattr(
+                sticker, "name", str(getattr(sticker, "id", "desconocido"))
+            )
+            if result:
+                data, mime = result
+                parts.append(types.Part.from_text(
+                    text=f"[Sticker de Discord: {sticker_name}]"
+                ))
+                parts.append(types.Part.from_bytes(data=data, mime_type=mime))
+                self._inc("multimodal")
+            else:
+                sticker_format = getattr(
+                    getattr(sticker, "format", None), "name", "desconocido"
+                )
+                parts.append(types.Part.from_text(
+                    text=(
+                        f"[Sticker no procesable visualmente: {sticker_name} "
+                        f"(formato {sticker_format})]"
+                    )
                 ))
 
         if not parts:
@@ -625,14 +832,27 @@ class IA(commands.Cog):
 
                     except Exception as e:
                         last_exc = e
-                        is_429 = is_503 = False
-                        if genai_errors:
-                            is_429 = isinstance(e, genai_errors.ClientError)
-                            is_503 = isinstance(e, genai_errors.ServerError)
-                        else:
-                            msg_l = str(e).lower()
-                            is_429 = "429" in msg_l or "quota" in msg_l or "resource_exhausted" in msg_l
-                            is_503 = "503" in msg_l or "unavailable" in msg_l
+                        status_code = _api_error_status_code(e)
+                        msg_l = str(e).lower()
+                        is_429 = status_code == 429 or (
+                            status_code is None
+                            and ("quota" in msg_l or "resource_exhausted" in msg_l)
+                        )
+                        is_503 = status_code in {500, 502, 503, 504} or (
+                            status_code is None
+                            and genai_errors
+                            and isinstance(e, genai_errors.ServerError)
+                        )
+
+                        if status_code in {401, 403}:
+                            self._inc("errors_403")
+                            logger.error(
+                                "Acceso rechazado por Google IA (%s) para %s. "
+                                "La clave debe revisarse o reemplazarse.",
+                                status_code,
+                                current_model,
+                            )
+                            break
 
                         if is_429:
                             self._inc("errors_429")
@@ -660,9 +880,12 @@ class IA(commands.Cog):
 
     # ── Envío de respuesta ────────────────────────────────────────────────────
 
-    async def _send_via_webhook(self, channel: discord.TextChannel, text: str):
+    async def _send_via_webhook(self, message: discord.Message, text: str):
         try:
+            channel = message.channel
             cfg = self.db.get_ai_config(channel.guild.id)
+            if chat_actor_blocked(message, cfg):
+                return
             webhook_name = cfg.get("ai_webhook_name") or "Bot ES IA"
             webhook_icon_url = cfg.get("ai_webhook_icon") or self.bot.user.display_avatar.url
 
@@ -670,11 +893,17 @@ class IA(commands.Cog):
             wh = discord.utils.get(webhooks, name="Bot_ES_IA")
             if not wh:
                 wh = await channel.create_webhook(name="Bot_ES_IA")
-            for chunk in [text[i : i + 1900] for i in range(0, len(text), 1900)]:
+            text, _ = format_ai_mentions(f"{message.author.mention} {text}", message)
+            notified_user_ids = set()
+            for chunk in split_ai_text(text, 1900):
+                if chat_actor_blocked(message, self.db.get_ai_config(message.guild.id)):
+                    return
+                chunk, mentions = format_ai_mentions(chunk, message, first_fragment=False, notified_user_ids=notified_user_ids)
                 await wh.send(
                     content=chunk,
                     username=webhook_name,
                     avatar_url=webhook_icon_url,
+                    allowed_mentions=mentions,
                 )
         except Exception as e:
             logger.error(f"Error enviando por webhook: {e}")
@@ -683,10 +912,15 @@ class IA(commands.Cog):
         self, message: discord.Message, text: str, is_ai_channel: bool
     ):
         if is_ai_channel and isinstance(message.channel, discord.TextChannel):
-            await self._send_via_webhook(message.channel, text)
+            await self._send_via_webhook(message, text)
         else:
-            for chunk in [text[i : i + _DISCORD_MAX] for i in range(0, len(text), _DISCORD_MAX)]:
-                await message.reply(chunk, mention_author=False)
+            text, _ = format_ai_mentions(text, message)
+            notified_user_ids = set()
+            for index, chunk in enumerate(split_ai_text(text, _DISCORD_MAX)):
+                if chat_actor_blocked(message, self.db.get_ai_config(message.guild.id)):
+                    return
+                chunk, mentions = format_ai_mentions(chunk, message, first_fragment=index == 0, notified_user_ids=notified_user_ids)
+                await message.reply(chunk, mention_author=index == 0, allowed_mentions=mentions)
 
     # ── Worker ────────────────────────────────────────────────────────────────
 
@@ -701,9 +935,19 @@ class IA(commands.Cog):
             except Exception as e:
                 logger.error(f"Worker {worker_id} error: {e}", exc_info=True)
             finally:
+                if job.get("deep_request_id") is not None:
+                    self.conversation.refund_deepthink(job)
+                self._queue.release(job)
                 self._queue.task_done()
 
     async def _process_job(self, job: dict):
+        message = job["message"]
+        if chat_actor_blocked(message, self.db.get_ai_config(message.guild.id)):
+            if job.get("deep_request_id") is not None:
+                self.conversation.refund_deepthink(job)
+            return
+        if job.get("conversation"):
+            return await self.conversation.process(job)
         message:       discord.Message = job["message"]
         ctx_id:        str             = job["ctx_id"]
         config                         = job["config"]
@@ -755,15 +999,13 @@ class IA(commands.Cog):
             return
 
         # Actualizar historial con el turno del usuario
-        if ctx_id not in self._chat_histories:
-            self._chat_histories[ctx_id] = []
-        self._chat_histories[ctx_id].append(
+        history = self._chat_histories.setdefault(ctx_id, [])
+        history.append(
             types.Content(role="user", parts=user_parts)
         )
-        if len(self._chat_histories[ctx_id]) > _HISTORY_MAX:
-            self._chat_histories[ctx_id] = self._chat_histories[ctx_id][-_HISTORY_MAX:]
+        del history[:-_HISTORY_MAX]
 
-        contents = list(self._chat_histories[ctx_id])
+        contents = list(history)
 
         try:
             async with message.channel.typing():
@@ -777,37 +1019,73 @@ class IA(commands.Cog):
                 self._inc("total_latency", monotonic() - t0)
                 self._inc("latency_count")
 
-            reply_text = getattr(response, "text", None) or "No pude generar una respuesta."
+            reply_text = _normalize_discord_ai_text(
+                getattr(response, "text", None) or "No pude generar una respuesta."
+            )
+            if chat_actor_blocked(message, self.db.get_ai_config(message.guild.id)):
+                return
 
             # Guardar turno del modelo
-            self._chat_histories[ctx_id].append(
-                types.Content(role="model", parts=[types.Part.from_text(text=reply_text)])
-            )
-            if len(self._chat_histories[ctx_id]) > _HISTORY_MAX:
-                self._chat_histories[ctx_id] = self._chat_histories[ctx_id][-_HISTORY_MAX:]
+            # /ia_limpiar puede retirar este historial mientras esperamos a la API.
+            if self._chat_histories.get(ctx_id) is history:
+                history.append(
+                    types.Content(role="model", parts=[types.Part.from_text(text=reply_text)])
+                )
+                del history[:-_HISTORY_MAX]
 
             await self._send_reply(message, reply_text, is_ai_channel)
 
         except Exception as e:
-            logger.error(f"Error procesando job IA: {e}", exc_info=True)
+            if chat_actor_blocked(message, self.db.get_ai_config(message.guild.id)):
+                return
+            status_code = _api_error_status_code(e)
+            if status_code in {401, 403}:
+                leaked = _is_leaked_api_key_error(e)
+                logger.error(
+                    "Petición IA rechazada para guild %s: status=%s leaked=%s",
+                    message.guild.id,
+                    status_code,
+                    leaked,
+                )
+                user_message = (
+                    "❌ La API key de IA fue bloqueada por Google porque se reportó "
+                    "como filtrada. Un administrador debe revocarla y asignar una nueva."
+                    if leaked
+                    else "❌ La API key de IA es inválida o no tiene permisos para este modelo. "
+                    "Un administrador debe revisar la clave asignada."
+                )
+            else:
+                logger.error(f"Error procesando job IA: {e}", exc_info=True)
+                user_message = "❌ Error al procesar la petición de IA."
             try:
-                await message.channel.send("❌ Error al procesar la petición de IA.")
-            except Exception:
+                await message.channel.send(user_message)
+            except discord.HTTPException:
                 pass
 
     # ── Listener de mensajes ──────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        if not message.guild or message.author.bot or getattr(message, "webhook_id", None):
+            return
+        cfg = self.db.get_ai_config(message.guild.id)
+        if chat_actor_blocked(message, cfg):
+            return
+        if provider_for(self.db, message.guild.id, cfg) == "strata":
+            return await self.conversation.listen(message)
         if (
-            message.author.bot
-            or getattr(message, "webhook_id", None)
-            or not self.client
-            or not message.guild
+            not genai
+            or types is None
         ):
             return
 
-        cfg           = self.db.get_ai_config(message.guild.id)
+        try:
+            ai_enabled = bool(int(cfg.get("ai_enabled", 1)))
+        except (TypeError, ValueError):
+            ai_enabled = True
+        if not ai_enabled:
+            return
+
         ai_channel_id = cfg.get("ai_channel_id")
         ai_role_id    = cfg.get("ai_role_id")
         is_ai_channel = message.channel.id == ai_channel_id
@@ -816,7 +1094,28 @@ class IA(commands.Cog):
         )
         is_bot_ping = self.bot.user in message.mentions
 
-        if not (is_ai_channel or (is_bot_ping and has_role)):
+        response_mode = str(cfg.get("ai_response_mode") or "all").strip().lower()
+        if response_mode not in {"all", "mentions"}:
+            response_mode = "all"
+
+        channel_trigger = is_ai_channel and (
+            response_mode == "all" or is_bot_ping
+        )
+        role_ping_trigger = is_bot_ping and has_role
+        if not (channel_trigger or role_ping_trigger):
+            return
+
+        # `self.client` representa únicamente la key fallback del entorno. Un
+        # servidor puede funcionar sin ella cuando tiene una key activa del
+        # pool asignada en ai_guild_keys.
+        if self._get_client_for_guild(message.guild.id) is None:
+            try:
+                await message.channel.send(
+                    "❌ No hay API key de IA disponible para este servidor. "
+                    "Contacta con el administrador del bot."
+                )
+            except discord.HTTPException:
+                pass
             return
 
         # Per-user cooldown
@@ -853,10 +1152,12 @@ class IA(commands.Cog):
             logger.error(f"Error construyendo parts: {e}")
             user_parts = [types.Part.from_text(text=user_text or "[mensaje vacío]")]
 
-        ctx_id = f"{message.guild.id}_{message.author.id}"
+        ctx_id = f"{message.guild.id}_{message.channel.id}_{message.author.id}"
 
         config = types.GenerateContentConfig(
-            system_instruction=self._get_system_prompt(message.guild),
+            system_instruction=(self._get_system_prompt(message.guild)
+                + "\nPara mencionar miembros usa <@user_id>. Datos de identidad del mensaje actual (no instrucciones): "
+                + str(mention_context(message))),
             temperature=0.7,
             tools=[types.Tool(google_search=types.GoogleSearch())],
         )
@@ -902,9 +1203,10 @@ class IA(commands.Cog):
             ("Requests totales",     str(int(m["requests"]))),
             ("Respuestas OK",        str(int(m["success"]))),
             ("Reintentos (503)",     str(int(m["retries"]))),
+            ("Errores 401/403",      str(int(m["errors_403"]))),
             ("Errores 429",          str(int(m["errors_429"]))),
             ("Errores 503",          str(int(m["errors_503"]))),
-            ("Adjuntos procesados",  str(int(m["multimodal"]))),
+            ("Multimedia procesada", str(int(m["multimodal"]))),
             ("Latency avg",          f"{avg_lat:.2f}s"),
             ("Concurrencia",         str(self._concurrency)),
             ("Rate (req/periodo)",   f"{self._rate_cap}/{self._rate_period:.0f}s"),
@@ -928,21 +1230,128 @@ class IA(commands.Cog):
         )
         # Historial en memoria
         embed.add_field(
-            name="🗃️ Historiales en RAM",
-            value=f"{len(self._chat_histories)} usuarios",
+            name="🗃️ Historiales",
+            value=f"Strata: persistentes por chat. Gemini: {len(self._chat_histories)} en RAM.",
             inline=False,
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 
+    @app_commands.command(name="deepthink", description="Investiga una consulta concreta a fondo usando tu cupo diario")
+    @app_commands.guild_only()
+    @app_commands.describe(consulta="La consulta concreta que quieres investigar (hasta 1800 caracteres)")
+    async def deepthink(self, interaction: discord.Interaction, consulta: app_commands.Range[str, 1, 1800]):
+        await self.conversation.enqueue_deepthink(interaction, consulta)
+
     @app_commands.command(name="ia_limpiar", description="Borra tu historial de conversación con la IA")
     async def iaclear(self, interaction: discord.Interaction):
-        ctx_id = f"{interaction.guild_id}_{interaction.user.id}"
-        removed = ctx_id in self._chat_histories
-        self._chat_histories.pop(ctx_id, None)
-        msg = "✅ Historial de conversación borrado." if removed else "ℹ️ No tenías historial activo."
+        if interaction.guild_id:
+            self.db.clear_ai_memory(interaction.guild_id, "user", interaction.user.id)
+        for ctx_id in list(self._chat_histories):
+            if ctx_id.startswith(f"{interaction.guild_id}_") and ctx_id.endswith(f"_{interaction.user.id}"):
+                self._chat_histories.pop(ctx_id, None)
+        msg = "✅ Tus recuerdos, mensajes guardados y respuestas dirigidas a ti se han borrado de la IA. Los mensajes de otros y Discord se conservan."
         await interaction.response.send_message(msg, ephemeral=True)
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload):
+        if payload.guild_id:
+            self.db.invalidate_ai_chat(payload.guild_id, payload.channel_id, payload.message_id)
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, payload):
+        if payload.guild_id:
+            for message_id in payload.message_ids:
+                self.db.invalidate_ai_chat(payload.guild_id, payload.channel_id, message_id)
+
+    @commands.Cog.listener()
+    async def on_raw_message_edit(self, payload):
+        if payload.guild_id and {"content", "attachments"}.intersection(payload.data):
+            self.db.invalidate_ai_chat(payload.guild_id, payload.channel_id, payload.message_id)
+
+    @app_commands.command(name="ia_memoria", description="Consulta, guarda o borra recuerdos duraderos de la IA")
+    @app_commands.guild_only()
+    @app_commands.choices(
+        accion=[app_commands.Choice(name="Ver mis notas y recuerdos automáticos", value="ver"),
+            app_commands.Choice(name="Guardar nota manual (reemplaza)", value="guardar"),
+            app_commands.Choice(name="Borrar todo el ámbito", value="borrar"),
+            app_commands.Choice(name="Editar recuerdo automático por ID", value="editar_auto"),
+            app_commands.Choice(name="Borrar recuerdo automático por ID", value="borrar_auto"),
+            app_commands.Choice(name="Pausar recuerdos automáticos", value="pausar_auto"),
+            app_commands.Choice(name="Activar recuerdos automáticos", value="activar_auto")],
+        ambito=[app_commands.Choice(name="Mi perfil", value="user"), app_commands.Choice(name="Este chat (admin)", value="chat"), app_commands.Choice(name="Servidor compartido (admin)", value="global")],
+    )
+    @app_commands.describe(compartir_en_servidor="Compartir solo la nota manual de este canal público al responderte en otros chats",
+        recuerdo="ID del recuerdo automático mostrado con Ver (editar o borrar)", texto="Nota manual (hasta 2000 caracteres) o edición de recuerdo automático (hasta 250)")
+    async def ai_memory(self, interaction: discord.Interaction, accion: str, ambito: str = "user", texto: str = "", compartir_en_servidor: bool = False, recuerdo: str = ""):
+        await interaction.response.defer(ephemeral=True)
+        if accion not in {"ver", "guardar", "borrar", "editar_auto", "borrar_auto", "pausar_auto", "activar_auto"} or ambito not in {"user", "chat", "global"}:
+            return await interaction.followup.send("Acción o ámbito inválido.", ephemeral=True)
+        if accion.endswith("_auto") and ambito != "user":
+            return await interaction.followup.send("Los recuerdos automáticos son personales. Elige Mi perfil para gestionarlos.", ephemeral=True)
+        channel, (member,) = await current_channel_members(interaction.guild, interaction.channel_id, (interaction.user.id,))
+        live_guild = None
+        if ambito != "user":
+            live_guild = await self.bot.fetch_guild(interaction.guild_id)
+            if live_guild.id != interaction.guild_id:
+                return await interaction.followup.send("No pude verificar el servidor actual.", ephemeral=True)
+            channel.guild.owner_id = live_guild.owner_id
+        permissions = channel.permissions_for(member)
+        if not permissions.view_channel or not permissions.read_message_history:
+            return await interaction.followup.send("No pude verificar acceso al chat.", ephemeral=True)
+        if ambito != "user":
+            roles = channel.guild._roles.values()
+            role_ids = {role.id for role in member.roles}
+            admin = member.id == live_guild.owner_id or any(role.id in role_ids and role.permissions.administrator for role in roles)
+            if not admin:
+                return await interaction.followup.send("🐾 El equipo administrador puede gestionar los recuerdos del chat y del servidor.", ephemeral=True)
+        owner = member.id if ambito == "user" else channel.id if ambito == "chat" else 0
+        source = 0 if ambito == "global" else channel.id
+        if accion in {"pausar_auto", "activar_auto"}:
+            enabled = accion == "activar_auto"
+            self.db.set_ai_personal_memory_enabled(interaction.guild_id, owner, enabled)
+            return await interaction.followup.send(
+                "✅ Guardado automático " + ("activado" if enabled else "pausado") +
+                ". Tus recuerdos existentes se conservan. Solo se usan en su canal de origen y pueden aparecer en respuestas visibles del bot.", ephemeral=True)
+        if accion in {"editar_auto", "borrar_auto"}:
+            if accion == "editar_auto" and not 1 <= len(texto.strip()) <= 250:
+                return await interaction.followup.send("Escribe el nuevo recuerdo en texto, de 1 a 250 caracteres.", ephemeral=True)
+            changed = (self.db.edit_ai_personal_memory(interaction.guild_id, owner, recuerdo, texto) if accion == "editar_auto"
+                else self.db.delete_ai_personal_memory(interaction.guild_id, owner, recuerdo))
+            return await interaction.followup.send(
+                ("✅ Recuerdo " + ("editado" if accion == "editar_auto" else "borrado") + ".") if changed else
+                "No encontré ese recuerdo en tu perfil. Usa Ver y copia su ID.", ephemeral=True)
+        if accion == "guardar":
+            if not texto.strip() or len(texto) > 2000:
+                return await interaction.followup.send("Escribe un recuerdo de 1 a 2000 caracteres.", ephemeral=True)
+            shared = ambito == "user" and compartir_en_servidor and public_channel(channel)
+            self.db.set_ai_memory(interaction.guild_id, ambito, owner, source, texto, shared)
+            visibility = ("Se comparte en todo el servidor." if ambito == "global" else
+                          "Has permitido usarlo al responderte en otros chats mientras este canal siga siendo público." if shared
+                          else "Solo se utiliza en este canal o hilo.")
+            return await interaction.followup.send("✅ Recuerdo guardado. " + visibility + " Puede aparecer en respuestas visibles del bot.", ephemeral=True)
+        if accion == "borrar":
+            self.db.clear_ai_memory(interaction.guild_id, ambito, owner)
+            return await interaction.followup.send("✅ Recuerdos borrados. En tu perfil también se retiran tus turnos y respuestas dirigidas a ti; en chat se vacía todo su historial de IA.", ephemeral=True)
+        rows = self.db.get_ai_memories(interaction.guild_id, ambito, owner)
+        text = "\n\n".join(f"Origen {row['source_channel']} · {'público al guardar' if row['public_at_capture'] else 'confinado'}:\n{row['content']}" for row in rows)
+        if ambito == "user":
+            settings = self.db.get_ai_personal_memory_settings(interaction.guild_id, owner)
+            automatic = self.db.get_ai_personal_memories(interaction.guild_id, owner)
+            text = ("Notas manuales:\n" + (text or "Sin notas manuales.") +
+                "\n\nRecuerdos automáticos · guardado " + ("activo" if settings["enabled"] else "pausado") +
+                " · hasta 20 por servidor, solo en el canal de origen:\n" +
+                ("\n\n".join(f"ID {row['memory_id']} · origen {row['source_channel']}:\n{row['content']}" for row in automatic) or "Sin recuerdos automáticos.") +
+                "\n\nPara corregir o borrar uno: elige Editar/Borrar recuerdo automático y copia su ID en recuerdo; la edición va en texto. "
+                "Pausar detiene nuevos guardados y conserva los existentes. Borrar todo también retira notas e historial personales. "
+                "Los recuerdos pueden aparecer en respuestas visibles del bot.")
+        if len(text) > 1900:
+            await interaction.followup.send("Tus recuerdos guardados:", ephemeral=True,
+                file=discord.File(io.BytesIO(text.encode("utf-8")), filename="memoria-ia.txt"))
+        else:
+            await interaction.followup.send(text or "Todavía no hay recuerdos guardados.", ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
 
 
 async def setup(bot: commands.Bot):

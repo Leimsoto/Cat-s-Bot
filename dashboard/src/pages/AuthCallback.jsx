@@ -6,17 +6,37 @@ export default function AuthCallback() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get('token');
-    if (token) {
-      localStorage.setItem('botES_token', token);
-      navigate('/panel/dashboard', { replace: true });
-    } else {
-      navigate(
-        window.location.pathname.startsWith('/panel') ? '/panel/login' : '/',
-        { replace: true },
-      );
-    }
+    let cancelled = false;
+    localStorage.removeItem('botES_token');
+    localStorage.removeItem('botES_guild_id');
+    sessionStorage.removeItem('botES_guilds_cache');
+    sessionStorage.removeItem('botES_user_cache');
+
+    fetch('/api/auth/me', {
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+    })
+      .then((response) => {
+        if (cancelled) return;
+        navigate(
+          response.ok
+            ? '/panel/dashboard'
+            : (window.location.pathname.startsWith('/panel') ? '/panel/login' : '/'),
+          { replace: true },
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          navigate(
+            window.location.pathname.startsWith('/panel') ? '/panel/login' : '/',
+            { replace: true },
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [navigate]);
 
   return (

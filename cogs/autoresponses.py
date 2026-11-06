@@ -9,7 +9,7 @@ Tipos de match soportados (columna ``match_type``):
   • exact        – mensaje completo igual al trigger.
   • word         – palabra completa (regex ``\\btrigger\\b``).
   • starts_with  – mensaje comienza con el trigger.
-  • regex        – patrón regex completo.
+  • regex        – deshabilitado; los registros antiguos fallan de forma cerrada.
 
 Comandos slash legacy (toda la creación/edición se hace desde el dashboard):
   /autoresponse list    – lista las auto-respuestas del servidor.
@@ -24,7 +24,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from cogs._message_payload import render_message_payload
+from cogs._managed_messages import render_managed_message_payload, send_managed
 
 logger = logging.getLogger("AutoResponses")
 
@@ -44,11 +44,7 @@ def _match(content: str, trigger: str, match_type: str, case_sensitive: bool) ->
         flags = 0 if case_sensitive else re.IGNORECASE
         return bool(re.search(r"\b" + re.escape(trigger) + r"\b", content, flags))
     if mt == "regex":
-        flags = 0 if case_sensitive else re.IGNORECASE
-        try:
-            return bool(re.search(trigger, content, flags))
-        except re.error:
-            return False
+        return False
     return needle in haystack
 
 
@@ -87,8 +83,8 @@ class AutoResponses(commands.Cog):
             }
             try:
                 if row.get("response_data"):
-                    payload = render_message_payload(
-                        row["response_data"], variables, member=message.author,
+                    payload = await render_managed_message_payload(
+                        self.bot, message.guild.id, row["response_data"], variables, member=message.author,
                     )
                     await message.channel.send(
                         content=payload["content"],
@@ -99,7 +95,7 @@ class AutoResponses(commands.Cog):
                     for k, v in variables.items():
                         text = text.replace("{" + k + "}", str(v))
                     if text:
-                        await message.channel.send(text)
+                        await send_managed(self.bot, message.guild.id, "autoresponses", message.channel.send, text)
             except (discord.Forbidden, discord.HTTPException) as exc:
                 logger.warning("Error enviando autoresponse en %s: %s", message.guild.id, exc)
             break
@@ -148,7 +144,7 @@ class AutoResponses(commands.Cog):
             return await interaction.response.send_message(
                 f"❌ No existe una auto-respuesta con ID `{id}`.", ephemeral=True
             )
-        self.db.remove_autoresponse(id)
+        self.db.remove_autoresponse(id, interaction.guild_id)
         await interaction.response.send_message(
             f"🗑️ Auto-respuesta ID `{id}` eliminada.", ephemeral=True
         )

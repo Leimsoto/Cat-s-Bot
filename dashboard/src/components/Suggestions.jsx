@@ -89,9 +89,9 @@ export default function Suggestions({ selectedGuild: guildId, onToast }) {
     setSaving(true);
     try {
       const payload = {
-        submit_channel_id: cfg.submit_channel_id ? Number(cfg.submit_channel_id) : null,
-        review_channel_id: cfg.review_channel_id ? Number(cfg.review_channel_id) : null,
-        public_channel_id: cfg.public_channel_id ? Number(cfg.public_channel_id) : null,
+        submit_channel_id: cfg.submit_channel_id ? String(cfg.submit_channel_id) : null,
+        review_channel_id: cfg.review_channel_id ? String(cfg.review_channel_id) : null,
+        public_channel_id: cfg.public_channel_id ? String(cfg.public_channel_id) : null,
         enabled: Number(cfg.enabled || 0),
         auto_publish: Number(cfg.auto_publish || 0),
         min_length: Number(cfg.min_length || 10),
@@ -255,7 +255,7 @@ export default function Suggestions({ selectedGuild: guildId, onToast }) {
                   <label>{label}</label>
                   <SearchableSelect
                     value={cfg[key] || null}
-                    onChange={(v) => set(key, v ? Number(v) : null)}
+                    onChange={(v) => set(key, v ? String(v) : null)}
                     endpoint={`/api/guilds/${guildId}/channels?type=text`}
                     itemsKey="channels"
                     placeholder="Seleccionar canal…"

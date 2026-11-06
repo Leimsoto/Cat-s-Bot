@@ -11,6 +11,7 @@ Novedades v2:
 
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Thread
@@ -18,7 +19,7 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger("API")
@@ -70,16 +71,47 @@ def create_app(db=None, bot=None) -> FastAPI:
         app.state.bot = bot
     app.state.started_at = datetime.now(timezone.utc)
 
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        if exc.status_code == 403:
+            logger.warning(
+                "403 response path=%s method=%s detail=%s",
+                request.url.path,
+                request.method,
+                exc.detail,
+            )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None),
+        )
+
+    @app.middleware("http")
+    async def log_api_mutations(request: Request, call_next):
+        started = time.perf_counter()
+        response = await call_next(request)
+        if request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            logger.info(
+                "API mutation method=%s path=%s status=%s duration_ms=%.1f",
+                request.method,
+                request.url.path,
+                response.status_code,
+                (time.perf_counter() - started) * 1000,
+            )
+        return response
+
     # ── Registrar routers API ─────────────────────────────────────────────────
     from api.auth import router as auth_router
     from api.routes import (
         autoroles,
         autoresponses,
         channels,
+        channel_settings,
         custom_commands,
         embeds,
         giveaways,
         moderation,
+        rag,
         radio,
         reports,
         schedules,
@@ -103,9 +135,11 @@ def create_app(db=None, bot=None) -> FastAPI:
     app.include_router(schedules.router)
     app.include_router(giveaways.router)
     app.include_router(autoroles.router)
+    app.include_router(rag.router)
     app.include_router(radio.router)
     app.include_router(embeds.router)
     app.include_router(channels.router)
+    app.include_router(channel_settings.router)
     app.include_router(voice_gen.router)
     app.include_router(autoresponses.router)
     app.include_router(custom_commands.router)
@@ -201,6 +235,10 @@ def create_app(db=None, bot=None) -> FastAPI:
 
         @app.get("/auth/callback", include_in_schema=False)
         async def serve_auth_callback():
+            return await _serve_index()
+
+        @app.get("/panel", include_in_schema=False)
+        async def serve_panel_root():
             return await _serve_index()
 
         @app.get("/panel/{full_path:path}", include_in_schema=False)

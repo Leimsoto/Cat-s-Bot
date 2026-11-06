@@ -1,3 +1,4 @@
+import { useSaveBar } from "../lib/SaveBarContext";
 /**
  * components/Autoroles.jsx
  * ────────────────────────
@@ -87,7 +88,7 @@ export default function Autoroles({ selectedGuild, onToast }) {
     if (!newJoinRoleId) return;
     setAdding(true);
     try {
-      await apiPost(`/api/guilds/${guildId}/autoroles/join`, { role_id: Number(newJoinRoleId) });
+      await apiPost(`/api/guilds/${guildId}/autoroles/join`, { role_id: String(newJoinRoleId) });
       setNewJoinRoleId(null);
       toast("success", "Rol agregado a auto-asignación");
       await load();
@@ -128,16 +129,21 @@ export default function Autoroles({ selectedGuild, onToast }) {
     setSavingPanel(true);
     try {
       await apiPost(`/api/guilds/${guildId}/autoroles/reactions`, {
-        message_id: Number(msgId),
-        channel_id: Number(panelChannelId),
-        mapping_data: JSON.stringify(parsed)});
+        message_id: msgId,
+        channel_id: String(panelChannelId),
+        // Enviar el JSON original: Python conserva enteros snowflake exactos;
+        // JSON.parse/JSON.stringify en el navegador redondea IDs grandes.
+        mapping_data: panelMapping});
       toast("success", "Panel guardado");
       setPanelMsgId("");
       setPanelChannelId(null);
       setPanelMapping('{\n  "👍": 0\n}');
       await load();
     } catch (e) {
-      toast("error", e?.message || "Error guardando panel");
+      const message = e?.message || "Error guardando panel";
+      toast("error", /<!doctype|<html|cloudflare|origin web server/i.test(message)
+        ? "El servidor no pudo confirmar el guardado. Tus datos siguen aquí; vuelve a intentarlo."
+        : message);
     } finally {
       setSavingPanel(false);
     }
@@ -153,6 +159,7 @@ export default function Autoroles({ selectedGuild, onToast }) {
     }
   };
 
+  useSaveBar({ dirty: Boolean(newJoinRoleId || panelMsgId || panelChannelId || panelMapping !== '{\n  "👍": 0\n}'), saving: adding || savingPanel, onRevert: () => { setNewJoinRoleId(null); setPanelMsgId(""); setPanelChannelId(null); setPanelMapping('{\n  "👍": 0\n}'); } });
   if (loading) return <div className="loader">Cargando autoroles…</div>;
 
   return (
@@ -189,8 +196,8 @@ export default function Autoroles({ selectedGuild, onToast }) {
               Cuando un usuario nuevo entre al servidor, se le asignarán todos los
               roles de esta lista. El rol del bot debe estar por encima.
             </p>
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <div style={{ flex: 1 }}>
+            <div className="inline-role-picker">
+              <div style={{ flex: "1 1 160px", minWidth: 0 }}>
                 <SearchableSelect
                   value={newJoinRoleId}
                   onChange={setNewJoinRoleId}
@@ -252,11 +259,13 @@ export default function Autoroles({ selectedGuild, onToast }) {
                           </p>
                         )}
                       </div>
-                      <button
-                        onClick={() => removeJoinRole(r.role_id)}
-                        className="btn-danger"
-                      >
-                        <Icon name="delete" /> Eliminar
+                       <button
+                         type="button"
+                         onClick={() => removeJoinRole(r.role_id)}
+                         className="btn-danger"
+                         aria-label={`Eliminar el autorol ${meta?.name || r.role_id}`}
+                       >
+                         <Icon name="delete" /> Eliminar
                       </button>
                     </div>
                   );
@@ -308,8 +317,9 @@ export default function Autoroles({ selectedGuild, onToast }) {
                   style={{ fontFamily: "monospace", fontSize: "0.85rem" }}
                 />
                 <p className="hint" style={{ marginTop: 4 }}>
-                  Usa el emoji como clave (ej: <code>"👍"</code>) o el nombre del emoji
-                  custom. El valor es el ID numérico del rol.
+                  Usa Unicode (<code>"👍"</code>), ID (<code>"1403084927637000363"</code>),
+                  nombre (<code>":coraverde2:"</code>) o mención (<code>{'"<:coraverde2:1403084927637000363>"'}</code>).
+                  Para el rol, recomendamos su ID entre comillas; también se aceptan enteros sin redondearlos.
                 </p>
               </div>
             </div>
@@ -352,7 +362,7 @@ export default function Autoroles({ selectedGuild, onToast }) {
                         gap: 12,
                         flexDirection: "column"}}
                     >
-                      <div style={{ display: "flex", alignItems: "center", gap: 12, width: "100%" }}>
+                      <div className="autorole-panel-head">
                         <div
                           className="ov-activity-badge"
                           style={{
@@ -362,20 +372,22 @@ export default function Autoroles({ selectedGuild, onToast }) {
                         >
                           <Icon name="tags" />
                         </div>
-                        <div style={{ flex: 1 }}>
+                        <div className="autorole-panel-copy">
                           <strong>Mensaje #{p.message_id}</strong>
                           <p className="ov-subtitle" style={{ margin: 0, fontSize: "0.78rem" }}>
                             Canal: #{ch?.name || `ID:${p.channel_id}`}
                           </p>
                         </div>
                         <button
+                          type="button"
                           onClick={() => deletePanel(p.message_id)}
                           className="btn-danger"
+                          aria-label={`Eliminar el panel del mensaje ${p.message_id}`}
                         >
                           <Icon name="delete" /> Eliminar
                         </button>
                       </div>
-                      <div style={{ paddingLeft: 56, fontSize: "0.85rem", color: "var(--text-muted)" }}>
+                      <div className="autorole-panel-mapping">
                         {Object.entries(mapping).map(([emoji, rid]) => {
                           const role = roleNameById.get(String(rid));
                           return (

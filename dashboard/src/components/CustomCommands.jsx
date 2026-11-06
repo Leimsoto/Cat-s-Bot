@@ -1,3 +1,4 @@
+import { useSaveBar } from "../lib/SaveBarContext";
 /**
  * components/CustomCommands.jsx
  * ─────────────────────────────
@@ -56,9 +57,11 @@ function parsePermission(cmd) {
 export default function CustomCommands({ selectedGuild: guildId }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [editing, setEditing] = useState(false);
+  const [initialForm, setInitialForm] = useState(null);
   const [editorTab, setEditorTab] = useState("content");
   const [allRoles, setAllRoles] = useState([]);
 
@@ -82,23 +85,25 @@ export default function CustomCommands({ selectedGuild: guildId }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const startNew = () => { setForm(EMPTY_FORM); setEditing(true); };
+  const startNew = () => { setForm(EMPTY_FORM); setInitialForm(EMPTY_FORM); setEditing(true); };
 
   const startEdit = (cmd) => {
     const perm = parsePermission(cmd);
-    setForm({
+    const next = {
       name: cmd.name,
       enabled: !!cmd.enabled,
       delete_invocation: !!cmd.delete_invocation,
       permission_everyone: perm.everyone,
       permission_role_ids: perm.role_ids,
       message: parseMessage(cmd),
-    });
+    };
+    setForm(next); setInitialForm(next);
     setEditorTab(parseMessage(cmd).enabled ? "embed-content" : "content");
     setEditing(true);
   };
 
   const save = async () => {
+    if (saving) return;
     const cleanName = form.name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
     if (!cleanName) return showToast("Nombre inválido (a-z, 0-9, _, -)", "error");
     const msg = form.message || EMPTY_MESSAGE;
@@ -116,6 +121,7 @@ export default function CustomCommands({ selectedGuild: guildId }) {
       },
     };
 
+    setSaving(true);
     try {
       const exists = items.some((c) => c.name === cleanName);
       if (exists) {
@@ -133,7 +139,7 @@ export default function CustomCommands({ selectedGuild: guildId }) {
       load();
     } catch (e) {
       showToast(e.message || "Error", "error");
-    }
+    } finally { setSaving(false); }
   };
 
   const toggleEnabled = async (cmd) => {
@@ -162,6 +168,8 @@ export default function CustomCommands({ selectedGuild: guildId }) {
       return { ...f, permission_role_ids: Array.from(set) };
     });
   };
+
+  useSaveBar({ dirty: editing && JSON.stringify(form) !== JSON.stringify(initialForm), saving, onSave: save, onRevert: () => { setEditing(false); setForm(initialForm || EMPTY_FORM); } });
 
   if (loading) {
     return (

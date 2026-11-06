@@ -32,7 +32,7 @@
  *   debounceMs     int — default 200
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { apiGet } from "../../lib/api";
 import "./SearchableSelect.css";
@@ -109,6 +109,10 @@ function defaultOptionRenderer(opt) {
 export default function SearchableSelect({
   value,
   onChange,
+  id,
+  label,
+  ariaLabel,
+  "aria-label": labelAttribute,
   options = null,
   endpoint = null,
   itemsKey = "items",
@@ -122,6 +126,7 @@ export default function SearchableSelect({
   debounceMs = 200,
   emptyMessage = "Sin resultados.",
   loadingMessage = "Cargando…"}) {
+  const listboxId = useId();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [remoteOptions, setRemoteOptions] = useState([]);
@@ -155,11 +160,12 @@ export default function SearchableSelect({
     const top = placeAbove
       ? Math.max(margin, r.top - Math.min(maxH, spaceAbove) - 4)
       : r.bottom + 4;
-    setPopoverPos({
+    const next = {
       top,
-      left: r.left,
+      left: Math.max(margin, Math.min(r.left, window.innerWidth - r.width - margin)),
       width: r.width,
-      maxHeight: placeAbove ? Math.min(maxH, spaceAbove) : Math.min(maxH, spaceBelow)});
+      maxHeight: Math.max(80, placeAbove ? Math.min(maxH, spaceAbove) : Math.min(maxH, spaceBelow))};
+    setPopoverPos((current) => current && Object.keys(next).every((key) => next[key] === current[key]) ? current : next);
   }, []);
 
   // Modo: si hay endpoint, modo remoto. Si no, local.
@@ -232,8 +238,9 @@ export default function SearchableSelect({
     if (!isRemote || !endpoint || !missingIdKey) return;
 
     const requestKey = `${endpoint}|${itemsKey}|${missingIdKey}`;
-    if (resolveRequestsRef.current.has(requestKey)) return;
-    resolveRequestsRef.current.add(requestKey);
+    const requests = resolveRequestsRef.current;
+    if (requests.has(requestKey)) return;
+    requests.add(requestKey);
 
     const missing = new Set(missingIdKey.split("\u001f"));
     const sep = endpoint.includes("?") ? "&" : "?";
@@ -271,6 +278,7 @@ export default function SearchableSelect({
 
     return () => {
       cancelled = true;
+      requests.delete(requestKey);
     };
   }, [isRemote, endpoint, itemsKey, missingIdKey]);
 
@@ -293,10 +301,12 @@ export default function SearchableSelect({
       return;
     }
     recalcPos();
-    const onMove = () => recalcPos();
+    let frame;
+    const onMove = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(recalcPos); };
     window.addEventListener("scroll", onMove, true);
     window.addEventListener("resize", onMove);
     return () => {
+      cancelAnimationFrame(frame);
       window.removeEventListener("scroll", onMove, true);
       window.removeEventListener("resize", onMove);
     };
@@ -307,10 +317,10 @@ export default function SearchableSelect({
     setActiveIndex(0);
   }, [query, open]);
 
-  // Auto-focus en input al abrir.
+  const popoverReady = open && popoverPos !== null;
   useEffect(() => {
-    if (open && inputRef.current) inputRef.current.focus();
-  }, [open]);
+    if (popoverReady) inputRef.current?.focus();
+  }, [popoverReady]);
 
   // Auto-scroll al item activo.
   useEffect(() => {
@@ -332,6 +342,7 @@ export default function SearchableSelect({
         onChange(String(opt.id));
         setOpen(false);
         setQuery("");
+        triggerRef.current?.focus();
       }
     },
     [multiple, onChange, value],
@@ -356,9 +367,13 @@ export default function SearchableSelect({
         e.preventDefault();
         const opt = visibleOptions[activeIndex];
         if (opt) handleSelect(opt);
+      } else if (e.key === "Tab") {
+        setOpen(false);
+        triggerRef.current?.focus();
       } else if (e.key === "Escape") {
         e.preventDefault();
         setOpen(false);
+        triggerRef.current?.focus();
       }
     },
     [open, visibleOptions, activeIndex, handleSelect],
@@ -384,6 +399,9 @@ export default function SearchableSelect({
     >
       <button
         ref={triggerRef}
+        id={id}
+        aria-label={ariaLabel || labelAttribute || label || placeholder}
+        aria-controls={open ? listboxId : undefined}
         type="button"
         className="ss-trigger"
         onClick={() => !disabled && setOpen((v) => !v)}
@@ -420,7 +438,7 @@ export default function SearchableSelect({
             <div
               ref={popoverRef}
               className="ss-popover"
-              role="listbox"
+
               style={{
                 position: "fixed",
                 top: popoverPos.top,
@@ -431,6 +449,12 @@ export default function SearchableSelect({
               <div className="ss-search">
                 <input
                   ref={inputRef}
+                  role="combobox"
+                  aria-label={ariaLabel || labelAttribute || label || placeholder}
+                  aria-expanded={open}
+                  aria-autocomplete="list"
+                  aria-controls={listboxId}
+                  aria-activedescendant={visibleOptions[activeIndex] ? `${listboxId}-${activeIndex}` : undefined}
                   type="text"
                   className="ss-search-input"
                   value={query}
@@ -441,7 +465,7 @@ export default function SearchableSelect({
                   spellCheck={false}
                 />
               </div>
-              <div className="ss-list" ref={listRef}>
+              <div className="ss-list" ref={listRef} id={listboxId} role="listbox" aria-label={ariaLabel || labelAttribute || label || placeholder} aria-multiselectable={multiple || undefined}>
                 {loading && visibleOptions.length === 0 ? (
                   <div className="ss-empty">{loadingMessage}</div>
                 ) : visibleOptions.length === 0 ? (
@@ -457,6 +481,9 @@ export default function SearchableSelect({
                         key={id}
                         type="button"
                         role="option"
+                        id={`${listboxId}-${idx}`}
+                        tabIndex={-1}
+                        onMouseDown={(event) => event.preventDefault()}
                         aria-selected={isSelected}
                         data-idx={idx}
                         className={`ss-option ${idx === activeIndex ? "ss-active" : ""} ${
