@@ -5,10 +5,50 @@ __pycache__/
 
 # Carpeta de datos de la base de datos (creada automáticamente)
 data/
+workspaces/
 
 # Entorno y logs
-.env
+.env*
+!.env.example
+!.env.*.example
 bot.log
+
+# Local deployment packages, backups and installation logs
+deploy/wsl/.local/
 
 #claude
 .claude/
+
+# Local environments, caches and build output
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+node_modules/
+dist/
+
+# Runtime databases, logs and backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+*.log.*
+*.bak
+*.backup
+
+# Local tooling metadata and review evidence
+.agents/
+.codex/
+.impeccable/
+/SECURITY_FIX_REPORT.md
+/TRIGGER_REVIEW.md
+/TRIGGER_INVENTORY.json
+
+# Private conversation attachments
+/.codex-remote-attachments/

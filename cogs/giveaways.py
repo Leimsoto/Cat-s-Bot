@@ -31,15 +31,9 @@ class GiveawayJoinView(discord.ui.View):
                 "❌ Este sorteo ya ha finalizado.", ephemeral=True
             )
 
-        try:
-            parts = json.loads(gw.get("participants") or "[]")
-        except Exception:
-            parts = []
+        parts = self.cog.db.list_giveaway_participants(msg_id)
 
-        if interaction.user.id in parts:
-            parts.remove(interaction.user.id)
-            ack = "Has abandonado el sorteo."
-        else:
+        if interaction.user.id not in parts:
             try:
                 req_roles = json.loads(gw.get("req_roles") or "[]")
                 deny_roles = json.loads(gw.get("deny_roles") or "[]")
@@ -61,10 +55,8 @@ class GiveawayJoinView(discord.ui.View):
                     ephemeral=True,
                 )
 
-            parts.append(interaction.user.id)
-            ack = "🎉 ¡Te has unido al sorteo!"
-
-        self.cog.db.update_giveaway(msg_id, participants=json.dumps(parts))
+        joined, parts = self.cog.db.toggle_giveaway_participant(msg_id, interaction.user.id)
+        ack = "🎉 ¡Te has unido al sorteo!" if joined else "Has abandonado el sorteo."
 
         button.label = f"🎉 Participar ({len(parts)})"
         await interaction.response.edit_message(view=self)
@@ -77,6 +69,9 @@ class Giveaways(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = bot.db # type: ignore
+        recovered = self.db.recover_giveaway_finalizations()
+        if recovered:
+            logger.warning("Sorteos en finalización recuperados tras reinicio: %s", recovered)
         self.giveaway_checker.start()
 
     def cog_unload(self):
@@ -84,37 +79,43 @@ class Giveaways(commands.Cog):
 
     @tasks.loop(seconds=30)
     async def giveaway_checker(self):
-        active = self.db.get_active_giveaways()
+        try:
+            active = self.db.get_active_giveaways()
+        except Exception:
+            logger.exception("No se pudieron leer los sorteos activos")
+            return
         now = int(datetime.now(timezone.utc).timestamp())
         
         for gw in active:
-            if now >= gw["end_time"]:
-                await self.end_giveaway(gw)
+            try:
+                if now >= gw["end_time"]:
+                    await self.end_giveaway(gw)
+            except Exception:
+                logger.exception("No se pudo procesar el sorteo %s", gw.get("message_id"))
 
     @giveaway_checker.before_loop
     async def before_giveaway_checker(self):
         await self.bot.wait_until_ready()
 
     async def end_giveaway(self, gw: dict):
-        try:
-            parts = json.loads(gw.get("participants") or "[]")
-        except Exception:
-            parts = []
+        parts = self.db.list_giveaway_participants(int(gw["message_id"]))
         winners_count = int(gw.get("winners_count") or 1)
+        if not 1 <= winners_count <= 50:
+            logger.error("Sorteo %s con número de ganadores inválido", gw.get("message_id"))
+            return False
         winners_ids = random.sample(parts, min(len(parts), winners_count)) if parts else []
 
-        self.db.update_giveaway(
-            gw["message_id"],
-            ended=1,
-            winners=json.dumps(winners_ids),
-        )
+        if not self.db.claim_giveaway_finalization(int(gw["message_id"]), winners_ids):
+            return False
 
         guild = self.bot.get_guild(gw["guild_id"])
         if not guild:
-            return
+            self.db.release_giveaway_finalization(int(gw["message_id"]))
+            return False
         channel = guild.get_channel(gw["channel_id"])
         if not channel:
-            return
+            self.db.release_giveaway_finalization(int(gw["message_id"]))
+            return False
 
         try:
             msg = await channel.fetch_message(gw["message_id"])
@@ -126,12 +127,12 @@ class Giveaways(commands.Cog):
             disabled_view.children[0].label = f"Finalizado ({len(parts)})"
 
             if not winners_ids:
-                await channel.send(f"Tristemente nadie participó en el sorteo de **{gw['prize']}**. 😢")
+                announcement = f"Tristemente nadie participó en el sorteo de **{gw['prize']}**. 😢"
                 embed.set_footer(text="Sorteo finalizado · Sin participantes")
             else:
                 winners_mentions = ", ".join(f"<@{w}>" for w in winners_ids)
                 verb = "Han" if len(winners_ids) > 1 else "Has"
-                await channel.send(f"🎉 ¡Felicidades {winners_mentions}! ¡{verb} ganado **{gw['prize']}**!")
+                announcement = f"🎉 ¡Felicidades {winners_mentions}! ¡{verb} ganado **{gw['prize']}**!"
                 embed.set_footer(text=f"Finalizado · Ganadores: {len(winners_ids)}")
                 if embed.description:
                     embed.description = f"{embed.description}\n\n🏆 **Ganadores:** {winners_mentions}"
@@ -139,11 +140,19 @@ class Giveaways(commands.Cog):
                     embed.description = f"🏆 **Ganadores:** {winners_mentions}"
 
             await msg.edit(embed=embed, view=disabled_view)
+            from cogs._managed_messages import send_managed
+            await send_managed(self.bot, guild.id, "giveaways", channel.send, announcement, protected=(gw["prize"],))
+            self.db.complete_giveaway_finalization(int(gw["message_id"]))
+            return True
 
         except discord.NotFound:
             logger.warning("Mensaje del sorteo %s no encontrado al finalizar", gw["message_id"])
+            self.db.complete_giveaway_finalization(int(gw["message_id"]))
+            return False
         except Exception as e:
-            logger.error(f"Error terminando sorteo: {e}")
+            logger.exception("Error terminando sorteo %s", gw["message_id"])
+            self.db.release_giveaway_finalization(int(gw["message_id"]))
+            return False
 
     @app_commands.command(name="sorteo", description="Crea un sorteo interactivo")
     @app_commands.default_permissions(administrator=True)
@@ -159,13 +168,16 @@ class Giveaways(commands.Cog):
     async def create_giveaway(
         self, 
         interaction: discord.Interaction, 
-        premio: str, 
-        duracion_horas: float,
-        ganadores: int = 1,
+        premio: app_commands.Range[str, 1, 240],
+        duracion_horas: app_commands.Range[float, 0.01, 8760.0],
+        ganadores: app_commands.Range[int, 1, 50] = 1,
         rol_requerido: discord.Role = None,
         rol_denegado: discord.Role = None,
         imagen_url: str = None
     ):
+        premio = premio.strip()
+        if not premio:
+            return await interaction.response.send_message("❌ Escribe el premio del sorteo.", ephemeral=True)
         end_time_dt = datetime.now(timezone.utc) + timedelta(hours=duracion_horas)
         end_ts = int(end_time_dt.timestamp())
         
@@ -187,8 +199,9 @@ class Giveaways(commands.Cog):
         if imagen_url and imagen_url.startswith("http"):
             embed.set_image(url=imagen_url)
             
-        await interaction.response.send_message("Sorteo creado.", ephemeral=True)
-        msg = await interaction.channel.send(embed=embed)
+        await interaction.response.defer(ephemeral=True)
+        from cogs._managed_messages import send_managed
+        msg = await send_managed(self.bot, interaction.guild_id, "giveaways", interaction.channel.send, embed=embed)
         
         self.db.create_giveaway(
             interaction.guild_id, interaction.channel.id, msg.id, 
@@ -198,6 +211,7 @@ class Giveaways(commands.Cog):
         
         view = GiveawayJoinView(self)
         await msg.edit(view=view)
+        await interaction.followup.send(f"✅ Sorteo creado: {msg.jump_url}", ephemeral=True)
 
     # ── Comandos de gestión ──────────────────────────────────────────────────
 
@@ -218,35 +232,39 @@ class Giveaways(commands.Cog):
         if gw["ended"]:
             return await interaction.followup.send("⚠️ Este sorteo ya ha finalizado.", ephemeral=True)
 
-        await self.end_giveaway(gw)
-        await interaction.followup.send("✅ Sorteo terminado y ganadores elegidos.", ephemeral=True)
+        completed = await self.end_giveaway(gw)
+        if completed:
+            await interaction.followup.send("✅ Sorteo terminado y ganadores elegidos.", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                "❌ No se pudo completar el sorteo. Quedó disponible para reintento.", ephemeral=True
+            )
 
     async def reroll_giveaway(self, gw: dict) -> list[int]:
         """
         Re-elige ganadores de un sorteo terminado y los anuncia.
         Retorna la lista de winner IDs nuevos. No re-edita el embed original.
         """
-        try:
-            parts = json.loads(gw.get("participants") or "[]")
-        except Exception:
-            parts = []
+        if int(gw.get("ended") or 0) != 1 or gw.get("cancelled"):
+            raise ValueError("Solo se pueden volver a elegir ganadores de sorteos finalizados y no cancelados.")
+        parts = self.db.list_giveaway_participants(int(gw["message_id"]))
         if not parts:
             return []
         winners_count = int(gw.get("winners_count") or 1)
+        if not 1 <= winners_count <= 50:
+            raise ValueError("El sorteo tiene un número de ganadores inválido.")
         winners_ids = random.sample(parts, min(len(parts), winners_count))
-        self.db.update_giveaway(gw["message_id"], winners=json.dumps(winners_ids))
 
         guild = self.bot.get_guild(int(gw["guild_id"]))
-        if guild:
-            channel = guild.get_channel(int(gw["channel_id"]))
-            if channel:
-                mentions = ", ".join(f"<@{w}>" for w in winners_ids)
-                try:
-                    await channel.send(
-                        f"🎉 **Reroll!** ¡Nuevos ganadores de **{gw['prize']}**: {mentions}!"
-                    )
-                except discord.HTTPException:
-                    pass
+        channel = guild.get_channel(int(gw["channel_id"])) if guild else None
+        if channel is None:
+            raise ValueError("No se encontró el canal del sorteo.")
+        mentions = ", ".join(f"<@{w}>" for w in winners_ids)
+        from cogs._managed_messages import send_managed
+        await send_managed(self.bot, guild.id, "giveaways", channel.send,
+            f"🎉 **Reroll!** ¡Nuevos ganadores de **{gw['prize']}**: {mentions}!", protected=(gw["prize"],)
+        )
+        self.db.update_giveaway(gw["message_id"], winners=json.dumps(winners_ids))
         return winners_ids
 
     @app_commands.command(name="sorteo_cancelar", description="Cancela un sorteo sin elegir ganadores")
@@ -266,7 +284,10 @@ class Giveaways(commands.Cog):
         if gw["ended"]:
             return await interaction.followup.send("⚠️ Este sorteo ya ha finalizado o fue cancelado.", ephemeral=True)
 
-        self.db.update_giveaway(msg_id, ended=1, cancelled=1)
+        if not self.db.cancel_active_giveaway(msg_id):
+            return await interaction.followup.send(
+                "⚠️ El sorteo ya estaba finalizando, terminado o cancelado.", ephemeral=True
+            )
         guild = self.bot.get_guild(int(gw["guild_id"]))
         if guild:
             channel = guild.get_channel(int(gw["channel_id"]))
@@ -301,7 +322,10 @@ class Giveaways(commands.Cog):
         if not gw["ended"]:
             return await interaction.followup.send("⚠️ El sorteo aún está activo. Términalo primero con `/giveaway_end`.", ephemeral=True)
 
-        winners_ids = await self.reroll_giveaway(gw)
+        try:
+            winners_ids = await self.reroll_giveaway(gw)
+        except (ValueError, discord.HTTPException) as exc:
+            return await interaction.followup.send(f"❌ No se pudo completar el reroll: {exc}", ephemeral=True)
         if not winners_ids:
             return await interaction.followup.send("❌ No hubo participantes en este sorteo.", ephemeral=True)
         await interaction.followup.send("✅ Nuevos ganadores elegidos y anunciados.", ephemeral=True)
@@ -320,7 +344,7 @@ class Giveaways(commands.Cog):
             timestamp=datetime.now(timezone.utc),
         )
         for gw in guild_gws:
-            parts = json.loads(gw["participants"])
+            parts = self.db.list_giveaway_participants(int(gw["message_id"]))
             end_ts = int(gw["end_time"])
             embed.add_field(
                 name=f"🎁 {gw['prize']}",

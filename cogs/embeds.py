@@ -93,12 +93,14 @@ class Embeds(commands.Cog):
 
     async def _check_embed_perms(self, interaction: discord.Interaction) -> bool:
         member = interaction.user
-        if member.guild_permissions.administrator:
+        permissions = getattr(member, "guild_permissions", None)
+        if interaction.guild is not None and permissions is not None and permissions.administrator:
             return True
-        srv_cfg = self.db.get_server_config(interaction.guild_id)
-        role_id = srv_cfg.get("embed_role_id")
-        if role_id and any(r.id == role_id for r in member.roles):
-            return True
+        if interaction.guild is not None and permissions is not None:
+            srv_cfg = self.db.get_server_config(interaction.guild_id)
+            role_id = srv_cfg.get("embed_role_id")
+            if role_id and any(r.id == int(role_id) for r in member.roles):
+                return True
             
         msg = "❌ Necesitas el **rol de embeds** configurado o ser administrador."
         if interaction.response.is_done():
@@ -120,7 +122,7 @@ class Embeds(commands.Cog):
             return
 
         builder = EmbedBuilder()
-        view = EmbedBuilderView(self, builder, interaction.user.id)
+        view = EmbedBuilderView(self, builder, interaction.user.id, interaction.guild_id)
         status = view.build_status_embed(builder)
         await interaction.followup.send(embed=status, view=view, ephemeral=True)
 
@@ -163,7 +165,7 @@ class Embeds(commands.Cog):
             )
 
         builder = EmbedBuilder.from_json(saved["embed_data"])
-        view = EmbedBuilderView(self, builder, interaction.user.id)
+        view = EmbedBuilderView(self, builder, interaction.user.id, interaction.guild_id)
         status = view.build_status_embed(builder)
         await interaction.followup.send(embed=status, view=view, ephemeral=True)
 
@@ -171,17 +173,18 @@ class Embeds(commands.Cog):
 # ── Vista principal del constructor ───────────────────────────────────────────
 
 class EmbedBuilderView(discord.ui.View):
-    def __init__(self, cog: Embeds, builder: EmbedBuilder, author_id: int):
+    def __init__(self, cog: Embeds, builder: EmbedBuilder, author_id: int, guild_id: int):
         super().__init__(timeout=600)  # 10 minutos para configurar
         self.cog = cog
         self.builder = builder
         self.author_id = author_id
+        self.guild_id = guild_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
+        if interaction.user.id != self.author_id or interaction.guild_id != self.guild_id:
             await interaction.response.send_message("❌ Solo quien creó el constructor puede usarlo.", ephemeral=True)
             return False
-        return True
+        return await self.cog._check_embed_perms(interaction)
 
     def build_status_embed(self, builder: EmbedBuilder) -> discord.Embed:
         """Embed de estado mostrando qué está configurado."""
@@ -289,6 +292,7 @@ class TitleDescModal(discord.ui.Modal, title="Título y Descripción"):
             self.embed_title.default = parent.builder.title
         if parent.builder.description:
             self.embed_desc.default = parent.builder.description
+        self.use_timestamp.default = "si" if parent.builder.timestamp else "no"
 
     async def on_submit(self, interaction: discord.Interaction):
         self.parent.builder.title = self.embed_title.value or None
@@ -310,9 +314,12 @@ class ColorModal(discord.ui.Modal, title="Color del Embed"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            self.parent.builder.color = int(self.color_input.value.strip("#"), 16)
+            color = int(self.color_input.value.strip().lstrip("#"), 16)
+            if not 0 <= color <= 0xFFFFFF:
+                raise ValueError("Color fuera del rango RGB")
         except ValueError:
             return await interaction.response.send_message("❌ Color hex inválido.", ephemeral=True)
+        self.parent.builder.color = color
         await self.parent._refresh(interaction)
 
 
@@ -349,8 +356,12 @@ class AuthorFooterModal(discord.ui.Modal, title="Autor y Footer"):
         self.parent = parent
         if parent.builder.author_name:
             self.author_name.default = parent.builder.author_name
+        if parent.builder.author_icon:
+            self.author_icon.default = parent.builder.author_icon
         if parent.builder.footer_text:
             self.footer_text.default = parent.builder.footer_text
+        if parent.builder.footer_icon:
+            self.footer_icon.default = parent.builder.footer_icon
 
     async def on_submit(self, interaction: discord.Interaction):
         self.parent.builder.author_name = self.author_name.value or None
@@ -374,6 +385,8 @@ class FieldModal(discord.ui.Modal, title="Añadir Campo"):
         self.parent = parent
 
     async def on_submit(self, interaction: discord.Interaction):
+        if len(self.parent.builder.fields) >= 25:
+            return await interaction.response.send_message("❌ Máximo 25 campos.", ephemeral=True)
         self.parent.builder.fields.append({
             "name": self.field_name.value,
             "value": self.field_value.value,
@@ -409,7 +422,11 @@ class SaveEmbedModal(discord.ui.Modal, title="Guardar Embed"):
         self.parent = parent
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await self.parent.interaction_check(interaction):
+            return
         name = self.embed_name.value.strip()
+        if not name:
+            return await interaction.response.send_message("❌ Escribe un nombre para el embed.", ephemeral=True)
         existing = self.parent.cog.db.get_saved_embed_by_name(interaction.guild_id, name)
         if existing:
             return await interaction.response.send_message(
@@ -429,31 +446,43 @@ class SendChannelSelectView(discord.ui.View):
         super().__init__(timeout=60)
         self.parent = parent
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.parent.interaction_check(interaction)
+
     @discord.ui.select(
         cls=discord.ui.ChannelSelect, placeholder="Selecciona el canal de destino",
         channel_types=[discord.ChannelType.text, discord.ChannelType.news],
         min_values=1, max_values=1,
     )
     async def select_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        if not await self.parent.interaction_check(interaction):
+            return
         channel = select.values[0]
         resolved = interaction.guild.get_channel(channel.id)
         if not resolved:
             return await interaction.response.send_message("❌ Canal no encontrado.", ephemeral=True)
+        actor_perms = resolved.permissions_for(interaction.user)
+        if not actor_perms.view_channel or not actor_perms.send_messages:
+            return await interaction.response.send_message(
+                "❌ No tienes permiso para ver y enviar mensajes en ese canal.", ephemeral=True
+            )
 
+        await interaction.response.defer()
         try:
             embed = self.parent.builder.build()
-            await resolved.send(embed=embed)
+            from cogs._managed_messages import send_managed
+            await send_managed(interaction.client, interaction.guild_id, "embeds", resolved.send, embed=embed)
             status = self.parent.build_status_embed(self.parent.builder)
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"✅ Embed enviado a {resolved.mention}.",
                 embed=status, view=self.parent,
             )
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ No tengo permisos para enviar mensajes en {resolved.mention}.", ephemeral=True,
             )
         except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @discord.ui.button(label="Volver", emoji="◀️", style=discord.ButtonStyle.secondary)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):

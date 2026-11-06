@@ -1,11 +1,12 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { apiGet, apiPatch, apiPost, apiDelete, apiPut } from "../lib/api";
 import { Icon } from "../lib/icons";
 import { SearchableSelect } from "./ui";
 import Toast from "./Toast";
 import { useSaveBar } from "../lib/SaveBarContext";
-import MessageEditor, { EMPTY_MESSAGE, normalizeMessage } from "./MessageEditor";
+import MessageEditor, { EMPTY_MESSAGE, normalizeMessage, MessagePreview } from "./MessageEditor";
 import EmojiPicker from "./EmojiPicker";
+import "./DashboardPanels.css";
 
 const TEMPLATE_PRESETS = [
   {
@@ -96,7 +97,18 @@ const DEFAULT_CAT = {
   description: "",
   questions: "¿En qué podemos ayudarte?"};
 
-export default function Tickets({ selectedGuild: guildId }) {
+function roleIds(value) {
+  try {
+    const ids = typeof value === "string" ? JSON.parse(value) : value;
+    return Array.isArray(ids) ? ids.map(String) : [];
+  } catch { return []; }
+}
+
+export default function Tickets({ selectedGuild }) {
+  return <TicketSettings key={selectedGuild} guildId={selectedGuild} />;
+}
+
+function TicketSettings({ guildId }) {
   const [tab, setTab] = useState("config");
   const [cfg, setCfg] = useState(null);
   const [categories, setCategories] = useState([]);
@@ -105,6 +117,13 @@ export default function Tickets({ selectedGuild: guildId }) {
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
+  const [loadError, setLoadError] = useState("");
+  const [templateBaseline, setTemplateBaseline] = useState(JSON.stringify({ key: "panel_select", name: "", json: "{}" }));
+  const [categoryDrafts, setCategoryDrafts] = useState({});
+  const [savingAll, setSavingAll] = useState(false);
+  const [panelSent, setPanelSent] = useState(false);
+  const active = useRef(true);
+  const loadVersion = useRef(0);
 
   // Estado UI: nueva categoría / editar plantilla
   const [newCat, setNewCat] = useState(DEFAULT_CAT);
@@ -116,39 +135,59 @@ export default function Tickets({ selectedGuild: guildId }) {
   const [panelChannel, setPanelChannel] = useState("");
   const [sendingPanel, setSendingPanel] = useState(false);
 
-  const showToast = (msg, type = "success") => setToast({ msg, type });
+  const showToast = (msg, type = "success") => { if (active.current) setToast({ msg, type }); };
+  const templateDirty = JSON.stringify(tplDraft) !== templateBaseline;
+  const newCategoryDirty = JSON.stringify(newCat) !== JSON.stringify(DEFAULT_CAT);
+  const hasChanges = dirty || templateDirty || newCategoryDirty || Object.keys(categoryDrafts).length > 0;
+  const trackCategoryDraft = useCallback((id, payload) => {
+    setCategoryDrafts((previous) => { const next = { ...previous }; if (payload) next[id] = payload; else delete next[id]; return next; });
+  }, []);
 
   const load = useCallback(async () => {
     if (!guildId) return;
+    const version = ++loadVersion.current;
     setLoading(true);
-    setDirty(false);
+    setLoadError("");
     try {
       const [tData, tplData] = await Promise.all([
         apiGet(`/api/guilds/${guildId}/tickets`),
         apiGet(`/api/guilds/${guildId}/tickets/templates`).catch(() => ({
           templates: []})),
       ]);
+      if (!active.current || version !== loadVersion.current) return;
       setCfg(tData.config || {});
+      setDirty(false);
+      setCategoryDrafts({});
+      setNewCat(DEFAULT_CAT);
+      const emptyDraft = { key: "panel_select", name: "", json: "{}" };
+      setTplDraft(emptyDraft);
+      setTemplateBaseline(JSON.stringify(emptyDraft));
       setCategories(tData.categories || []);
       setTemplates(tplData.templates || []);
-    } catch {
-      showToast("Error cargando tickets", "error");
+    } catch (error) {
+      if (active.current && version === loadVersion.current) setLoadError(error.message || "No pudimos cargar los tickets.");
     } finally {
-      setLoading(false);
+      if (active.current && version === loadVersion.current) setLoading(false);
     }
   }, [guildId]);
 
   useEffect(() => {
+    active.current = true;
     load();
+    return () => { active.current = false; loadVersion.current += 1; };
   }, [load]);
 
   const set = (k, v) => {
     setCfg((p) => ({ ...p, [k]: v }));
     setDirty(true);
   };
-  const setId = (k) => (v) => set(k, v ? parseInt(v, 10) : null);
+  const setId = (k) => (v) => set(k, v ? String(v) : null);
 
   const save = async () => {
+    if (!cfg) return false;
+    const invalid = document.querySelector(".cr-tickets input:invalid");
+    if (invalid) { invalid.reportValidity(); return false; }
+    if ([cfg.max_tickets_per_user, cfg.ticket_cooldown_seconds].some((value) => value === "")) { showToast("Completa los límites de tickets antes de guardar.", "error"); return false; }
     setSaving(true);
     try {
       const payload = {
@@ -165,10 +204,14 @@ export default function Tickets({ selectedGuild: guildId }) {
         msg_open_template: cfg.msg_open_template ?? null,
         msg_close_template: cfg.msg_close_template ?? null};
       await apiPatch(`/api/guilds/${guildId}/tickets`, payload);
+      if (!active.current) return false;
       setDirty(false);
-      showToast("Configuración guardada");
+      setPanelSent(false);
+      showToast("Configuración guardada. El panel aún no se ha publicado de nuevo.");
+      return true;
     } catch (e) {
       showToast(e.message, "error");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -194,8 +237,10 @@ export default function Tickets({ selectedGuild: guildId }) {
       const data = await apiGet(`/api/guilds/${guildId}/tickets`, { cache: false });
       setCategories(data.categories || []);
       showToast("Categoría añadida");
+      return true;
     } catch (e) {
       showToast(e.message, "error");
+      return false;
     } finally {
       setAddingCat(false);
     }
@@ -205,6 +250,7 @@ export default function Tickets({ selectedGuild: guildId }) {
     try {
       await apiDelete(`/api/guilds/${guildId}/tickets/categories/${catId}`);
       setCategories((c) => c.filter((x) => x.id !== catId));
+      trackCategoryDraft(catId, null);
       showToast("Categoría eliminada");
     } catch (e) {
       showToast(e.message, "error");
@@ -219,14 +265,18 @@ export default function Tickets({ selectedGuild: guildId }) {
       );
       const data = await apiGet(`/api/guilds/${guildId}/tickets`, { cache: false });
       setCategories(data.categories || []);
+      trackCategoryDraft(catId, null);
       showToast("Categoría actualizada");
+      return true;
     } catch (e) {
       showToast(e.message, "error");
+      return false;
     }
   };
 
   // ── Plantillas ─────────────────────────────────────────────────────────────
   const saveTemplate = async () => {
+    if (!tplDraft.key.trim()) { showToast("Escribe una clave para la plantilla.", "error"); return false; }
     let parsed;
     try {
       parsed = JSON.parse(tplDraft.json || "{}");
@@ -244,9 +294,13 @@ export default function Tickets({ selectedGuild: guildId }) {
         { cache: false },
       );
       setTemplates(data.templates || []);
-      showToast("Plantilla guardada");
+      setTemplateBaseline(JSON.stringify(tplDraft));
+      setPanelSent(false);
+      showToast("Plantilla guardada. Publica el panel para mostrarla en Discord.");
+      return true;
     } catch (e) {
       showToast(e.message, "error");
+      return false;
     } finally {
       setSavingTpl(false);
     }
@@ -266,10 +320,10 @@ export default function Tickets({ selectedGuild: guildId }) {
   };
 
   const loadTemplateInDraft = (tpl) => {
-    setTplDraft({
-      key: tpl.template_key,
-      name: tpl.name || "",
-      json: JSON.stringify(tpl.embed_data || {}, null, 2)});
+    if (templateDirty && !window.confirm("Hay cambios en la plantilla actual. ¿Quieres descartarlos y abrir otra?")) return;
+    const next = { key: tpl.template_key, name: tpl.name || "", json: JSON.stringify(tpl.embed_data || {}, null, 2) };
+    setTplDraft(next);
+    setTemplateBaseline(JSON.stringify(next));
   };
 
   // Mensaje renderizado desde el JSON crudo (para MessageEditor).
@@ -281,6 +335,7 @@ export default function Tickets({ selectedGuild: guildId }) {
   };
 
   const applyPreset = (preset) => {
+    if (templateDirty && !window.confirm("¿Quieres reemplazar los cambios actuales por esta plantilla base?")) return;
     setTplDraft({
       key: preset.key,
       name: preset.name,
@@ -291,12 +346,14 @@ export default function Tickets({ selectedGuild: guildId }) {
 
   // ── Panel ──────────────────────────────────────────────────────────────────
   const sendPanel = async () => {
+    if (hasChanges) return showToast("Guarda los cambios antes de publicar el panel.", "error");
     if (!panelChannel) return showToast("Selecciona un canal", "error");
     setSendingPanel(true);
     try {
       await apiPost(`/api/guilds/${guildId}/tickets/send-panel`, {
-        channel_id: parseInt(panelChannel)});
-      showToast("Panel enviado");
+        channel_id: String(panelChannel)});
+      setPanelSent(true);
+      showToast("Panel publicado en Discord");
     } catch (e) {
       showToast(e.message, "error");
     } finally {
@@ -304,7 +361,21 @@ export default function Tickets({ selectedGuild: guildId }) {
     }
   };
 
-  useSaveBar({ dirty, saving, onSave: save, onRevert: load });
+  const saveAll = async () => {
+    setSavingAll(true);
+    let failed = false;
+    try {
+      if (dirty && !(await save())) failed = true;
+      if (templateDirty && !(await saveTemplate())) failed = true;
+      for (const [id, payload] of Object.entries(categoryDrafts)) {
+        if (!(await patchCategory(id, payload))) failed = true;
+      }
+      if (newCategoryDirty && !(await addCategory())) failed = true;
+      if (failed) showToast("Quedan cambios sin guardar. Revisa los campos y vuelve a intentarlo.", "error");
+      return !failed;
+    } finally { setSavingAll(false); }
+  };
+  useSaveBar({ dirty: hasChanges, saving: saving || savingTpl || addingCat || savingAll, onSave: saveAll, onRevert: load });
 
   if (loading)
     return (
@@ -313,6 +384,8 @@ export default function Tickets({ selectedGuild: guildId }) {
         <p>Cargando tickets…</p>
       </div>
     );
+
+  if (!cfg) return <div className="cr-page cr-empty" role="alert"><Icon name="warning" /><h2>No pudimos cargar los tickets</h2><p>{loadError}</p><button className="btn-secondary" onClick={load}>Reintentar</button></div>;
 
   // Renderers SearchableSelect
   const renderTextChannel = (opt) => (
@@ -357,19 +430,13 @@ export default function Tickets({ selectedGuild: guildId }) {
   const tplOptionsWithNone = [{ id: "", name: "(Sin plantilla)" }, ...tplOptions];
 
   return (
-    <div className="ov-container animate-fade-in">
+    <div className="cr-page cr-tickets">
       <Toast toast={toast} onDismiss={() => setToast(null)} />
+      <fieldset className="cr-fieldset" disabled={savingAll}>
 
-      <div className="section-header">
-        <h2
-          style={{
-          }}
-        >
-          Tickets
-        </h2>
-      </div>
+      <header className="cr-heading"><span className="cr-heading-icon"><Icon name="tickets" /></span><div><span className="cr-eyebrow">Comunidad</span><h1>Tickets</h1><p>De una pregunta a una conversación con tu equipo.</p></div></header>
 
-      <div className="tabs-container">
+      <nav className="cr-tabs" aria-label="Opciones de tickets">
         {[
           ["config", "Configuración"],
           ["categories", `Categorías (${categories.length})`],
@@ -378,27 +445,24 @@ export default function Tickets({ selectedGuild: guildId }) {
         ].map(([id, label]) => (
           <button
             key={id}
-            className={`tab-btn ${tab === id ? "active" : ""}`}
+            aria-pressed={tab === id}
             onClick={() => setTab(id)}
           >
             {label}
           </button>
         ))}
-      </div>
+      </nav>
 
       {/* ── Config ── */}
       {tab === "config" && cfg && (
-        <>
-          <div className="glass-panel" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
+        <div className="cr-ticket-config-layout"><div className="cr-ticket-settings">
+          <div className="cr-editor-panel" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
             <div className="section-title">
               <h3 style={{ margin: 0 }}>Canales y permisos</h3>
             </div>
 
             <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))",
-                gap: 16}}
+              className="cr-form-grid"
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Canal del panel</label>
@@ -444,13 +508,25 @@ export default function Tickets({ selectedGuild: guildId }) {
                   )}
                 />
               </div>
+              <div className="config-item" style={{ marginBottom: 0 }}>
+                <label>Roles de soporte para todos los tickets</label>
+                <SearchableSelect
+                  multiple
+                  ariaLabel="Roles de soporte para todos los tickets"
+                  value={roleIds(cfg.allowed_roles)}
+                  onChange={(values) => set("allowed_roles", JSON.stringify(values))}
+                  endpoint={`/api/guilds/${guildId}/roles`}
+                  itemsKey="roles"
+                  placeholder="Selecciona uno o varios roles…"
+                  renderOption={renderRole}
+                  renderSelected={renderRole}
+                />
+                <p className="cr-hint">Cualquiera de estos roles puede ver, tomar y cerrar tickets. Los administradores conservan el acceso. Al guardar se actualizan también los tickets abiertos.</p>
+              </div>
             </div>
 
             <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
-                gap: 16}}
+              className="cr-form-grid"
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Plantilla nombre del canal</label>
@@ -470,7 +546,7 @@ export default function Tickets({ selectedGuild: guildId }) {
                   type="number"
                   min="0"
                   value={cfg.max_tickets_per_user ?? 0}
-                  onChange={(e) => set("max_tickets_per_user", parseInt(e.target.value))}
+                  onChange={(e) => set("max_tickets_per_user", e.target.value === "" ? "" : Number(e.target.value))}
                 />
                 <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>0 = sin límite</span>
               </div>
@@ -480,14 +556,14 @@ export default function Tickets({ selectedGuild: guildId }) {
                   type="number"
                   min="0"
                   value={cfg.ticket_cooldown_seconds ?? 0}
-                  onChange={(e) => set("ticket_cooldown_seconds", parseInt(e.target.value))}
+                  onChange={(e) => set("ticket_cooldown_seconds", e.target.value === "" ? "" : Number(e.target.value))}
                 />
               </div>
             </div>
           </div>
 
           <div
-            className="glass-panel"
+            className="cr-editor-panel"
             style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16 }}
           >
             <div className="section-title">
@@ -498,10 +574,7 @@ export default function Tickets({ selectedGuild: guildId }) {
               </p>
             </div>
             <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
-                gap: 16}}
+              className="cr-form-grid"
             >
               {[
                 ["panel_select_template", "Panel de selección"],
@@ -527,27 +600,24 @@ export default function Tickets({ selectedGuild: guildId }) {
           </div>
 
 
-        </>
+        </div><aside className="cr-ticket-config-preview"><h2>El panel para tu comunidad</h2><p className="cr-hint">Vista previa de la plantilla elegida para el panel. Publicar en Discord es una acción separada.</p><details className="cr-preview-disclosure" open><summary>Vista previa en Discord</summary><MessagePreview value={templateToMessage(templates.find((template) => template.template_key === cfg.panel_select_template)?.embed_data || TEMPLATE_PRESETS[0].seed)} /></details><div className="cr-context-note"><Icon name="info" /><p>La categoría y los roles elegidos organizan quién atenderá cada conversación.</p></div><button className="btn-secondary" onClick={() => setTab("panel")}><Icon name="send" />Ir a publicar el panel</button></aside></div>
       )}
 
       {/* ── Categorías ── */}
       {tab === "categories" && (
         <>
-          <div className="glass-panel" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 12 }}>
+          <fieldset className="cr-editor-panel" disabled={addingCat} style={{ margin: 0, padding: 24, display: "flex", flexDirection: "column", gap: 12 }}>
             <div className="section-title">
               <h3 style={{ margin: 0 }}>Nueva categoría</h3>
             </div>
             <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "120px 1fr 1fr",
-                gap: 12,
-                alignItems: "end"}}
+              className="cr-form-grid"
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Emoji</label>
                 <EmojiPicker
                   guildId={guildId}
+                  disabled={addingCat}
                   value={newCat.emoji}
                   onChange={(v) => setNewCat({ ...newCat, emoji: v })}
                 />
@@ -599,7 +669,7 @@ export default function Tickets({ selectedGuild: guildId }) {
                 <Icon name="add" /> {addingCat ? "Añadiendo…" : "Añadir categoría"}
               </button>
             </div>
-          </div>
+          </fieldset>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 16 }}>
             {categories.length === 0 ? (
@@ -609,11 +679,13 @@ export default function Tickets({ selectedGuild: guildId }) {
             ) : (
               categories.map((cat) => (
                 <CategoryRow
-                  key={cat.id}
+                  key={`${cat.id}-${JSON.stringify(cat)}`}
                   category={cat}
+                  pendingDraft={categoryDrafts[cat.id]}
                   templates={tplOptionsWithNone}
                   guildId={guildId}
                   onSave={(payload) => patchCategory(cat.id, payload)}
+                  onDraftChange={(payload) => trackCategoryDraft(cat.id, payload)}
                   onDelete={() => deleteCat(cat.id)}
                   renderTemplate={renderTemplate}
                   renderRole={renderRole}
@@ -627,7 +699,7 @@ export default function Tickets({ selectedGuild: guildId }) {
       {/* ── Plantillas ── */}
       {tab === "templates" && (
         <>
-          <div className="glass-panel" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 14 }}>
+          <div className="cr-editor-panel" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 14 }}>
             <div className="section-title">
               <h3 style={{ margin: 0 }}>Editor de plantillas</h3>
               <p style={{ margin: 0, fontSize: "0.78rem", color: "var(--muted)" }}>
@@ -639,10 +711,7 @@ export default function Tickets({ selectedGuild: guildId }) {
             </div>
 
             <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 12}}
+              className="cr-form-grid"
             >
               <div className="config-item" style={{ marginBottom: 0 }}>
                 <label>Clave</label>
@@ -686,7 +755,7 @@ export default function Tickets({ selectedGuild: guildId }) {
 
             <div style={{ background: "rgba(99,102,241,0.06)", border: "1px solid rgba(139,92,246,0.18)", padding: 12, borderRadius: 12 }}>
               <div style={{ fontSize: "0.78rem", color: "var(--muted)", marginBottom: 8 }}>
-                💡 Plantillas predefinidas — pulsa para cargar una base profesional y editarla:
+                Plantillas base — elige una para empezar:
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {TEMPLATE_PRESETS.map((p) => (
@@ -698,7 +767,7 @@ export default function Tickets({ selectedGuild: guildId }) {
                     className="btn-secondary"
                     style={{ fontSize: "0.76rem", padding: "5px 12px" }}
                   >
-                    📋 {p.name}
+                    {p.name}
                   </button>
                 ))}
               </div>
@@ -786,7 +855,7 @@ export default function Tickets({ selectedGuild: guildId }) {
 
       {/* ── Panel send ── */}
       {tab === "panel" && (
-        <div className="glass-panel" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 14 }}>
+        <div className="cr-editor-panel" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 14 }}>
           <div className="section-title">
             <h3 style={{ margin: 0 }}>Enviar panel</h3>
             <p style={{ margin: 0, fontSize: "0.78rem", color: "var(--muted)" }}>
@@ -796,11 +865,7 @@ export default function Tickets({ selectedGuild: guildId }) {
             </p>
           </div>
           <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr auto",
-              gap: 12,
-              alignItems: "end"}}
+            className="cr-form-grid"
           >
             <div className="config-item" style={{ marginBottom: 0 }}>
               <label>Canal</label>
@@ -818,22 +883,24 @@ export default function Tickets({ selectedGuild: guildId }) {
             </div>
             <button
               className="btn-primary"
-              disabled={sendingPanel}
+              disabled={sendingPanel || hasChanges}
               onClick={sendPanel}
             >
-              <Icon name="send" /> {sendingPanel ? "Enviando…" : "Enviar panel"}
+              <Icon name="send" /> {sendingPanel ? "Publicando…" : "Publicar panel en Discord"}
             </button>
           </div>
+          <p className={panelSent ? "cr-published-status" : "cr-hint"} role="status">{panelSent ? "Panel publicado en Discord." : hasChanges ? "Guarda los cambios pendientes antes de publicar." : "Se publicará la configuración guardada. Guardar no publica el panel."}</p>
         </div>
       )}
+      </fieldset>
     </div>
   );
 }
 
 // ── Subcomponente: fila de categoría editable ────────────────────────────────
-function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTemplate, renderRole }) {
+function CategoryRow({ category, pendingDraft, templates, guildId, onSave, onDelete, onDraftChange, renderTemplate, renderRole }) {
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState({
+  const baseline = {
     name: category.name || "",
     emoji: category.emoji || "",
     description: category.description || "",
@@ -845,9 +912,16 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
       }
     })(),
     welcome_embed_template_key: category.welcome_embed_template_key || "",
-    staff_role_id: category.staff_role_id || ""});
+    staff_role_ids: roleIds(category.staff_role_ids ?? (category.staff_role_id ? [category.staff_role_id] : []))};
+  const [draft, setRawDraft] = useState(() => pendingDraft ? { ...pendingDraft, questions: pendingDraft.questions.join("\n"), welcome_embed_template_key: pendingDraft.welcome_embed_template_key || "", staff_role_ids: pendingDraft.staff_role_ids || [] } : baseline);
 
-  const handleSave = () => {
+  const [rowSaving, setRowSaving] = useState(false);
+  useSaveBar({ dirty: false, saving: rowSaving });
+  const initialDraft = useRef(baseline);
+  const payloadFor = (value) => ({ ...value, questions: value.questions.split("\n").map((question) => question.trim()).filter(Boolean), welcome_embed_template_key: value.welcome_embed_template_key || null, staff_role_ids: value.staff_role_ids });
+  const setDraft = (next) => { setRawDraft(next); onDraftChange(JSON.stringify(next) === JSON.stringify(initialDraft.current) ? null : payloadFor(next)); };
+  const cancel = () => { setRawDraft(initialDraft.current); onDraftChange(null); setOpen(false); };
+  const handleSave = async () => {
     const payload = {
       name: draft.name,
       emoji: draft.emoji,
@@ -857,13 +931,14 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
         .map((q) => q.trim())
         .filter(Boolean),
       welcome_embed_template_key: draft.welcome_embed_template_key || null,
-      staff_role_id: draft.staff_role_id ? parseInt(draft.staff_role_id) : null};
-    onSave(payload);
-    setOpen(false);
+      staff_role_ids: draft.staff_role_ids};
+    if (!draft.name.trim()) return;
+    setRowSaving(true);
+    try { if (await onSave(payload)) setOpen(false); } finally { setRowSaving(false); }
   };
 
   return (
-    <div
+    <fieldset disabled={rowSaving}
       style={{
         background: "var(--panel)",
         border: "1px solid var(--border)",
@@ -916,10 +991,7 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
             background: "var(--bg-2)"}}
         >
           <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "120px 1fr 1fr",
-              gap: 12}}
+            className="cr-form-grid"
           >
             <div className="config-item" style={{ marginBottom: 0 }}>
               <label>Emoji</label>
@@ -968,10 +1040,7 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
           </div>
 
           <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 12}}
+            className="cr-form-grid"
           >
             <div className="config-item" style={{ marginBottom: 0 }}>
               <label>Plantilla de bienvenida</label>
@@ -989,13 +1058,15 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
               />
             </div>
             <div className="config-item" style={{ marginBottom: 0 }}>
-              <label>Rol de staff específico</label>
+              <label>Roles de soporte adicionales de esta categoría</label>
               <SearchableSelect
-                value={draft.staff_role_id || ""}
-                onChange={(v) => setDraft({ ...draft, staff_role_id: v || "" })}
+                multiple
+                ariaLabel="Roles de soporte adicionales de esta categoría"
+                value={draft.staff_role_ids}
+                onChange={(values) => setDraft({ ...draft, staff_role_ids: values })}
                 endpoint={`/api/guilds/${guildId}/roles`}
                 itemsKey="roles"
-                placeholder="(Hereda del global)"
+                placeholder="Selecciona roles adicionales…"
                 renderOption={renderRole}
                 renderSelected={(opt) => (
                   <>
@@ -1008,19 +1079,20 @@ function CategoryRow({ category, templates, guildId, onSave, onDelete, renderTem
                   </>
                 )}
               />
+              <p className="cr-hint">Se suman a los roles globales. Si los quitas, esos roles pierden el acceso que otorgaba esta categoría al guardar, también en tickets abiertos.</p>
             </div>
           </div>
 
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn-primary" onClick={handleSave}>
+            <button className="btn-primary" disabled={rowSaving} onClick={handleSave}>
               <Icon name="save" /> Guardar cambios
             </button>
-            <button className="btn-secondary" onClick={() => setOpen(false)}>
+            <button className="btn-secondary" disabled={rowSaving} onClick={cancel}>
               Cancelar
             </button>
           </div>
         </div>
       )}
-    </div>
+    </fieldset>
   );
 }

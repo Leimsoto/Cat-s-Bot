@@ -1,3 +1,4 @@
+import { useSaveBar } from "../lib/SaveBarContext";
 /**
  * components/Giveaways.jsx
  * ────────────────────────
@@ -93,12 +94,12 @@ export default function Giveaways({ selectedGuild, onToast }) {
     setCreating(true);
     try {
       await apiPost(`/api/guilds/${guildId}/giveaways`, {
-        channel_id: Number(form.channel_id),
+        channel_id: String(form.channel_id),
         prize: form.prize.trim(),
         duration_hours: Number(form.duration_hours),
         winners_count: Math.max(1, parseInt(form.winners_count, 10) || 1),
-        req_roles: form.req_roles.map(Number),
-        deny_roles: form.deny_roles.map(Number)});
+        req_roles: form.req_roles.map(String),
+        deny_roles: form.deny_roles.map(String)});
       toast("success", "Sorteo creado");
       setForm(EMPTY_FORM);
       setShowCreate(false);
@@ -136,6 +137,8 @@ export default function Giveaways({ selectedGuild, onToast }) {
       setBusyId(null);
     }
   };
+
+  useSaveBar({ dirty: showCreate && JSON.stringify(form) !== JSON.stringify(EMPTY_FORM), saving: creating || busyId != null, onRevert: () => { setForm(EMPTY_FORM); setShowCreate(false); } });
 
   if (loading) return <div className="loader">Cargando sorteos…</div>;
 
@@ -261,7 +264,7 @@ export default function Giveaways({ selectedGuild, onToast }) {
           <p className="subtitle" style={{ margin: 0 }}>Crea uno con el botón de arriba.</p>
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(min(100%,320px),1fr))", gap: 16 }}>
           {filtered.map((g) => {
             const stColor = STATUS_COLOR[g.status] || "#7a9bb5";
             const isActive = g.status === "active";

@@ -31,6 +31,15 @@ def _can_manage(member: discord.Member) -> bool:
     return member.guild_permissions.administrator or member.guild_permissions.manage_messages
 
 
+async def _require_manage(interaction: discord.Interaction) -> bool:
+    if interaction.guild is not None and _can_manage(interaction.user):
+        return True
+    await interaction.response.send_message(
+        "❌ Necesitas el permiso **Gestionar Mensajes** para modificar tags.", ephemeral=True
+    )
+    return False
+
+
 async def _tag_autocomplete(interaction: discord.Interaction, current: str):
     tags = interaction.client.db.get_all_tags(interaction.guild_id)
     return [
@@ -61,8 +70,15 @@ class TagCreateModal(discord.ui.Modal, title="Crear Tag"):
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await _require_manage(interaction):
+            return
         name = self.name_input.value.strip().lower()
         content = self.content_input.value.strip()
+
+        if not name or not content:
+            return await interaction.response.send_message(
+                "❌ El nombre y el contenido del tag no pueden quedar en blanco.", ephemeral=True
+            )
 
         if not name.isidentifier() and " " in name:
             return await interaction.response.send_message(
@@ -99,7 +115,14 @@ class TagEditModal(discord.ui.Modal, title="Editar Tag"):
         self.content_input.default = current_content
 
     async def on_submit(self, interaction: discord.Interaction):
-        self.cog.db.update_tag(interaction.guild_id, self.tag_name, self.content_input.value.strip())
+        if not await _require_manage(interaction):
+            return
+        content = self.content_input.value.strip()
+        if not content:
+            return await interaction.response.send_message("❌ El contenido no puede quedar en blanco.", ephemeral=True)
+        if not self.cog.db.get_tag(interaction.guild_id, self.tag_name):
+            return await interaction.response.send_message("❌ Este tag ya no existe.", ephemeral=True)
+        self.cog.db.update_tag(interaction.guild_id, self.tag_name, content)
         await interaction.response.send_message(f"✅ Tag **{self.tag_name}** actualizado.", ephemeral=True)
 
 
@@ -116,10 +139,12 @@ class TagDeleteView(discord.ui.View):
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("❌ Solo quien ejecutó el comando puede confirmar.", ephemeral=True)
             return False
-        return True
+        return await _require_manage(interaction)
 
     @discord.ui.button(label="Eliminar", style=discord.ButtonStyle.danger, emoji="🗑️")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.interaction_check(interaction):
+            return
         self.cog.db.delete_tag(interaction.guild_id, self.tag_name)
         await interaction.response.edit_message(content=f"✅ Tag **{self.tag_name}** eliminado.", embed=None, view=None)
         self.stop()
@@ -150,8 +175,9 @@ class Tags(commands.Cog):
             return await interaction.response.send_message(
                 f"❌ No existe ningún tag con el nombre **{nombre}**.", ephemeral=True
             )
+        from cogs._managed_messages import send_managed
+        await send_managed(self.bot, interaction.guild_id, "tags", interaction.response.send_message, tag["content"])
         self.db.increment_tag_uses(interaction.guild_id, nombre.lower())
-        await interaction.response.send_message(tag["content"])
 
     @tag_group.command(name="create", description="Crea un nuevo tag del servidor")
     @app_commands.default_permissions(manage_messages=True)

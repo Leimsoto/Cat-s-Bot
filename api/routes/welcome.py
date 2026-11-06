@@ -10,6 +10,7 @@ PATCH /api/guilds/{id}/welcome/invites  → actualizar config de invitaciones
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps import get_db, require_guild_admin
+from api.snowflakes import coerce_optional_snowflake, stringify_fields
 
 router = APIRouter(prefix="/api/guilds", tags=["welcome"])
 
@@ -25,9 +26,9 @@ async def get_welcome(
     boost = db.get_boost_config(guild_id)
     invite = db.get_invite_config(guild_id)
     return {
-        "welcome": cfg,
-        "boost": boost,
-        "invites": invite,
+        "welcome": stringify_fields(cfg, ("guild_id", "channel_id")),
+        "boost": stringify_fields(boost, ("guild_id", "channel_id")),
+        "invites": stringify_fields(invite, ("guild_id", "channel_id")),
     }
 
 
@@ -41,10 +42,12 @@ async def patch_welcome(
     """Actualiza la configuración del sistema de bienvenidas."""
     allowed = {"channel_id", "embed_data", "enabled"}
     update = {k: v for k, v in body.items() if k in allowed}
+    if "channel_id" in update:
+        update["channel_id"] = coerce_optional_snowflake(update["channel_id"], "channel_id")
     if not update:
         raise HTTPException(400, "Sin campos válidos")
     db.set_welcome_config(guild_id, **update)
-    return {"status": "ok"}
+    return {"status": "ok", "welcome": stringify_fields(db.get_welcome_config(guild_id), ("guild_id", "channel_id"))}
 
 
 @router.patch("/{guild_id}/welcome/boost")
@@ -57,10 +60,12 @@ async def patch_boost(
     """Actualiza la configuración del sistema de agradecimiento a boosters."""
     allowed = {"channel_id", "embed_data", "gif_url", "enabled"}
     update = {k: v for k, v in body.items() if k in allowed}
+    if "channel_id" in update:
+        update["channel_id"] = coerce_optional_snowflake(update["channel_id"], "channel_id")
     if not update:
         raise HTTPException(400, "Sin campos válidos")
     db.set_boost_config(guild_id, **update)
-    return {"status": "ok"}
+    return {"status": "ok", "boost": stringify_fields(db.get_boost_config(guild_id), ("guild_id", "channel_id"))}
 
 
 @router.patch("/{guild_id}/welcome/invites")
@@ -73,7 +78,9 @@ async def patch_invite_config(
     """Actualiza la configuración del canal de log de invitaciones."""
     allowed = {"channel_id", "enabled"}
     update = {k: v for k, v in body.items() if k in allowed}
+    if "channel_id" in update:
+        update["channel_id"] = coerce_optional_snowflake(update["channel_id"], "channel_id")
     if not update:
         raise HTTPException(400, "Sin campos válidos")
     db.set_invite_config(guild_id, **update)
-    return {"status": "ok"}
+    return {"status": "ok", "invites": stringify_fields(db.get_invite_config(guild_id), ("guild_id", "channel_id"))}

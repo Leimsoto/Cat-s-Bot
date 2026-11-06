@@ -4,18 +4,20 @@ cogs/channels.py
 Gestión de canales.
 
 Comandos slash:
-  /lock         – Bloquear canal (deniega envío a @everyone)
-  /unlock       – Desbloquear canal
-  /clear        – Eliminar N mensajes (1-100)
-  /clearall     – Eliminar TODOS los mensajes (con confirmación)
-  /slowmode     – Configurar modo lento
+  /bloquear     – Bloquear canal (deniega envío a @everyone)
+  /desbloquear  – Desbloquear canal
+  /limpiar      – Eliminar N mensajes (1-100)
+  /limpiar_todo – Eliminar TODOS los mensajes (con confirmación)
+  /modo_lento   – Configurar modo lento
   /channelsetup – Panel interactivo: multimedia-only y autorreacción
 
-Requiere permiso: manage_messages o administrator.
+Los permisos se validan contra el canal objetivo mediante permissions_for().
+Los roles internos del bot nunca sustituyen los permisos efectivos de Discord.
 """
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -25,33 +27,115 @@ from discord.ext import commands
 
 logger = logging.getLogger("Channels")
 
+# Una secuencia emoji Unicode (incluye familias, tonos, banderas y keycaps).
+_EMOJI_BASE = r"[\u00a9\u00ae\u203c\u2049\u2122\u2139\u2194-\u21ff\u2300-\u23ff\u24c2\u25aa-\u27bf\u2934\u2935\u2b05-\u2b55\u3030\u303d\u3297\u3299\U0001f170\U0001f171\U0001f17e\U0001f17f\U0001f18e\U0001f191-\U0001f19a\U0001f201-\U0001f251\U0001f300-\U0001faff]"
+_EMOJI_PART = _EMOJI_BASE + r"\ufe0f?[\U0001f3fb-\U0001f3ff]?"
+_UNICODE_EMOJI = re.compile(
+    r"(?:[\U0001f1e6-\U0001f1ff]{2}|[0-9#*]\ufe0f?\u20e3|"
+    + _EMOJI_PART + r"(?:\u200d" + _EMOJI_PART + r")*(?:[\U000e0020-\U000e007e]+\U000e007f)?)"
+)
+_CUSTOM_EMOJI = re.compile(r"<a?:[A-Za-z0-9_]{2,32}:([0-9]{1,20})>")
 
-# ── Helper: verificar rol de módulo ───────────────────────────────────────────
 
-async def check_channel_perms(interaction: discord.Interaction) -> bool:
-    """Verifica que el usuario tenga permisos de gestión de canales."""
+async def validate_auto_reactions(bot, guild, channel, emojis, *, enabled=True):
+    """Valida la entrada compartida por dashboard y /channelsetup."""
+    if not isinstance(emojis, list) or len(emojis) > 20:
+        raise ValueError("Elige un máximo de 20 emojis.")
+    application_emojis = None
+    for value in emojis:
+        if not isinstance(value, str) or len(value) > 100:
+            raise ValueError("Cada reacción debe ser un emoji válido.")
+        custom = _CUSTOM_EMOJI.fullmatch(value)
+        if custom is None:
+            if not _UNICODE_EMOJI.fullmatch(value):
+                raise ValueError("Cada reacción debe ser un único emoji Unicode o personalizado.")
+            continue
+        if not enabled:
+            continue
+        emoji_id = int(custom.group(1))
+        emoji = bot.get_emoji(emoji_id) or discord.utils.get(guild.emojis, id=emoji_id)
+        if emoji is not None:
+            if not emoji.is_usable():
+                raise ValueError("El bot no puede usar ese emoji.")
+            if emoji.guild.id != guild.id and (guild.me is None or not channel.permissions_for(guild.me).use_external_emojis):
+                raise ValueError("El bot necesita Usar emojis externos en este canal.")
+        else:
+            if application_emojis is None:
+                application_emojis = await bot.fetch_application_emojis()
+            if not discord.utils.get(application_emojis, id=emoji_id):
+                raise ValueError("El emoji no pertenece a este servidor ni a la aplicación del bot.")
+    if emojis and enabled:
+        perms = channel.permissions_for(guild.me) if guild.me is not None else None
+        if perms is None or not all(getattr(perms, name, False) for name in ("view_channel", "read_message_history", "add_reactions")):
+            raise ValueError("El bot necesita Ver canal, Leer historial y Añadir reacciones en este canal.")
+
+
+# ── Helpers de autorización efectiva ─────────────────────────────────────────
+
+PERMISSION_LABELS = {
+    "manage_channels": "Gestionar Canales",
+    "manage_threads": "Gestionar Hilos",
+    "manage_messages": "Gestionar Mensajes",
+    "read_message_history": "Leer el historial de mensajes",
+    "add_reactions": "Añadir reacciones",
+}
+
+
+def has_effective_channel_permission(guild, channel, member, permission: str) -> bool:
+    """Comprueba permisos resueltos tras roles y overwrites del canal."""
+    if guild is None or channel is None or member is None:
+        return False
+    if getattr(member, "id", None) == getattr(guild, "owner_id", None):
+        return True
+    guild_perms = getattr(member, "guild_permissions", None)
+    if guild_perms and getattr(guild_perms, "administrator", False):
+        return True
+    resolver = getattr(channel, "permissions_for", None)
+    if not callable(resolver):
+        return False
+    try:
+        effective = resolver(member)
+    except (AttributeError, TypeError):
+        return False
+    return bool(getattr(effective, permission, False))
+
+
+async def check_channel_perms(
+    interaction: discord.Interaction,
+    channel=None,
+    *,
+    user_permission: str,
+    bot_permissions: tuple[str, ...] = (),
+) -> bool:
+    """Autoriza usando permisos efectivos del usuario y del bot en el canal."""
     member = interaction.user
-    if interaction.guild is None or not isinstance(member, discord.Member):
+    guild = interaction.guild
+    channel = channel or interaction.channel
+    if guild is None or not hasattr(member, "guild_permissions") or channel is None:
         await interaction.response.send_message(
             "❌ Este comando solo puede usarse dentro de un servidor.",
             ephemeral=True,
         )
         return False
 
-    if member.guild_permissions.administrator or member.guild_permissions.manage_messages:
-        return True
+    if not has_effective_channel_permission(guild, channel, member, user_permission):
+        label = PERMISSION_LABELS.get(user_permission, user_permission)
+        await interaction.response.send_message(
+            f"❌ No tienes el permiso efectivo **{label}** en este canal.",
+            ephemeral=True,
+        )
+        return False
 
-    srv_cfg = interaction.client.db.get_server_config(interaction.guild_id)
-    role_id = srv_cfg.get("channels_role_id")
-    if role_id and any(r.id == role_id for r in member.roles):
-        return True
-
-    await interaction.response.send_message(
-        "❌ Necesitas el permiso **Gestionar Mensajes**, ser administrador, "
-        "o tener el rol de canales configurado.",
-        ephemeral=True,
-    )
-    return False
+    bot_member = getattr(guild, "me", None)
+    for permission in bot_permissions:
+        if not has_effective_channel_permission(guild, channel, bot_member, permission):
+            label = PERMISSION_LABELS.get(permission, permission)
+            await interaction.response.send_message(
+                f"❌ No tengo el permiso efectivo **{label}** en este canal.",
+                ephemeral=True,
+            )
+            return False
+    return True
 
 
 class Channels(commands.Cog):
@@ -66,20 +150,25 @@ class Channels(commands.Cog):
     # ─────────────────────────────────────────────────────────────────────────
 
     @app_commands.command(name="bloquear", description="Bloquea el canal — nadie puede enviar mensajes")
+    @app_commands.default_permissions(manage_channels=True)
     @app_commands.describe(razon="Razón del bloqueo")
     async def lock(
         self, interaction: discord.Interaction,
         razon: str = "Canal bloqueado por un moderador",
     ):
-        if not await check_channel_perms(interaction):
-            return
-
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
             return await interaction.response.send_message(
                 "❌ Este comando solo puede usarse en canales de texto del servidor.",
                 ephemeral=True,
             )
+        if not await check_channel_perms(
+            interaction,
+            channel,
+            user_permission="manage_channels",
+            bot_permissions=("manage_channels",),
+        ):
+            return
 
         overwrites = channel.overwrites_for(interaction.guild.default_role)
         if overwrites.send_messages is False:
@@ -88,9 +177,10 @@ class Channels(commands.Cog):
             )
 
         try:
+            overwrites.send_messages = False
             await channel.set_permissions(
                 interaction.guild.default_role,
-                send_messages=False,
+                overwrite=overwrites,
                 reason=f"Lock: {razon} | Mod: {interaction.user}",
             )
         except discord.Forbidden:
@@ -122,16 +212,21 @@ class Channels(commands.Cog):
     # ─────────────────────────────────────────────────────────────────────────
 
     @app_commands.command(name="desbloquear", description="Desbloquea el canal")
+    @app_commands.default_permissions(manage_channels=True)
     async def unlock(self, interaction: discord.Interaction):
-        if not await check_channel_perms(interaction):
-            return
-
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
             return await interaction.response.send_message(
                 "❌ Este comando solo puede usarse en canales de texto del servidor.",
                 ephemeral=True,
             )
+        if not await check_channel_perms(
+            interaction,
+            channel,
+            user_permission="manage_channels",
+            bot_permissions=("manage_channels",),
+        ):
+            return
 
         overwrites = channel.overwrites_for(interaction.guild.default_role)
         if overwrites.send_messages is not False:
@@ -140,9 +235,10 @@ class Channels(commands.Cog):
             )
 
         try:
+            overwrites.send_messages = None
             await channel.set_permissions(
                 interaction.guild.default_role,
-                send_messages=None,
+                overwrite=overwrites,
                 reason=f"Unlock | Mod: {interaction.user}",
             )
         except discord.Forbidden:
@@ -174,20 +270,25 @@ class Channels(commands.Cog):
     # ─────────────────────────────────────────────────────────────────────────
 
     @app_commands.command(name="limpiar", description="Elimina una cantidad de mensajes del canal")
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.describe(cantidad="Cantidad de mensajes a eliminar (1-100)")
     async def clear(
         self, interaction: discord.Interaction,
         cantidad: app_commands.Range[int, 1, 100],
     ):
-        if not await check_channel_perms(interaction):
-            return
-
         channel = interaction.channel
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return await interaction.response.send_message(
                 "❌ Este comando solo puede usarse en canales con historial de mensajes.",
                 ephemeral=True,
             )
+        if not await check_channel_perms(
+            interaction,
+            channel,
+            user_permission="manage_messages",
+            bot_permissions=("manage_messages", "read_message_history"),
+        ):
+            return
 
         await interaction.response.defer(ephemeral=True)
         try:
@@ -219,10 +320,21 @@ class Channels(commands.Cog):
     # ─────────────────────────────────────────────────────────────────────────
 
     @app_commands.command(name="limpiar_todo", description="Elimina TODOS los mensajes del canal (irreversible)")
+    @app_commands.default_permissions(manage_channels=True)
     async def clearall(self, interaction: discord.Interaction):
-        if not await check_channel_perms(interaction):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            return await interaction.response.send_message(
+                "❌ Este comando solo puede usarse en canales de texto normales.",
+                ephemeral=True,
+            )
+        if not await check_channel_perms(
+            interaction,
+            channel,
+            user_permission="manage_channels",
+            bot_permissions=("manage_channels",),
+        ):
             return
-
         embed = discord.Embed(
             title="⚠️ ADVERTENCIA — Limpieza Total",
             description=(
@@ -235,13 +347,6 @@ class Channels(commands.Cog):
         )
         embed.set_footer(text="Tienes 30 segundos para confirmar")
 
-        channel = interaction.channel
-        if not isinstance(channel, discord.TextChannel):
-            return await interaction.response.send_message(
-                "❌ Este comando solo puede usarse en canales de texto normales.",
-                ephemeral=True,
-            )
-
         view = ClearAllConfirmView(interaction.user.id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
@@ -250,20 +355,26 @@ class Channels(commands.Cog):
     # ─────────────────────────────────────────────────────────────────────────
 
     @app_commands.command(name="modo_lento", description="Configura el modo lento del canal")
+    @app_commands.default_permissions(manage_channels=True)
     @app_commands.describe(segundos="Segundos entre mensajes (0 para desactivar, máx 21600)")
     async def slowmode(
         self, interaction: discord.Interaction,
         segundos: app_commands.Range[int, 0, 21600],
     ):
-        if not await check_channel_perms(interaction):
-            return
-
         channel = interaction.channel
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return await interaction.response.send_message(
                 "❌ Este comando solo puede usarse en canales de texto o hilos.",
                 ephemeral=True,
             )
+        required = "manage_threads" if isinstance(channel, discord.Thread) else "manage_channels"
+        if not await check_channel_perms(
+            interaction,
+            channel,
+            user_permission=required,
+            bot_permissions=(required,),
+        ):
+            return
 
         try:
             await channel.edit(slowmode_delay=segundos)
@@ -297,16 +408,22 @@ class Channels(commands.Cog):
         name="channelsetup",
         description="Panel interactivo para configurar multimedia-only y autorreacción",
     )
+    @app_commands.default_permissions(manage_channels=True)
     async def channelsetup(self, interaction: discord.Interaction):
-        if not await check_channel_perms(interaction):
-            return
-
         channel = interaction.channel
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return await interaction.response.send_message(
                 "❌ Este comando solo puede usarse en canales de texto o hilos.",
                 ephemeral=True,
             )
+        required = "manage_threads" if isinstance(channel, discord.Thread) else "manage_channels"
+        if not await check_channel_perms(
+            interaction,
+            channel,
+            user_permission=required,
+            bot_permissions=("manage_messages",),
+        ):
+            return
 
         cfg = self.db.get_channel_config(channel.id)
         embed = self._build_setup_embed(channel, cfg)
@@ -348,7 +465,7 @@ class Channels(commands.Cog):
         embed.add_field(
             name="😀 Autorreacción",
             value=(
-                f"**{'✅ Activado' if react_list else '❌ Desactivado'}**\n"
+                f"**{'✅ Activado' if react_list and cfg.get('auto_react_enabled', 1) else '❌ Desactivado'}**\n"
                 f"Emojis: {' '.join(react_list) if react_list else '—'}"
             ),
             inline=False,
@@ -362,10 +479,12 @@ class Channels(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild:
+        if message.author.bot or not message.guild or message.webhook_id is not None:
             return
 
         cfg = self.db.get_channel_config(message.channel.id)
+        if cfg.get("guild_id") not in (None, message.guild.id):
+            return
 
         # ── Solo multimedia ───────────────────────────────────────────────
         if cfg.get("media_only", 0):
@@ -385,8 +504,13 @@ class Channels(commands.Cog):
                     break
 
             if not has_valid:
-                # Si el usuario tiene permisos de moderación, no eliminar
-                if not message.author.guild_permissions.manage_messages:
+                # Los bypasses también respetan los overwrites del canal.
+                if not has_effective_channel_permission(
+                    message.guild,
+                    message.channel,
+                    message.author,
+                    "manage_messages",
+                ):
                     try:
                         await message.delete()
                         await message.channel.send(
@@ -400,7 +524,7 @@ class Channels(commands.Cog):
                     return
 
         # ── Autorreacción ─────────────────────────────────────────────────
-        if cfg.get("auto_react"):
+        if cfg.get("auto_react") and cfg.get("auto_react_enabled", 1):
             try:
                 emojis = json.loads(cfg["auto_react"])
                 if not isinstance(emojis, list):
@@ -409,9 +533,11 @@ class Channels(commands.Cog):
                 logger.warning("auto_react inválido en canal %s", message.channel.id)
                 emojis = []
             for emoji in emojis:
+                if not isinstance(emoji, str) or not emoji.strip():
+                    continue
                 try:
                     await message.add_reaction(emoji)
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.NotFound):
                     logger.debug("Sin permisos para autorreaccionar en canal %s", message.channel.id)
                     break
                 except discord.HTTPException as exc:
@@ -429,7 +555,12 @@ class ClearAllConfirmView(discord.ui.View):
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("❌ Solo quien ejecutó el comando puede confirmar.", ephemeral=True)
             return False
-        return True
+        return await check_channel_perms(
+            interaction,
+            interaction.channel,
+            user_permission="manage_channels",
+            bot_permissions=("manage_channels",),
+        )
 
     @discord.ui.button(label="Confirmar", emoji="✅", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -461,11 +592,13 @@ class ClearAllConfirmView(discord.ui.View):
                     media_only=old_cfg.get("media_only", 0),
                     media_config=old_cfg.get("media_config"),
                     auto_react=old_cfg.get("auto_react"),
+                    auto_react_enabled=old_cfg.get("auto_react_enabled", 1),
                     slowmode=old_cfg.get("slowmode", 0),
                 )
                 db.delete_channel_config(channel.id)
 
-            await new_channel.send(
+            from cogs._managed_messages import send_managed
+            await send_managed(interaction.client, interaction.guild_id, "channels", new_channel.send,
                 embed=discord.Embed(
                     title="🧹 Canal limpiado",
                     description=(
@@ -505,7 +638,20 @@ class ChannelSetupView(discord.ui.View):
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("❌ Solo quien abrió el panel puede usarlo.", ephemeral=True)
             return False
-        return True
+        return await self._can_manage(interaction)
+
+    async def _can_manage(self, interaction: discord.Interaction) -> bool:
+        channel = interaction.guild.get_channel(self.channel_id) if interaction.guild else None
+        if channel is None:
+            await interaction.response.send_message("❌ El canal configurado ya no existe.", ephemeral=True)
+            return False
+        required = "manage_threads" if isinstance(channel, discord.Thread) else "manage_channels"
+        return await check_channel_perms(
+            interaction,
+            channel,
+            user_permission=required,
+            bot_permissions=("manage_messages",),
+        )
 
     async def _refresh(self, interaction: discord.Interaction):
         cfg = self.cog.db.get_channel_config(self.channel_id)
@@ -572,6 +718,8 @@ class MediaTypesModal(discord.ui.Modal, title="Tipos de multimedia permitidos"):
         self.parent = parent
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await self.parent._can_manage(interaction):
+            return
         types = [t.strip().lower() for t in self.types_input.value.split(",") if t.strip()]
         valid = {"image", "video", "audio", "application"}
         types = [t for t in types if t in valid]
@@ -598,12 +746,20 @@ class AutoReactModal(discord.ui.Modal, title="Configurar autorreacción"):
         self.parent = parent
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await self.parent._can_manage(interaction):
+            return
         emojis = self.emojis_input.value.strip().split()
         if not emojis:
             return await interaction.response.send_message("❌ Ingresa al menos un emoji.", ephemeral=True)
+        try:
+            await validate_auto_reactions(self.parent.cog.bot, interaction.guild, interaction.channel, emojis)
+        except ValueError as exc:
+            return await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+        except discord.HTTPException:
+            return await interaction.response.send_message("❌ No pude comprobar los emojis con Discord. Inténtalo de nuevo.", ephemeral=True)
         self.parent.cog.db.set_channel_config(
             self.parent.channel_id, interaction.guild_id,
-            auto_react=json.dumps(emojis),
+            auto_react=json.dumps(emojis), auto_react_enabled=1,
         )
         await self.parent._refresh(interaction)
 

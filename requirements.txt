@@ -1,4 +1,4 @@
-discord.py>=2.4.0  # fetch_application_emojis (Application Emojis) requiere 2.4+
+discord.py[voice]>=2.7.1,<3  # voice extra instala PyNaCl + davey; requerido para radio/voz
 python-dotenv>=1.0.0
 # Web API (reemplaza Flask)
 fastapi>=0.115.0
@@ -10,19 +10,20 @@ httpx>=0.27.0
 requests>=2.31.0
 
 # Audio / Voice
-PyNaCl>=1.5.0
 yt-dlp>=2024.11.6
 
 # AI / Export
 google-genai>=0.3.0
 chat-exporter>=2.5.0
+ddgs>=9.16.1,<10
+playwright>=1.64.1,<2
 
-# Translation
-googletrans==4.0.0rc1
+# Translation (optional)
+# googletrans==4.0.0rc1 pins httpx==0.13.3 and conflicts with the API stack
+# (FastAPI/OAuth/embed routes use httpx>=0.27). Keep it disabled unless a
+# translation feature is reintroduced with a compatible library.
+# googletrans==4.0.0rc1
 
 # Optional DB drivers (uncomment the one you use)
 # psycopg2-binary>=2.9.0  # PostgreSQL
 # PyMySQL>=1.1.0         # MariaDB / MySQL
-
-# Optional / extras
-# davey  # optional voice backend, uncomment if used
